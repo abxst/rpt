@@ -31,8 +31,8 @@ fn validate_record(record: &PinRecord) -> Result<()> {
         _ => false,
     };
     if !valid { bail!("unsupported pin selector: {}", record.pin); }
-    if !(-1_000..=1_000).contains(&record.priority) {
-        bail!("pin priority outside supported diagnostic range: {}", record.priority);
+    if record.priority == 0 {
+        bail!("APT pin priority zero has undefined behavior and is unsupported");
     }
     Ok(())
 }
@@ -67,6 +67,63 @@ pub fn evaluate(
             priority,
         }
     }).collect())
+}
+
+/// Candidate diagnostic for the restricted policy subset. This is NOT an
+/// authoritative apt-cache policy result, nor permission to install/upgrade.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CandidatePreview {
+    pub installed: Option<String>,
+    pub candidate: Option<String>,
+    /// One entry per unique version; each version receives the highest
+    /// applicable repository occurrence priority (plus installed priority 100).
+    pub priorities: Vec<(String, i32)>,
+}
+
+/// APT-style priority ordering for a restricted, fully validated set of pins.
+/// Higher priority wins, then newer Debian version. Downgrades are prohibited
+/// unless the candidate's effective priority is > 1000. Version 0 priority
+/// is rejected, as its behavior is not defined by APT policy.
+pub fn preview_candidate(
+    package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
+    installed: Option<&str>,
+) -> Result<CandidatePreview> {
+    use std::{cmp::Ordering, collections::BTreeMap};
+    let evaluated = evaluate(package, origins, records)?;
+    let mut values = BTreeMap::<String, i32>::new();
+    for entry in evaluated {
+        values.entry(entry.version).and_modify(|p| *p = (*p).max(entry.priority))
+            .or_insert(entry.priority);
+    }
+    if let Some(current) = installed {
+        crate::version::compare(current, current)?;
+        values.entry(current.to_owned()).and_modify(|p| *p = (*p).max(100))
+            .or_insert(100);
+    }
+    let mut ordered = values.into_iter().collect::<Vec<_>>();
+    // Fail fast on invalid versions before sorting; comparator errors must not
+    // be silently converted to equality.
+    for (version, _) in &ordered { crate::version::compare(version, version)?; }
+    ordered.sort_by(|(a, _), (b, _)| crate::version::compare(b, a).unwrap_or(Ordering::Equal));
+    let mut best: Option<(&str, i32)> = None;
+    for (version, priority) in &ordered {
+        if *priority <= 0 { continue; }
+        if let Some(current) = installed {
+            if crate::version::compare(version, current)? == Ordering::Less && *priority <= 1000 {
+                continue;
+            }
+        }
+        if best.is_none_or(|(chosen, p)| *priority > p
+            || (*priority == p && crate::version::compare(version, chosen)
+                .is_ok_and(|order| order == Ordering::Greater))) {
+            best = Some((version, *priority));
+        }
+    }
+    Ok(CandidatePreview {
+        installed: installed.map(str::to_owned),
+        candidate: best.map(|(version, _)| version.to_owned()),
+        priorities: ordered,
+    })
 }
 
 #[cfg(test)]
@@ -109,13 +166,42 @@ mod tests {
         }
     }
     #[test]
+    fn candidate_priorities_no_downgrade_and_explicit_downgrade() {
+        let origins = [origin("1.0", "stable"), origin("2.0", "testing"), origin("3.0", "testing")];
+        let no_pin = preview_candidate("bash", &origins, &[], Some("2.0")).unwrap();
+        assert_eq!(no_pin.candidate.as_deref(), Some("3.0"));
+        let stable = [PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 999 }];
+        assert_eq!(preview_candidate("bash", &origins, &stable, Some("2.0")).unwrap().candidate.as_deref(), Some("3.0"));
+        let threshold = [PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 1000 }];
+        assert_eq!(preview_candidate("bash", &origins, &threshold, Some("2.0")).unwrap().candidate.as_deref(), Some("3.0"));
+        let forced = [PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 1001 }];
+        assert_eq!(preview_candidate("bash", &origins, &forced, Some("2.0")).unwrap().candidate.as_deref(), Some("1.0"));
+        assert_eq!(preview_candidate("bash", &[], &[], Some("2.0")).unwrap().candidate.as_deref(), Some("2.0"));
+        assert!(preview_candidate("bash", &[], &[], None).unwrap().candidate.is_none());
+    }
+    #[test]
+    fn highest_priority_occurrence_wins_and_negative_pins_are_skipped() {
+        let origins = [origin("1.0", "stable"), origin("1.0", "testing"), origin("2.0", "stable")];
+        let pins = [
+            PinRecord { package: "bash".into(), pin: "release a=testing".into(), priority: 850 },
+            PinRecord { package: "bash".into(), pin: "version 2.0".into(), priority: -1 },
+        ];
+        let result = preview_candidate("bash", &origins, &pins, None).unwrap();
+        assert_eq!(result.candidate.as_deref(), Some("1.0"));
+        assert_eq!(result.priorities, vec![("2.0".into(), -1), ("1.0".into(), 850)]);
+        assert_eq!(preview_candidate("bash", &origins, &pins, Some("2.0")).unwrap().candidate.as_deref(), Some("2.0"));
+        assert_eq!(preview_candidate("bash", &origins, &pins, Some("0.5")).unwrap().candidate.as_deref(), Some("1.0"));
+    }
+    #[test]
     fn first_matching_rule_wins_and_unsupported_priorities_refused() {
         let pins = [
             PinRecord { package: "bash".into(), pin: "version 1.0".into(), priority: 700 },
             PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 600 },
         ];
         assert_eq!(evaluate("bash", &[origin("1.0", "stable")], &pins).unwrap()[0].priority, 700);
-        let bad = [PinRecord { priority: 1001, ..pins[0].clone() }];
+        let bad = [PinRecord { priority: 0, ..pins[0].clone() }];
         assert!(evaluate("bash", &[], &bad).is_err());
+        let allowed = [PinRecord { priority: 1001, ..pins[0].clone() }];
+        assert_eq!(evaluate("bash", &[origin("1.0", "stable")], &allowed).unwrap()[0].priority, 1001);
     }
 }
