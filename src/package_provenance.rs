@@ -153,6 +153,61 @@ fn scan_index(path: &Path, visitor: impl FnMut(&Fields)->Result<()>) -> Result<(
     };
     scan(reader,visitor).with_context(||format!("reading {}",path.display()))
 }
+/// Fields from the *signed* Release body, kept distinct from local source settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReleaseIdentity {
+    pub origin: Option<String>,
+    pub label: Option<String>,
+    pub archive: Option<String>,
+    pub codename: Option<String>,
+}
+
+/// Parse human-readable Release fields. The caller must first validate the
+/// InRelease signature; parsing this string alone does NOT authenticate it.
+fn parse_release_identity(signed: &str) -> Result<ReleaseIdentity> {
+    if !signed.starts_with("-----BEGIN PGP SIGNED MESSAGE-----") {
+        bail!("not a clearsigned InRelease");
+    }
+    let (_, body) = signed.split_once("\n\n").context("invalid clearsigned InRelease header")?;
+    let (body, _) = body.split_once("-----BEGIN PGP SIGNATURE-----")
+        .context("unsigned InRelease")?;
+    let mut result = ReleaseIdentity::default();
+    let mut seen = BTreeSet::new();
+    for line in body.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(' ') || line.starts_with('\t') { continue; }
+        let Some((key, value)) = line.split_once(':') else { continue; };
+        let slot = match key {
+            "Origin" => &mut result.origin,
+            "Label" => &mut result.label,
+            "Suite" | "Archive" => &mut result.archive,
+            "Codename" => &mut result.codename,
+            _ => continue,
+        };
+        // A duplicate/conflicting field is ambiguous for future policy rules.
+        if !seen.insert(key) || slot.is_some() {
+            bail!("duplicate signed Release identity field: {key}");
+        }
+        let value = value.trim();
+        if value.is_empty() || value.len() > 4096
+            || value.chars().any(char::is_control) {
+            bail!("invalid signed Release identity field: {key}");
+        }
+        *slot = Some(value.to_owned());
+    }
+    Ok(result)
+}
+
+fn release_component(index_path: &str) -> Result<String> {
+    let (component, _) = index_path.split_once('/')
+        .context("Packages index lacks repository component")?;
+    if component.is_empty() || !component.bytes().all(|b|
+        b.is_ascii_alphanumeric() || b"-_".contains(&b)) {
+        bail!("unsupported repository component");
+    }
+    Ok(component.to_owned())
+}
+
 /// Repository-scoped package occurrence, not a candidate or an APT pin.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VerifiedVersionOrigin {
@@ -161,6 +216,8 @@ pub struct VerifiedVersionOrigin {
     pub repository_uri: String,
     pub suite: String,
     pub index_path: String,
+    pub component: String,
+    pub release: ReleaseIdentity,
 }
 
 /// Enumerate a single package's occurrences only after verifying GPG signatures,
@@ -193,7 +250,9 @@ pub fn verified_version_origins(
                 .context("missing signed cache provenance: run rpt update again")?
         )?;
         validate_repo(&dir, &meta)?;
+        let release = parse_release_identity(&fs::read_to_string(dir.join("InRelease"))?)?;
         for index in &meta.indexes {
+            let component = release_component(&index.release_path)?;
             scan_index(&dir.join(&index.local_file), |field| {
                 if field.name == name && (field.arch == arch || field.arch == "all") {
                     version::compare(&field.version, &field.version)?;
@@ -203,6 +262,8 @@ pub fn verified_version_origins(
                         repository_uri: meta.uri.clone(),
                         suite: meta.suite.clone(),
                         index_path: index.release_path.clone(),
+                        component: component.clone(),
+                        release: release.clone(),
                     });
                 }
                 Ok(())
@@ -215,6 +276,7 @@ pub fn verified_version_origins(
             .then_with(|| a.repository_uri.cmp(&b.repository_uri))
             .then_with(|| a.suite.cmp(&b.suite))
             .then_with(|| a.index_path.cmp(&b.index_path))
+            .then_with(|| a.architecture.cmp(&b.architecture))
     });
     Ok(result)
 }
@@ -306,5 +368,31 @@ mod tests {
         let h="aa".repeat(32);
         let input=format!("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nDate: Tue, 10 Nov 2026 09:00:00 UTC\nSHA256:\n {h} 7 main/binary-amd64/Packages.xz\n-----BEGIN PGP SIGNATURE-----");
         assert_eq!(signed_hashes(&input).unwrap()["main/binary-amd64/Packages.xz"].1,7);
+    }
+}
+
+
+#[cfg(test)]
+mod release_identity_tests {
+    use super::*;
+
+    #[test]
+    fn reads_only_signed_release_header_fields() {
+        let signed = "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Ubuntu\nLabel: Ubuntu\nSuite: noble-updates\nCodename: noble\nSHA256:\n abc 123 main/binary-amd64/Packages.xz\n-----BEGIN PGP SIGNATURE-----\nsignature\n";
+        let fields = parse_release_identity(signed).unwrap();
+        assert_eq!(fields.origin.as_deref(), Some("Ubuntu"));
+        assert_eq!(fields.label.as_deref(), Some("Ubuntu"));
+        assert_eq!(fields.archive.as_deref(), Some("noble-updates"));
+        assert_eq!(fields.codename.as_deref(), Some("noble"));
+        assert_eq!(release_component("main/binary-amd64/Packages.xz").unwrap(), "main");
+    }
+    #[test]
+    fn refuses_ambiguous_release_identity() {
+        let dup = "-----BEGIN PGP SIGNED MESSAGE-----\n\nOrigin: Ubuntu\nOrigin: Other\n-----BEGIN PGP SIGNATURE-----\n";
+        assert!(parse_release_identity(dup).is_err());
+        let conflicting_alias = "-----BEGIN PGP SIGNED MESSAGE-----\n\nSuite: stable\nArchive: testing\n-----BEGIN PGP SIGNATURE-----\n";
+        assert!(parse_release_identity(conflicting_alias).is_err());
+        assert!(parse_release_identity("Origin: Ubuntu").is_err());
+        assert!(release_component("../binary-amd64/Packages.xz").is_err());
     }
 }

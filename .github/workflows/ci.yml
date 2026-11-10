@@ -153,6 +153,8 @@ jobs:
           test -s "$RUNNER_TEMP/rpt-origins"
           grep -Fq 'archive.ubuntu.com/ubuntu' "$RUNNER_TEMP/rpt-origins"
           grep -Eq ' noble(-updates)? ' "$RUNNER_TEMP/rpt-origins"
+          # Verify identity fields parsed from signed Ubuntu InRelease.
+          grep -Eq ' main Ubuntu Ubuntu noble(-updates)? noble$' "$RUNNER_TEMP/rpt-origins"
           bad="$RUNNER_TEMP/rpt-corrupt-origins"
           cp -a "$cache" "$bad"
           index="$(find "$bad" -name 'index-*.xz' -print -quit)"
