@@ -1,6 +1,7 @@
 //! Fail-closed dependency planning preview. NEVER executes dpkg or mutates packages.
-//! This is not APT's full dependency resolver: no virtual Provides, architecture
-//! qualifiers, pinning, package holds, triggers or removal strategies.
+//! This is not APT's full dependency resolver: only uniquely resolvable
+//! alternatives and virtual Provides; no architecture qualifiers, pinning,
+//! package holds, triggers, removals or general backtracking.
 use crate::{cache_query, metadata_query::{self, PackageSummary}, version};
 use anyhow::{bail, Context, Result};
 use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path};
@@ -62,6 +63,29 @@ fn satisfies(version_string: &str, required: &Requirement) -> Result<bool> {
     })
 }
 
+/// A conservative, single-name provider list. Debian versioned virtual
+/// Provides require an exact "=", not a range. Never use a provider's *own*
+/// version as proof of a versioned virtual capability.
+fn provides(summary: &PackageSummary) -> Result<Vec<Requirement>> {
+    if summary.provides.trim().is_empty() { return Ok(Vec::new()); }
+    summary.provides.split(',').map(|part| {
+        if part.contains('|') { bail!("unsupported alternatives in Provides for {}", summary.name); }
+        let cap = parse_atom(part)?;
+        if cap.constraint.as_ref().is_some_and(|(op, _)| op != "=") {
+            bail!("unsupported version relation in Provides for {}", summary.name);
+        }
+        Ok(cap)
+    }).collect()
+}
+
+fn capability_satisfies(cap: &Requirement, required: &Requirement) -> Result<bool> {
+    if cap.name != required.name { return Ok(false); }
+    if required.constraint.is_none() { return Ok(true); }
+    // Unversioned Provides must never satisfy a versioned dependency.
+    let Some((_, version)) = &cap.constraint else { return Ok(false) };
+    satisfies(version, required)
+}
+
 struct Solver<'a> {
     catalog: &'a BTreeMap<String, PackageSummary>,
     installed: &'a BTreeMap<String, String>,
@@ -72,7 +96,37 @@ struct Solver<'a> {
 }
 
 impl Solver<'_> {
+    /// Return the concrete package to install only when there is exactly one
+    /// verified catalog candidate. No automatic preference between multiple
+    /// virtual providers or mutually satisfiable alternatives.
+    fn concrete(&self, required: &Requirement) -> Result<Option<String>> {
+        if let Some(real) = self.catalog.get(&required.name) {
+            return Ok(if satisfies(&real.version, required)? {
+                Some(required.name.clone())
+            } else { None });
+        }
+        let mut candidates = Vec::new();
+        for (name, item) in self.catalog {
+            let caps = provides(item)?;
+            if caps.iter().any(|cap| capability_satisfies(cap, required).unwrap_or(false)) {
+                candidates.push(name.clone());
+                if candidates.len() > 1 { break; }
+            }
+        }
+        if candidates.len() > 1 {
+            bail!("ambiguous virtual package {}: multiple providers; full APT solver required", required.name);
+        }
+        Ok(candidates.pop())
+    }
+
     fn resolve(&mut self, requested: &Requirement) -> Result<()> {
+        let concrete = self.concrete(requested)?
+            .with_context(|| format!("unresolved dependency {} (no matching real package or provider)", requested.name))?;
+        let selected = Requirement { name: concrete.clone(), constraint: None };
+        self.resolve_concrete(&selected)
+    }
+
+    fn resolve_concrete(&mut self, requested: &Requirement) -> Result<()> {
         if self.done.contains(&requested.name) {
             let current = self.catalog.get(&requested.name)
                 .context("already resolved package missing from catalog")?;
@@ -109,11 +163,19 @@ impl Solver<'_> {
                 }
             }
             if fulfilled { continue; }
-            // Only pick an unambiguous dependency; never guess between options.
-            if group.len() != 1 {
-                bail!("unresolved alternatives for {}: choose a full APT resolver", current.name);
+            // Resolve only a single concrete viable option. If more than one
+            // alternative is possible, do not emulate APT's preference rules.
+            let mut options = BTreeSet::new();
+            for alternative in &group {
+                if let Some(concrete) = self.concrete(alternative)? {
+                    options.insert(concrete);
+                }
             }
-            self.resolve(&group[0])?;
+            if options.len() != 1 {
+                bail!("unresolved or ambiguous alternatives for {}: full APT resolver required", current.name);
+            }
+            let selected = options.into_iter().next().expect("exactly one option");
+            self.resolve_concrete(&Requirement { name: selected, constraint: None })?;
         }
         self.visiting.remove(&requested.name);
         self.done.insert(requested.name.clone());
@@ -189,6 +251,62 @@ mod tests {
         let alt = BTreeMap::from([("a".into(), item("a", "1", "missing | b"))]);
         assert!(solve(&alt, &BTreeMap::new(), "a").is_err());
         assert!(parse_atom("libc6:any").is_err());
+    }
+    #[test]
+    fn unique_available_alternative_is_planned_without_guessing() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "missing | lib")),
+            ("lib".into(), item("lib", "2", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["lib", "app"]);
+        let ambiguous = BTreeMap::from([
+            ("app".into(), item("app", "1", "lib | other")),
+            ("lib".into(), item("lib", "2", "")),
+            ("other".into(), item("other", "1", "")),
+        ]);
+        assert!(solve(&ambiguous, &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
+    fn single_virtual_provider_with_explicit_version() {
+        let mut provider = item("provider", "9.0", "");
+        provider.provides = "virtual-api (= 2.1)".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2.0)")),
+            ("provider".into(), provider),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["provider", "app"]);
+        let bad = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2.2)")),
+            ("provider".into(), catalog["provider"].clone()),
+        ]);
+        assert!(solve(&bad, &BTreeMap::new(), "app").is_err());
+        let mut unversioned = catalog["provider"].clone();
+        unversioned.provides = "virtual-api".into();
+        let bad = BTreeMap::from([
+            ("app".into(), catalog["app"].clone()), ("provider".into(), unversioned),
+        ]);
+        assert!(solve(&bad, &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
+    fn ambiguous_virtual_providers_and_conflicting_provider_fail_closed() {
+        let mut first = item("first", "1", "");
+        first.provides = "service-api".into();
+        let mut second = item("second", "1", "");
+        second.provides = "service-api".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "service-api")),
+            ("first".into(), first.clone()),
+            ("second".into(), second),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+        first.conflicts = "old".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "service-api")),
+            ("first".into(), first),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
     }
     #[test]
     fn conflict_and_downgrade_fail_closed() {
