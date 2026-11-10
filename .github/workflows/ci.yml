@@ -66,3 +66,21 @@ jobs:
             echo 'Unsupported APT settings were accepted' >&2
             exit 1
           fi
+      - name: Fail closed for bad repository signing key
+        run: |
+          sources="$RUNNER_TEMP/rpt-bad-signature"
+          target="$RUNNER_TEMP/rpt-bad-signature-cache"
+          mkdir -p "$sources/sources.list.d"
+          cat > "$sources/sources.list.d/ubuntu.sources" <<'EOF'
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu
+          Suites: noble
+          Components: main
+          Signed-By: /nonexistent/rpt-test-keyring.gpg
+          EOF
+          if timeout 120 ./target/debug/rpt --log-format json update --root "$sources" --output "$target" --workers 2 --no-progress 1>"$RUNNER_TEMP/rpt-bad.stdout" 2>"$RUNNER_TEMP/rpt-bad.stderr"; then
+            echo 'Unsigned metadata was accepted' >&2
+            exit 1
+          fi
+          grep -q '"code":"DOWNLOAD_SIGNATURE"' "$RUNNER_TEMP/rpt-bad.stderr"
+          test "$(find "$target" -name InRelease -type f | wc -l)" -eq 0
