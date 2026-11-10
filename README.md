@@ -377,3 +377,7 @@ The dpkg installed-state reader now retains an explicit (package name, architect
 ### Repository catalog keyed by binary architecture
 
 The exploratory Packages catalog now retains package identity as `(name, architecture)` before constructing its limited native-only solver view. This distinguishes native `amd64`/`arm64` binary metadata from `Architecture: all`, prevents silent name overwrites and rejects conflicting metadata for identical name/architecture/version entries. When native and `all` entries share a name, the old name-keyed solver view **fails closed** until per-architecture candidate selection is implemented. Foreign-architecture dependencies and co-installation remain unsupported; the change neither performs dpkg transactions nor claims full APT parity.
+
+### Keyed candidate selection in read-only dependency plans
+
+Candidate metadata is now inserted against its exact `(name, architecture)` repository identity **before** the native-only solver projection. RPT rejects candidates that disagree with the selected native vs `Architecture: all` identity and refuses ambiguous same-name native/all catalog entries rather than falling back to an arbitrary package. Signed Release/index validation and policy pinning remain prerequisites to choosing the candidate. This increment does **not** implement cross-architecture solver state, `Multi-Arch: same` co-installation or foreign package transactions; the read-only solver still performs a guarded name-keyed projection.
