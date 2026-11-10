@@ -1,5 +1,5 @@
 //! Concurrent, checksummed download engine with optional HTTP byte-range splitting.
-use crate::{validate_package, Package};
+use crate::{error::{classify, ErrorCategory}, validate_package, Package};
 use anyhow::{bail, Context, Result};
 use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -79,7 +79,7 @@ impl Downloader {
             async move {
                 let result = this.download_one_with_bar(&package, &root, &bar).await;
                 if result.is_err() { bar.abandon_with_message("failed"); }
-                result
+                (package.name, result)
             }
         }))
         .buffer_unordered(self.package_workers)
@@ -87,16 +87,29 @@ impl Downloader {
         let c = &runner.counters;
         let elapsed = started.elapsed().as_secs_f64();
         let bytes = c.bytes.load(Ordering::Relaxed);
+        let failed = results.iter().filter(|(_, result)| result.is_err()).count();
         println!("Download summary:");
-        println!("  Packages: {}/{} verified ({} cached)",
-            c.verified.load(Ordering::Relaxed), count, c.cache_hits.load(Ordering::Relaxed));
+        println!("  Packages: {}/{} verified ({} failed, {} cached)",
+            c.verified.load(Ordering::Relaxed), count, failed, c.cache_hits.load(Ordering::Relaxed));
         println!("  Transferred: {:.2} MiB", bytes as f64 / 1_048_576.0);
         println!("  HTTP requests: {} ({} range parts)",
             c.requests.load(Ordering::Relaxed), c.range_parts.load(Ordering::Relaxed));
         println!("  Retries: {}", c.retries.load(Ordering::Relaxed));
         println!("  Elapsed: {:.2}s | Throughput: {:.2} MiB/s",
             elapsed, (bytes as f64 / 1_048_576.0) / elapsed.max(0.000001));
-        for result in results { result?; }
+        // Emit one machine-readable category prefix per failed package on stderr.
+        let mut has_system_error = false;
+        for (name, result) in results {
+            if let Err(error) = result {
+                let category = classify(&error, ErrorCategory::Download);
+                has_system_error |= category == ErrorCategory::System;
+                eprintln!("rpt: error [{category}] package {name}: {error:#}");
+            }
+        }
+        if failed > 0 {
+            return Err(anyhow::anyhow!("{failed} of {count} package(s) failed")
+                .context(if has_system_error { ErrorCategory::System } else { ErrorCategory::Download }));
+        }
         Ok(())
     }
 
@@ -107,12 +120,12 @@ impl Downloader {
     async fn download_one_with_bar(
         &self, package: &Package, dest: &Path, bar: &ProgressBar,
     ) -> Result<PathBuf> {
-        validate_package(package)?;
+        validate_package(package).context(ErrorCategory::System)?;
         let target = dest.join(&package.filename);
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).await?;
+            fs::create_dir_all(parent).await.context(ErrorCategory::System)?;
         }
-        if fs::try_exists(&target).await? && verify(&target, &package.sha256).await? {
+        if fs::try_exists(&target).await.context(ErrorCategory::System)? && verify(&target, &package.sha256).await.context(ErrorCategory::System)? {
             self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
             self.counters.verified.fetch_add(1, Ordering::Relaxed);
             bar.set_position(package.size);
@@ -143,11 +156,11 @@ impl Downloader {
             }
         }
         bar.set_message("verifying");
-        if !verify(&temp, &package.sha256).await? {
+        if !verify(&temp, &package.sha256).await.context(ErrorCategory::System)? {
             let _ = fs::remove_file(&temp).await;
             bail!("SHA-256 mismatch: {}", package.name);
         }
-        fs::rename(&temp, &target).await?;
+        fs::rename(&temp, &target).await.context(ErrorCategory::System)?;
         self.counters.verified.fetch_add(1, Ordering::Relaxed);
         bar.finish_with_message("verified");
         Ok(target)
@@ -162,8 +175,8 @@ impl Downloader {
         }
         let count = (self.segments as u64).min(package.size) as usize;
         bar.set_message(format!("{count} segments"));
-        let file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await?;
-        file.set_len(package.size).await?;
+        let file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await.context(ErrorCategory::System)?;
+        file.set_len(package.size).await.context(ErrorCategory::System)?;
         drop(file);
         let mut tasks = tokio::task::JoinSet::new();
         for idx in 0..count {
@@ -215,18 +228,18 @@ impl Downloader {
         if let Some(len) = response.content_length() {
             if len != package.size { bail!("unexpected Content-Length for {}", package.name); }
         }
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await?;
+        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await.context(ErrorCategory::System)?;
         let mut written = 0u64;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             written += chunk.len() as u64;
             if written > package.size { bail!("download exceeds declared size"); }
-            file.write_all(&chunk).await?;
+            file.write_all(&chunk).await.context(ErrorCategory::System)?;
             self.counters.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
             bar.inc(chunk.len() as u64);
         }
-        file.flush().await?;
+        file.flush().await.context(ErrorCategory::System)?;
         if written != package.size { bail!("truncated download of {}", package.name); }
         Ok(())
     }
@@ -258,19 +271,19 @@ async fn fetch_range(client: Client, url: String, path: PathBuf, range: (u64, u6
     if !valid_content_range(content_range, start, end, total_size) {
         bail!("incorrect Content-Range: {content_range}");
     }
-    let mut file = OpenOptions::new().write(true).open(&path).await?;
-    file.seek(SeekFrom::Start(start)).await?;
+    let mut file = OpenOptions::new().write(true).open(&path).await.context(ErrorCategory::System)?;
+    file.seek(SeekFrom::Start(start)).await.context(ErrorCategory::System)?;
     let mut written = 0u64;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         written += chunk.len() as u64;
         if written > end - start + 1 { bail!("range overflow"); }
-        file.write_all(&chunk).await?;
+        file.write_all(&chunk).await.context(ErrorCategory::System)?;
         counters.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         bar.inc(chunk.len() as u64);
     }
-    file.flush().await?;
+    file.flush().await.context(ErrorCategory::System)?;
     if written != end - start + 1 { bail!("range truncated"); }
     Ok(())
 }
