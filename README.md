@@ -214,3 +214,18 @@ as the basis for actual package transactions.
 Ubuntu CI compares an uncomplicated `bash` candidate with
 `apt-cache policy bash`, and unit tests reject pinning and target-release
 configurations.
+
+### Read-only show/search/list from isolated cache (alpha.17)
+
+After an authenticated `rpt update --output ./rpt-lists`, the following commands
+stream Packages metadata from cached xz, gzip or raw indexes:
+
+- `rpt show --cache ./rpt-lists bash`: highest **published** version of bash in this cache; its fields include description, section and dependencies.
+- `rpt search --cache ./rpt-lists --limit 30 bash`: case-insensitive substring search on package names and descriptions, not apt's regular expression search.
+- `rpt list --cache ./rpt-lists --prefix python3 --limit 30`: alphabetically sorted package names and latest published versions.
+
+The read-only commands preserve bounded result sets (1–1000) and process index
+stanzas one at a time. Results are **not** APT Candidate selections and not
+fully equivalent to `apt show/search/list`; package origin, installed state,
+pinning, holds and multiarch policy are not shown. Repository cache is not
+reverified at query time and must be protected from local tampering.
