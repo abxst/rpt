@@ -361,3 +361,11 @@ CI includes a separate `ubuntu-24.04-arm` GitHub-hosted runner (aarch64, **no QE
 ### Read-only dpkg hold, Essential and Protected safety guards
 
 Dependency planning treats both `install ok installed` and `hold ok installed` as installed package states. A planned version change of an installed package marked `hold`, `Essential: yes`, or `Protected: yes` is **rejected**; unchanged packages remain allowed. The solver checks these guards during bounded alternative backtracking and requires installed version/safety metadata to agree, with unknown safety flags failing closed. No force-override is exposed. These protections apply to the experimental read-only dependency planner; **no dpkg operation is executed**. They do not yet implement all APT hold semantics, recovery or transactional safeguards.
+
+### Multi-Arch metadata and narrow native `:any` support
+
+RPT now records and validates the Debian `Multi-Arch` Packages field, with the default `no` and explicit `same`, `foreign`, and `allowed`. Invalid values cause metadata parsing to fail. Read-only `rpt show` reports the parsed value.
+
+In the experimental **native-only** dependency plan, `foo:any` can match a *concrete, native-architecture* `foo` candidate only when its selected metadata explicitly declares `Multi-Arch: allowed`. An unversioned or versioned `:any` dependency on `no`, `same`, or `foreign` is not accepted. Foreign-architecture installation, virtual `Provides:any`, co-installation (`Multi-Arch: same`) and package-manager architecture selection are still not implemented. The parser continues to refuse unsupported architecture/build-profile expressions; **no dpkg changes are made**.
+
+This is a bounded read-only diagnostic, **not** full Debian Multi-Arch resolution. See Debian Policy §5.6.34 for the semantics of the four values.
