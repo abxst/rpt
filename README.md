@@ -177,3 +177,21 @@ Existing limitations remain: compressed indexes are retained as received;
 repository Release-info change confirmation, By-Hash force modes, APT's
 full configuration and transports, complete APT pinning and dpkg integration
 are not implemented. Do not replace system APT.
+
+### Streaming cache and installed-state queries (alpha.15)
+
+`rpt cache-versions --cache ./rpt-lists --package bash --architecture amd64`
+opens RPT's **isolated cache previously populated by a verified `rpt update`**,
+streams `index-*.xz`, `index-*.gz` or `index-*.raw`, and deduplicates and
+sorts package versions using Debian version ordering. The scanner does not
+load complete index contents into memory. This is a read-only query and does
+not re-verify cache signatures/hashes against its source (the local cache is
+assumed untampered).
+
+`rpt installed-version --status /var/lib/dpkg/status --package bash`
+reads dpkg's installed state without invoking or modifying dpkg, and excludes
+packages only in residual-config state. CI compares both commands against
+`apt-cache madison bash` and `dpkg-query` on Ubuntu 24.04.
+
+These commands do NOT implement `apt-cache policy`, dependency resolution,
+candidate selection, multi-arch policy or repository pin priorities.
