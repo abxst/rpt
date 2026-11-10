@@ -211,10 +211,46 @@ pub fn catalog_by_arch(
     Ok(result)
 }
 
+/// Find one unambiguous binary identity in the native-only policy scope.
+/// The candidate's architecture comes from verified Packages metadata; the
+/// caller must not infer it from the architecture requested on the CLI.
+pub fn native_key_for(
+    keyed: &BTreeMap<PackageKey, PackageSummary>,
+    package: &str,
+    architecture: &str,
+) -> Result<PackageKey> {
+    let native = PackageKey { name: package.into(), architecture: architecture.into() };
+    let common = PackageKey { name: package.into(), architecture: "all".into() };
+    match (keyed.contains_key(&native), keyed.contains_key(&common)) {
+        (true, false) => Ok(native),
+        (false, true) => Ok(common),
+        (true, true) => bail!("ambiguous native/all repository metadata for {package}; architecture-aware solver required"),
+        (false, false) => bail!("no repository metadata for {package} on {architecture}"),
+    }
+}
+
+/// Replace only the exact candidate binary identity. A policy candidate may
+/// come from an older Packages stanza, but never from a different architecture.
+pub fn insert_native_candidate(
+    keyed: &mut BTreeMap<PackageKey, PackageSummary>,
+    item: PackageSummary, architecture: &str,
+) -> Result<PackageKey> {
+    if item.architecture != architecture && item.architecture != "all" {
+        bail!("candidate {} belongs to foreign architecture {}", item.name, item.architecture);
+    }
+    let selected = native_key_for(keyed, &item.name, architecture)?;
+    if selected.architecture != item.architecture {
+        bail!("candidate {} architecture {} disagrees with catalog identity {}",
+            item.name, item.architecture, selected.architecture);
+    }
+    keyed.insert(selected.clone(), item);
+    Ok(selected)
+}
+
 /// Convert a keyed metadata index to the old native-only solver view.
 /// The solver does not yet distinguish same-name native and all candidates:
 /// reject that ambiguity rather than overwrite one with the other.
-fn native_catalog_projection(
+pub(crate) fn native_catalog_projection(
     keyed: BTreeMap<PackageKey, PackageSummary>,
 ) -> Result<BTreeMap<String, PackageSummary>> {
     let mut result = BTreeMap::new();
@@ -446,6 +482,35 @@ mod tests {
         assert!(exact_version(&root, "amd64", "lib", "1").is_err());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn keyed_candidate_replaces_only_validated_binary_identity() {
+        let native = PackageKey { name: "lib".into(), architecture: "amd64".into() };
+        let foreign = PackageKey { name: "lib".into(), architecture: "arm64".into() };
+        let mut old = PackageSummary {
+            name: "lib".into(), version: "2".into(), architecture: "amd64".into(),
+            multi_arch: "same".into(), description: String::new(), section: String::new(),
+            depends: "new-dependency".into(), pre_depends: String::new(),
+            recommends: String::new(), suggests: String::new(), provides: String::new(),
+            conflicts: String::new(), breaks: String::new(),
+        };
+        let mut candidate = old.clone();
+        candidate.version = "1".into();
+        candidate.depends = "old-dependency".into();
+        let mut other = old.clone();
+        other.architecture = "arm64".into();
+        let mut keyed = BTreeMap::from([(native.clone(), old.clone()), (foreign.clone(), other.clone())]);
+        assert_eq!(native_key_for(&keyed, "lib", "amd64").unwrap(), native);
+        assert_eq!(insert_native_candidate(&mut keyed, candidate.clone(), "amd64").unwrap(), native);
+        assert_eq!(keyed[&native].depends, "old-dependency");
+        assert_eq!(keyed[&foreign], other);
+        old.architecture = "all".into();
+        assert!(insert_native_candidate(&mut keyed, old, "amd64").is_err());
+        assert!(insert_native_candidate(&mut keyed, other, "amd64").is_err());
+        let common = PackageKey { name: "lib".into(), architecture: "all".into() };
+        keyed.insert(common, candidate);
+        assert!(native_key_for(&keyed, "lib", "amd64").is_err());
+    }
+
     #[test]
     fn package_catalog_preserves_architecture_identity_and_rejects_native_all_collision() {
         let root = std::env::temp_dir().join(format!("rpt-arch-catalog-{}", std::process::id()));
