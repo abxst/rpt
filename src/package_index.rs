@@ -29,7 +29,7 @@ pub fn parse(input: &str) -> Result<Vec<Record>> {
             last_key = None;
             continue;
         }
-        if line.starts_with([' ', '\t']) {
+        if (line.starts_with(' ') || line.starts_with('\t')) {
             let key = last_key.as_ref().ok_or_else(|| anyhow::anyhow!(
                 "orphan continuation at line {}", line_num + 1
             ))?;
