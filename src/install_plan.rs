@@ -17,6 +17,7 @@ pub struct PlanStep {
 struct Requirement {
     name: String,
     constraint: Option<(String, String)>,
+    any_arch: bool,
 }
 
 fn parse_atom(text: &str) -> Result<Requirement> {
@@ -40,7 +41,7 @@ fn parse_atom(text: &str) -> Result<Requirement> {
         bail!("unsupported dependency name: {name}");
     }
     if let Some((_, required)) = &constraint { version::compare(required, required)?; }
-    Ok(Requirement { name: name.to_owned(), constraint })
+    Ok(Requirement { name: name.to_owned(), constraint, any_arch: false })
 }
 
 /// Support only native-architecture dependency qualifiers. Foreign-arch
@@ -51,7 +52,7 @@ fn parse_atom_for_arch(text: &str, arch: &str) -> Result<Requirement> {
     let (head, tail) = atom.split_once('(').map_or((atom, None), |(h, t)| (h, Some(t)));
     let head = head.trim();
     let normalized = if let Some((name, qualifier)) = head.split_once(':') {
-        if qualifier != "native" && qualifier != arch {
+        if qualifier != "native" && qualifier != arch && qualifier != "any" {
             bail!("unsupported foreign or ambiguous architecture qualifier: {qualifier}");
         }
         if name.is_empty() || qualifier.contains(':') {
@@ -63,7 +64,9 @@ fn parse_atom_for_arch(text: &str, arch: &str) -> Result<Requirement> {
         Some(rest) => format!("{normalized} ({rest}"),
         None => normalized.to_owned(),
     };
-    parse_atom(&rebuilt)
+    let mut requirement = parse_atom(&rebuilt)?;
+    requirement.any_arch = head.ends_with(":any");
+    Ok(requirement)
 }
 
 fn parse_groups_for_arch(raw: &str, arch: &str) -> Result<Vec<Vec<Requirement>>> {
@@ -193,7 +196,7 @@ fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
         }
         let advertised = PackageSummary {
             name: subject_name.into(), version: subject_version.into(),
-            architecture: String::new(), description: String::new(),
+            architecture: String::new(), multi_arch: "no".into(), description: String::new(),
             section: String::new(), depends: String::new(),
             pre_depends: String::new(), recommends: String::new(),
             suggests: String::new(), provides: provided.into(),
@@ -224,7 +227,16 @@ impl Solver<'_> {
     /// verified catalog candidate. No automatic preference between multiple
     /// virtual providers or mutually satisfiable alternatives.
     fn concrete(&self, required: &Requirement) -> Result<Option<String>> {
+        if required.any_arch && !self.catalog.contains_key(&required.name) {
+            bail!("virtual Provides with :any require a full Multi-Arch resolver");
+        }
         if let Some(real) = self.catalog.get(&required.name) {
+            // Debian policy permits :any only for a target explicitly marked
+            // Multi-Arch: allowed. The native architecture is the sole candidate
+            // in this experimental planner; foreign installations are disabled.
+            if required.any_arch && real.multi_arch != "allowed" {
+                return Ok(None);
+            }
             return Ok(if satisfies(&real.version, required)? {
                 Some(required.name.clone())
             } else { None });
@@ -253,7 +265,7 @@ impl Solver<'_> {
     fn resolve(&mut self, requested: &Requirement) -> Result<()> {
         let concrete = self.concrete(requested)?
             .with_context(|| format!("unresolved dependency {} (no matching real package or provider)", requested.name))?;
-        let selected = Requirement { name: concrete.clone(), constraint: None };
+        let selected = Requirement { name: concrete.clone(), constraint: None, any_arch: false };
         self.resolve_concrete(&selected)
     }
 
@@ -267,7 +279,10 @@ impl Solver<'_> {
         // alternative satisfies a dependency without changing package state.
         for alternative in group {
             if let Some(installed) = self.installed.get(&alternative.name) {
-                if satisfies(installed, alternative)? {
+                let allowed_installed = !alternative.any_arch
+                    || self.catalog.get(&alternative.name).is_some_and(|item|
+                        item.multi_arch == "allowed" && item.version == *installed);
+                if allowed_installed && satisfies(installed, alternative)? {
                     return self.resolve_groups(groups, index + 1);
                 }
             }
@@ -287,7 +302,7 @@ impl Solver<'_> {
             if remaining == 0 { bail!("dependency branch budget exhausted"); }
             self.branch_budget.set(remaining - 1);
             let mut branch = self.clone();
-            let requirement = Requirement { name: option, constraint: None };
+            let requirement = Requirement { name: option, constraint: None, any_arch: false };
             // Only branch-local resolution errors are candidates for retry.
             if branch.resolve_concrete(&requirement).is_ok()
                 && branch.resolve_groups(groups, index + 1).is_ok() {
@@ -559,7 +574,7 @@ mod tests {
     use super::*;
     fn item(name: &str, version: &str, depends: &str) -> PackageSummary {
         PackageSummary {
-            name: name.into(), version: version.into(), architecture: "amd64".into(),
+            name: name.into(), version: version.into(), architecture: "amd64".into(), multi_arch: "no".into(),
             description: String::new(), section: String::new(), depends: depends.into(),
             pre_depends: String::new(), recommends: String::new(), suggests: String::new(),
             provides: String::new(), conflicts: String::new(), breaks: String::new(),
@@ -633,11 +648,39 @@ mod tests {
         }).is_err());
     }
     #[test]
+    fn any_suffix_requires_multiarch_allowed_on_selected_native_package() {
+        for arch in ["amd64", "arm64"] {
+            let mut interpreter = item("interpreter", "3", "");
+            interpreter.architecture = arch.into();
+            interpreter.multi_arch = "allowed".into();
+            let app = item("app", "1", "interpreter:any (>= 2)");
+            let catalog = BTreeMap::from([
+                ("app".into(), app.clone()),
+                ("interpreter".into(), interpreter.clone()),
+            ]);
+            let result = solve_catalog(&catalog, &BTreeMap::new(),
+                &BTreeMap::new(), "app", 20, arch).unwrap();
+            assert_eq!(result.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+                ["interpreter", "app"]);
+            for value in ["no", "same", "foreign"] {
+                let mut denied = interpreter.clone();
+                denied.multi_arch = value.into();
+                let catalog = BTreeMap::from([
+                    ("app".into(), app.clone()), ("interpreter".into(), denied),
+                ]);
+                assert!(solve_catalog(&catalog, &BTreeMap::new(),
+                    &BTreeMap::new(), "app", 20, arch).is_err());
+            }
+            let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
+            assert!(parse_atom_for_arch(&format!("interpreter:{foreign}"), arch).is_err());
+        }
+    }
+    #[test]
     fn native_qualifiers_accept_current_arch_and_reject_foreign_or_any() {
         for arch in ["amd64", "arm64"] {
             assert_eq!(parse_atom_for_arch("lib:native (>= 1:2.0)", arch).unwrap().name, "lib");
             assert_eq!(parse_atom_for_arch(&format!("lib:{arch}"), arch).unwrap().name, "lib");
-            assert!(parse_atom_for_arch("lib:any", arch).is_err());
+            assert!(parse_atom_for_arch("lib:any", arch).unwrap().any_arch);
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
             assert!(parse_atom_for_arch(&format!("lib:{foreign}"), arch).is_err());
             assert!(parse_groups_for_arch("a:native | b:native, c (>= 2)", arch).is_ok());
