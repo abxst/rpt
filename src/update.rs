@@ -336,13 +336,14 @@ fn release_hashes(signed: &str) -> Result<BTreeMap<String, (u64, String)>> {
 
 fn indexes(repo: &Repo, hashes: &BTreeMap<String, (u64, String)>, by_hash: bool) -> Result<Vec<Index>> {
     let mut result = Vec::new();
+    let arch = native_architecture()?;
     for component in &repo.components {
-        let base = format!("{component}/binary-{}/Packages", native_architecture()?);
+        let base = format!("{component}/binary-{arch}/Packages");
         let choices = [format!("{base}.xz"), format!("{base}.gz"), base];
         let selected = choices.iter().find_map(|p| hashes.get(p).map(|(size, digest)| Index {
             path: p.clone(), size: *size, digest: digest.clone(), by_hash,
         }));
-        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-{}/Packages", native_architecture()?))?;
+        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-{arch}/Packages"))?;
         if index.size == 0 || index.size > 256 * 1024 * 1024 {
             bail!("repository index size outside supported bounds");
         }
