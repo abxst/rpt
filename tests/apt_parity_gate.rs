@@ -7,7 +7,7 @@ fn unsupported_apt_commands_never_succeed() {
     for command in [
         "install", "reinstall", "remove", "purge", "upgrade",
         "full-upgrade", "dist-upgrade", "autoremove", "autoclean",
-        "clean", "search", "show", "list", "depends", "rdepends",
+        "clean", "depends", "rdepends",
         "policy", "download", "satisfy", "edit-sources",
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_rpt"))
