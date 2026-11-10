@@ -250,3 +250,28 @@ continue to fail closed.
 
 Use `rpt plan-install --cache ./rpt-lists --status /var/lib/dpkg/status
 --apt-root /etc/apt --max-packages 200 PACKAGE` for a limited preview.
+
+### Signed repository to .deb acquisition (alpha.19)
+
+After a fresh RPT update with an explicit Signed-By keyring:
+
+    rpt update --root /etc/apt --output ./rpt-lists --workers 8
+    rpt prepare-download --cache ./rpt-lists --manifest ./packages.json bash
+    rpt fetch --manifest ./packages.json --output ./rpt-debs --workers 8 --segments 4
+
+The prepare-download command does NOT select the true APT Candidate or resolve
+dependencies. It selects the highest published version of each explicitly
+requested name; it never invokes dpkg. It re-verifies the cache's InRelease
+signature (gpgv), signed Release freshness and checksum entries, hashes each
+cached Packages index again, and extracts SHA256 and Size from the selected
+package stanza. Unauthenticated, missing, expired, modified or pre-alpha.19
+cache indexes are rejected; run rpt update to rebuild them.
+
+The manifest is compatible with the existing concurrent RPT fetch command,
+which verifies .deb checksums before publication in the download destination.
+CI includes a live Ubuntu bash .deb acquisition and cache-tampering refusal.
+
+This remains a read-only/download-only experimental subsystem. It does not
+provide full APT pinning, alternatives, virtual Provides, multiarch, phased
+updates, system dpkg locks, transaction journaling, recovery or install/remove/
+upgrade compatibility. Do not replace /usr/bin/apt.
