@@ -82,6 +82,53 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Show highest published package metadata in RPT cache (not apt show parity).
+    Show {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
+    /// Search names/descriptions in cached Packages index (substring, not regex).
+    Search {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        query: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
+    /// List highest published versions, optionally filtered by name prefix.
+    List {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
+    /// Show the declared direct dependencies from the newest cached package.
+    Depends {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
+    /// Find packages declaring the requested name in Depends or Pre-Depends.
+    Rdepends {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -169,6 +216,52 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("  Available versions:");
             for v in summary.versions { println!("    {v}"); }
             eprintln!("rpt: note: policy-preview does not apply APT pinning, release origin or all configuration");
+        }
+        Command::Show { cache, package, architecture } => {
+            let item = rpt::metadata_query::show(&cache, &architecture, &package)
+                .context(ErrorCategory::System)?
+                .ok_or_else(|| anyhow::anyhow!("package not found in RPT cache: {package}"))?;
+            println!("Package: {}", item.name);
+            println!("Version: {}", item.version);
+            println!("Architecture: {}", item.architecture);
+            if !item.section.is_empty() { println!("Section: {}", item.section); }
+            if !item.depends.is_empty() { println!("Depends: {}", item.depends); }
+            if !item.description.is_empty() {
+                println!("Description: {}", item.description.replace('\n', "\n "));
+            }
+        }
+        Command::Search { cache, query, architecture, limit } => {
+            for item in rpt::metadata_query::search(&cache, &architecture, &query, limit)
+                .context(ErrorCategory::System)? {
+                println!("{} - {}", item.name,
+                    item.description.lines().next().unwrap_or(""));
+            }
+        }
+        Command::List { cache, prefix, architecture, limit } => {
+            for item in rpt::metadata_query::list(&cache, &architecture, &prefix, limit)
+                .context(ErrorCategory::System)? {
+                println!("{}/cache {} {}", item.name, item.version, item.architecture);
+            }
+        }
+        Command::Depends { cache, package, architecture } => {
+            let item = rpt::metadata_query::show(&cache, &architecture, &package)
+                .context(ErrorCategory::System)?
+                .ok_or_else(|| anyhow::anyhow!("package not found in RPT cache: {package}"))?;
+            println!("{} {}", item.name, item.version);
+            for (label, value) in [
+                ("Pre-Depends", &item.pre_depends), ("Depends", &item.depends),
+                ("Recommends", &item.recommends), ("Suggests", &item.suggests),
+                ("Provides", &item.provides), ("Conflicts", &item.conflicts),
+                ("Breaks", &item.breaks),
+            ] {
+                if !value.is_empty() { println!("{label}: {value}"); }
+            }
+        }
+        Command::Rdepends { cache, package, architecture, limit } => {
+            for item in rpt::metadata_query::rdepends(&cache, &architecture, &package, limit)
+                .context(ErrorCategory::System)? {
+                println!("{} {}", item.name, item.version);
+            }
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {

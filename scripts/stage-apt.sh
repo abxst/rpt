@@ -2,7 +2,7 @@
 # Safe APT migration preparation. This intentionally NEVER replaces /usr/bin/apt:
 # RPT does not yet implement APT's command and option contract.
 set -euo pipefail
-TAG="${RPT_TAG:-v0.1.0-alpha.16}"
+TAG="${RPT_TAG:-v0.1.0-alpha.17}"
 PREFIX="${RPT_PREFIX:-/opt/rpt}"
 APT_PATH="/usr/bin/apt"
 ASSET_BASE="https://github.com/abxst/rpt/releases/download/${TAG}"

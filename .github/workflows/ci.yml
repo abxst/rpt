@@ -93,6 +93,27 @@ jobs:
           test "$expected" = "$actual"
           echo "PASS baseline candidate bash: $actual"
           cat "$RUNNER_TEMP/rpt-policy"
+      - name: Read-only metadata show search list on Ubuntu
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/rpt-metadata"
+          ./target/debug/rpt show --cache "$target" bash > "$RUNNER_TEMP/rpt-show-bash"
+          grep -Fq 'Package: bash' "$RUNNER_TEMP/rpt-show-bash"
+          ver="$(./target/debug/rpt cache-versions --cache "$target" --package bash | head -n 1)"
+          grep -Fq "Version: $ver" "$RUNNER_TEMP/rpt-show-bash"
+          ./target/debug/rpt search --cache "$target" --limit 20 bash > "$RUNNER_TEMP/rpt-search-bash"
+          grep -Fq 'bash - ' "$RUNNER_TEMP/rpt-search-bash"
+          ./target/debug/rpt list --cache "$target" --prefix bash --limit 20 > "$RUNNER_TEMP/rpt-list-bash"
+          grep -Fq "bash/cache $ver amd64" "$RUNNER_TEMP/rpt-list-bash"
+          if ./target/debug/rpt search --cache "$target" --limit 0 bash >/dev/null 2>&1; then
+            echo "Invalid result limit accepted" >&2
+            exit 1
+          fi
+          ./target/debug/rpt depends --cache "$target" bash > "$RUNNER_TEMP/rpt-depends"
+          grep -Fq 'Depends:' "$RUNNER_TEMP/rpt-depends"
+          ./target/debug/rpt rdepends --cache "$target" --limit 10 libc6 > "$RUNNER_TEMP/rpt-rdepends"
+          test -s "$RUNNER_TEMP/rpt-rdepends"
+          echo "PASS cached show/search/list/depends/rdepends"
       - name: Reject unsupported APT update flags
         run: |
           if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
