@@ -58,6 +58,49 @@ pub fn ensure_supported_apt_configuration(apt_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Inspect an intentionally narrow APT configuration subset for read-only
+/// candidate diagnostics. Unknown active statements fail closed: they can
+/// change policy semantics, including hidden config/includes.
+pub fn read_default_release(apt_root: &Path) -> Result<Option<String>> {
+    if std::env::var_os("APT_CONFIG").is_some() {
+        bail!("APT_CONFIG override detected; target release inspection unsupported");
+    }
+    let mut paths = vec![apt_root.join("apt.conf")];
+    let dir = apt_root.join("apt.conf.d");
+    if dir.exists() {
+        let mut entries = fs::read_dir(&dir)?.map(|e| e.map(|v| v.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort();
+        paths.extend(entries);
+    }
+    let mut target: Option<String> = None;
+    for path in paths {
+        if !path.exists() { continue; }
+        if !path.is_file() { bail!("unsupported APT configuration entry: {}", path.display()); }
+        let data = fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("//") || line.starts_with('#') { continue; }
+            let value = line.strip_prefix("APT::Default-Release ")
+                .and_then(|v| v.strip_suffix(';'))
+                .map(str::trim)
+                .and_then(|v| v.strip_prefix('"'))
+                .and_then(|v| v.strip_suffix('"'))
+                .filter(|v| !v.is_empty() && v.len() <= 128
+                    && v.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b)));
+            let Some(value) = value else {
+                bail!("unsupported APT policy config statement in {}: {}", path.display(), line);
+            };
+            if target.is_some() {
+                bail!("multiple APT::Default-Release declarations are unsupported");
+            }
+            target = Some(value.to_owned());
+        }
+    }
+    Ok(target)
+}
+
 fn active_lines(path: &Path) -> Result<bool> {
     Ok(fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?
@@ -185,6 +228,26 @@ mod tests {
         // Comments alone must not block an otherwise default-policy preview.
         fs::write(root.join("apt.conf.d/99custom"), "/* APT::Default-Release \"noble\"; */\n// #include \"/tmp/custom\"\n").unwrap();
         assert!(ensure_no_custom_policy(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reads_exact_target_release_and_rejects_config_indirection() {
+        let root = std::env::temp_dir().join(format!("rpt-target-exact-{}", std::process::id()));
+        fs::create_dir_all(root.join("apt.conf.d")).unwrap();
+        fs::write(root.join("apt.conf.d/50target"), "// policy\nAPT::Default-Release \"noble\";\n").unwrap();
+        assert_eq!(read_default_release(&root).unwrap().as_deref(), Some("noble"));
+        fs::write(root.join("apt.conf.d/60other"), "APT::Default-Release \"noble-updates\";").unwrap();
+        assert!(read_default_release(&root).is_err());
+        fs::remove_file(root.join("apt.conf.d/60other")).unwrap();
+        for invalid in [
+            "#include \"/tmp/other\";",
+            "APT::Default-Release \"noble*\";",
+            "Dir::Etc::preferences \"somewhere\";",
+            "APT::Default-Release \"noble\"; APT::Something \"else\";",
+        ] {
+            fs::write(root.join("apt.conf.d/50target"), invalid).unwrap();
+            assert!(read_default_release(&root).is_err(), "{invalid}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
