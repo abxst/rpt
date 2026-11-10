@@ -109,7 +109,11 @@ jobs:
             echo "Invalid result limit accepted" >&2
             exit 1
           fi
-          echo "PASS cached show/search/list for bash"
+          ./target/debug/rpt depends --cache "$target" bash > "$RUNNER_TEMP/rpt-depends"
+          grep -Fq 'Depends:' "$RUNNER_TEMP/rpt-depends"
+          ./target/debug/rpt rdepends --cache "$target" --limit 10 libc6 > "$RUNNER_TEMP/rpt-rdepends"
+          test -s "$RUNNER_TEMP/rpt-rdepends"
+          echo "PASS cached show/search/list/depends/rdepends"
       - name: Reject unsupported APT update flags
         run: |
           if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
