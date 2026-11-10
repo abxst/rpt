@@ -64,6 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           target="$RUNNER_TEMP/rpt-metadata"
+          find "$target" -name 'index-*.xz' -print -exec file {} \; -exec xz --test {} \;
           ./target/debug/rpt cache-versions --cache "$target" --package bash --architecture amd64 > "$RUNNER_TEMP/rpt-bash-versions"
           test -s "$RUNNER_TEMP/rpt-bash-versions"
           apt-cache madison bash | awk -F'|' 'NF>=2 {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' | sort -u > "$RUNNER_TEMP/apt-bash-versions"
