@@ -113,6 +113,19 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Restricted read-only candidate selection; not full APT policy parity.
+    CandidateInspect {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")]
+        status: PathBuf,
+        #[arg(long, default_value = "/etc/apt")]
+        apt_root: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
     PolicyPreview {
         #[arg(long, default_value = "auto")]
@@ -274,6 +287,21 @@ async fn execute(cli: Cli) -> Result<()> {
                     entry.release.label.as_deref().unwrap_or("-"),
                     entry.release.archive.as_deref().unwrap_or("-"),
                     entry.release.codename.as_deref().unwrap_or("-"));
+            }
+        }
+        Command::CandidateInspect { cache, status, apt_root, package, architecture } => {
+            rpt::policy::ensure_supported_apt_configuration(&apt_root)?;
+            let records = rpt::apt_preferences::load(&apt_root)?;
+            let origins = rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)?;
+            let installed = rpt::cache_query::installed_version(&status, &package, &architecture)?
+                .map(|entry| entry.version);
+            let result = rpt::apt_pin_eval::preview_candidate(
+                &package, &origins, &records, installed.as_deref(),
+            )?;
+            println!("Installed: {}", result.installed.as_deref().unwrap_or("(none)"));
+            println!("Candidate: {}", result.candidate.as_deref().unwrap_or("(none)"));
+            for (version, priority) in result.priorities {
+                println!("Version: {} Priority: {}", version, priority);
             }
         }
         Command::PinInspect { cache, apt_root, package, architecture } => {
