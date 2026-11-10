@@ -30,7 +30,7 @@ enum Command {
     VersionCompare {
         left: String,
         right: String,
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
     },
     /// Inspect a local, uncompressed Packages index (NOT signature verification).
@@ -48,7 +48,7 @@ enum Command {
     },
     /// Concurrently refresh signed repository metadata to an isolated cache.
     Update {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "/etc/apt")]
         root: PathBuf,
@@ -68,7 +68,7 @@ enum Command {
     },
     /// Query versions in the isolated RPT update cache (not apt policy).
     CacheVersions {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -79,7 +79,7 @@ enum Command {
     },
     /// Read installed version from dpkg status (read-only).
     InstalledVersion {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "/var/lib/dpkg/status")]
         status: PathBuf,
@@ -90,7 +90,7 @@ enum Command {
     },
     /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
     PolicyPreview {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -105,7 +105,7 @@ enum Command {
     },
     /// Show highest published package metadata in RPT cache (not apt show parity).
     Show {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -115,7 +115,7 @@ enum Command {
     },
     /// Search names/descriptions in cached Packages index (substring, not regex).
     Search {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -127,7 +127,7 @@ enum Command {
     },
     /// List highest published versions, optionally filtered by name prefix.
     List {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -140,7 +140,7 @@ enum Command {
     },
     /// Show the declared direct dependencies from the newest cached package.
     Depends {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -150,7 +150,7 @@ enum Command {
     },
     /// Find packages declaring the requested name in Depends or Pre-Depends.
     Rdepends {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -162,7 +162,7 @@ enum Command {
     },
     /// Plan a conservative dependency installation, read-only; NEVER runs dpkg.
     PlanInstall {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "/etc/apt")]
         apt_root: PathBuf,
@@ -178,7 +178,7 @@ enum Command {
     },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
-        #[arg(long, default_value = "deb")]
+        #[arg(long, default_value = "auto")]
         driver: String,
         #[arg(long, default_value = "./rpt-lists")]
         cache: PathBuf,
@@ -200,6 +200,16 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         segments: usize,
     },
+}
+
+/// Discover the host distro by default instead of silently choosing Debian
+/// on Fedora, Alpine or Arch. Unsupported native backends remain fail-closed.
+fn resolve_driver(requested: &str) -> Result<DriverKind> {
+    if requested == "auto" {
+        drivers::detect_file(std::path::Path::new("/etc/os-release"))
+    } else {
+        DriverKind::from_str(requested)
+    }
 }
 
 #[tokio::main]
@@ -231,7 +241,7 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Package transactions: NOT IMPLEMENTED");
         }
         Command::VersionCompare { left, right, driver } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let ordering = drivers::driver(kind).compare_versions(&left, &right)
                 .context(ErrorCategory::System)?;
             println!("{}", match ordering {
@@ -271,22 +281,22 @@ async fn execute(cli: Cli) -> Result<()> {
                 workers, retries, quiet,
                 progress: !no_progress && quiet == 0, log_format: format,
             };
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             drivers::driver(kind).update_indexes(&root, &output, settings).await?;
         }
         Command::CacheVersions { driver, cache, package, architecture } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             for version in drivers::driver(kind).cache_versions(&cache, &package, &architecture)
                 .context(ErrorCategory::System)? { println!("{version}"); }
         }
         Command::InstalledVersion { driver, status, package, architecture } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let installed = drivers::driver(kind)
                 .installed_packages(&status, &architecture).context(ErrorCategory::System)?;
             if let Some(item) = installed.get(&package) { println!("{}", item.version); }
         }
         Command::PolicyPreview { driver, cache, status, apt_root, package, architecture } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let summary = drivers::driver(kind).policy_preview(&cache, &status, &apt_root, &package, &architecture)
                 .context(ErrorCategory::System)?;
             println!("{package}:");
@@ -297,7 +307,7 @@ async fn execute(cli: Cli) -> Result<()> {
             eprintln!("rpt: note: policy-preview does not apply APT pinning, release origin or all configuration");
         }
         Command::Show { driver, cache, package, architecture } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let item = drivers::driver(kind).show_package(&cache, &architecture, &package)
                 .context(ErrorCategory::System)?
                 .ok_or_else(|| anyhow::anyhow!("package not found in RPT cache: {package}"))?;
@@ -311,7 +321,7 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::Search { driver, cache, query, architecture, limit } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             for item in drivers::driver(kind).search_packages(&cache, &architecture, &query, limit)
                 .context(ErrorCategory::System)? {
                 println!("{} - {}", item.name,
@@ -319,14 +329,14 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::List { driver, cache, prefix, architecture, limit } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             for item in drivers::driver(kind).list_packages(&cache, &architecture, &prefix, limit)
                 .context(ErrorCategory::System)? {
                 println!("{}/cache {} {}", item.name, item.version, item.architecture);
             }
         }
         Command::Depends { driver, cache, package, architecture } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let item = drivers::driver(kind).show_package(&cache, &architecture, &package)
                 .context(ErrorCategory::System)?
                 .ok_or_else(|| anyhow::anyhow!("package not found in RPT cache: {package}"))?;
@@ -341,14 +351,14 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::Rdepends { driver, cache, package, architecture, limit } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             for item in drivers::driver(kind).reverse_dependencies(&cache, &architecture, &package, limit)
                 .context(ErrorCategory::System)? {
                 println!("{} {}", item.name, item.version);
             }
         }
         Command::PlanInstall { driver, cache, status, apt_root, architecture, max_packages, package } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let steps = drivers::driver(kind)
                 .plan_install_preview(&cache, &status, &apt_root, &package, &architecture, max_packages)
                 .context(ErrorCategory::System)?;
@@ -365,7 +375,7 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::PrepareDownload { driver, cache, architecture, manifest, packages } => {
-            let kind = DriverKind::from_str(&driver)?;
+            let kind = resolve_driver(&driver)?;
             let ready = drivers::driver(kind)
                 .prepare_download(&cache, &packages, &architecture)
                 .context(ErrorCategory::System)?;
