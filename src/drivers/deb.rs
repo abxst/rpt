@@ -10,6 +10,18 @@ impl PackageDriver for DebDriver {
     fn compare_versions(&self, left: &str, right: &str) -> Result<Ordering> {
         crate::version::compare(left, right)
     }
+    fn plan_install_preview(
+        &self, cache: &Path, status: &Path, configuration: &Path,
+        package: &str, architecture: &str, max_packages: usize,
+    ) -> Result<Vec<crate::install_plan::PlanStep>> {
+        crate::policy::ensure_no_custom_policy(configuration)?;
+        crate::install_plan::preview(cache, status, package, architecture, max_packages)
+    }
+    fn prepare_download(
+        &self, cache: &Path, names: &[String], architecture: &str,
+    ) -> Result<crate::Manifest> {
+        crate::package_provenance::prepare(cache, names, architecture)
+    }
     fn installed_packages(&self, status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledPackage>> {
         let catalog = crate::cache_query::installed_catalog(status, arch)?;
         Ok(catalog.into_iter().map(|(name, version)| (
