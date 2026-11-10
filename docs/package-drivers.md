@@ -72,8 +72,8 @@ versioning, installed-state semantics, transaction adapter and isolated VM tests
 The current code routes `version-compare`, `installed-version`,
 `plan-install`, `prepare-download`, `update`, `cache-versions`,
 `policy-preview`, `show`, `search`, `list`, `depends` and `rdepends`
-through the selected driver. Their default driver is `deb` for backwards
-compatibility on the Ubuntu CI runner. Non-Debian drivers explicitly reject
+through the selected driver. The default is `auto` based on `/etc/os-release`,
+which selects Debian on Ubuntu but fails closed for unfinished native drivers. Non-Debian drivers explicitly reject
 these operations until implemented.
 
 Low-level Debian inspection helpers (`sources`, `inspect-index` and
