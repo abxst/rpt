@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use rpt::{download::Downloader, error::{classify, ErrorCategory}, sources::list_sources, Manifest};
+use rpt::{download::Downloader, error::{classify, describe, ErrorCategory}, sources::list_sources, Manifest};
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Parser)]
@@ -34,7 +34,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Err(error) = execute(cli).await {
         let category = classify(&error, ErrorCategory::System);
-        eprintln!("rpt: error [{category}]: {error:#}");
+        eprintln!("rpt: error [{category}]: {}", describe(&error));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
