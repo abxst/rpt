@@ -295,3 +295,7 @@ non-Debian drivers until implemented. Read
 supported operations and future native-package conformance gates. Full
 APT behavioral parity remains the **first release prerequisite**, before
 native support for RPM, apk-tools or pacman is advertised.
+
+### Read-only APT preferences inspection (post-alpha.20 development)
+
+`rpt preferences-inspect --apt-root /etc/apt` parses simple `Package`, `Pin`, and `Pin-Priority` records in `preferences` and `preferences.d` without changing system state. It intentionally rejects unknown, duplicate or malformed fields rather than silently applying incorrect policy. The parsed data is **not** used for candidate selection or installation. Full APT pinning parity, regular expressions, complex selectors, and repository-specific version priority remain unimplemented. `policy-preview` still refuses active preference files.

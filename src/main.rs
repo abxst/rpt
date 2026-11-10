@@ -88,6 +88,11 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Inspect APT preferences records (read-only; DOES NOT evaluate pin policy).
+    PreferencesInspect {
+        #[arg(long, default_value = "/etc/apt")]
+        apt_root: PathBuf,
+    },
     /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
     PolicyPreview {
         #[arg(long, default_value = "auto")]
@@ -239,6 +244,11 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Version comparison: {}", if kind == DriverKind::Deb { "implemented" } else { "not implemented" });
             println!("Read-only package query: {}", if kind == DriverKind::Deb { "partial" } else { "not implemented" });
             println!("Package transactions: NOT IMPLEMENTED");
+        }
+        Command::PreferencesInspect { apt_root } => {
+            for record in rpt::apt_preferences::load(&apt_root)? {
+                println!("Package: {}\nPin: {}\nPin-Priority: {}\n", record.package, record.pin, record.priority);
+            }
         }
         Command::VersionCompare { left, right, driver } => {
             let kind = resolve_driver(&driver)?;

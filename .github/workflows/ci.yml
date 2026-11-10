@@ -49,6 +49,32 @@ jobs:
           EOF
           ./target/debug/rpt driver-info --os-release "$RUNNER_TEMP/rpt-fedora-os-release" | grep -q 'Driver: rpm'
           echo 'PASS package driver contracts and distro family discovery'
+      - name: Read-only APT preferences parser fixture
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rpt-apt/preferences.d"
+          cat > "$RUNNER_TEMP/rpt-apt/preferences.d/90custom" <<'EOF'
+          Package: bash
+          Pin: version 5.2*
+          Pin-Priority: 1001
+
+          Package: *
+          Pin: release a=noble
+          Pin-Priority: -1
+          EOF
+          ./target/debug/rpt preferences-inspect --apt-root "$RUNNER_TEMP/rpt-apt" > "$RUNNER_TEMP/preferences.txt"
+          grep -Fxq 'Pin-Priority: 1001' "$RUNNER_TEMP/preferences.txt"
+          grep -Fxq 'Pin-Priority: -1' "$RUNNER_TEMP/preferences.txt"
+          if ./target/debug/rpt policy-preview --apt-root "$RUNNER_TEMP/rpt-apt" \
+              --cache /nonexistent --package bash >/dev/null 2>&1; then
+            echo "Unsafe policy preview accepted active preferences" >&2
+            exit 1
+          fi
+          echo 'Pin-Priority: bad' >> "$RUNNER_TEMP/rpt-apt/preferences.d/90custom"
+          if ./target/debug/rpt preferences-inspect --apt-root "$RUNNER_TEMP/rpt-apt" >/dev/null 2>&1; then
+            echo "Malformed pinning unexpectedly accepted" >&2
+            exit 1
+          fi
       - name: Release build
         run: cargo build --release --locked
   apt-metadata-differential:
