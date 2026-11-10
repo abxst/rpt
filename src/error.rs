@@ -37,6 +37,8 @@ pub enum ErrorCode {
     DownloadNetwork,
     DownloadChecksum,
     DownloadIntegrity,
+    DownloadSignature,
+    DownloadIndex,
     SystemIo,
     SystemConfig,
     SystemWorker,
@@ -50,6 +52,8 @@ impl ErrorCode {
             Self::DownloadNetwork => "DOWNLOAD_NETWORK",
             Self::DownloadChecksum => "DOWNLOAD_CHECKSUM",
             Self::DownloadIntegrity => "DOWNLOAD_INTEGRITY",
+            Self::DownloadSignature => "DOWNLOAD_SIGNATURE",
+            Self::DownloadIndex => "DOWNLOAD_INDEX",
             Self::SystemIo => "SYSTEM_IO",
             Self::SystemConfig => "SYSTEM_CONFIG",
             Self::SystemWorker => "SYSTEM_WORKER",
@@ -57,7 +61,17 @@ impl ErrorCode {
     }
 }
 
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+impl std::error::Error for ErrorCode {}
+
 pub fn code(error: &anyhow::Error, fallback: ErrorCategory) -> ErrorCode {
+    if let Some(explicit) = error.downcast_ref::<ErrorCode>() {
+        return *explicit;
+    }
     let category = classify(error, fallback);
     if category == ErrorCategory::System {
         let description = describe(error);
@@ -66,6 +80,7 @@ pub fn code(error: &anyhow::Error, fallback: ErrorCategory) -> ErrorCode {
             || description.contains("invalid package")
             || description.contains("unsafe filename")
             || description.contains("workers must")
+            || description.contains("retries must")
             || description.contains("HTTP(S) URLs")
             || description.contains("invalid SHA-256")
         {
