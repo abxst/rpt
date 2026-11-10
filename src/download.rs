@@ -2,19 +2,41 @@
 use crate::{validate_package, Package};
 use anyhow::{bail, Context, Result};
 use futures_util::{stream, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::{header, Client, StatusCode};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{io::IsTerminal, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Instant};
 use tokio::{
     fs::{self, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
 };
+
+#[derive(Default)]
+struct Counters {
+    bytes: AtomicU64,
+    requests: AtomicU64,
+    range_parts: AtomicU64,
+    retries: AtomicU64,
+    cache_hits: AtomicU64,
+    verified: AtomicU64,
+}
+
+fn progress_bar(size: u64, name: &str) -> ProgressBar {
+    let bar = ProgressBar::new(size);
+    bar.set_prefix(name.chars().take(22).collect::<String>());
+    bar.set_style(ProgressStyle::with_template(
+        "{spinner:.cyan} {prefix:22} [{bar:28.cyan/blue}] {bytes:>10}/{total_bytes:10} {bytes_per_sec:>11} {eta:>5} {msg}"
+    ).expect("valid progress template").progress_chars("=>-"));
+    bar.set_message("queued");
+    bar
+}
 
 #[derive(Clone)]
 pub struct Downloader {
     client: Client,
     pub package_workers: usize,
     pub segments: usize,
+    counters: Arc<Counters>,
 }
 
 impl Downloader {
@@ -26,43 +48,79 @@ impl Downloader {
             .timeout(std::time::Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()?;
-        Ok(Self { client, package_workers, segments })
+        Ok(Self { client, package_workers, segments, counters: Arc::new(Counters::default()) })
     }
 
     pub async fn download_all(&self, packages: Vec<Package>, dest: &Path) -> Result<()> {
-        let results = stream::iter(packages.into_iter().map(|package| {
-            let this = self.clone();
+        let started = Instant::now();
+        let runner = Self {
+            client: self.client.clone(),
+            package_workers: self.package_workers,
+            segments: self.segments,
+            counters: Arc::new(Counters::default()),
+        };
+        let count = packages.len();
+        let multi = MultiProgress::new();
+        if !std::io::stderr().is_terminal() {
+            multi.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        let bars = packages.iter()
+            .map(|p| multi.add(progress_bar(p.size, &p.name)))
+            .collect::<Vec<_>>();
+        let results = stream::iter(packages.into_iter().zip(bars).map(|(package, bar)| {
+            let this = runner.clone();
             let root = dest.to_path_buf();
-            async move { this.download_one(&package, &root).await }
+            async move {
+                let result = this.download_one_with_bar(&package, &root, &bar).await;
+                if result.is_err() { bar.abandon_with_message("failed"); }
+                result
+            }
         }))
         .buffer_unordered(self.package_workers)
-        .collect::<Vec<_>>()
-        .await;
-        for result in results {
-            result?;
-        }
+        .collect::<Vec<_>>().await;
+        let c = &runner.counters;
+        let elapsed = started.elapsed().as_secs_f64();
+        let bytes = c.bytes.load(Ordering::Relaxed);
+        println!("Download summary:");
+        println!("  Packages: {}/{} verified ({} cached)",
+            c.verified.load(Ordering::Relaxed), count, c.cache_hits.load(Ordering::Relaxed));
+        println!("  Transferred: {:.2} MiB", bytes as f64 / 1_048_576.0);
+        println!("  HTTP requests: {} ({} range parts)",
+            c.requests.load(Ordering::Relaxed), c.range_parts.load(Ordering::Relaxed));
+        println!("  Retries: {}", c.retries.load(Ordering::Relaxed));
+        println!("  Elapsed: {:.2}s | Throughput: {:.2} MiB/s",
+            elapsed, (bytes as f64 / 1_048_576.0) / elapsed.max(0.000001));
+        for result in results { result?; }
         Ok(())
     }
 
     pub async fn download_one(&self, package: &Package, dest: &Path) -> Result<PathBuf> {
+        self.download_one_with_bar(package, dest, &ProgressBar::hidden()).await
+    }
+
+    async fn download_one_with_bar(
+        &self, package: &Package, dest: &Path, bar: &ProgressBar,
+    ) -> Result<PathBuf> {
         validate_package(package)?;
         let target = dest.join(&package.filename);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).await?;
         }
         if fs::try_exists(&target).await? && verify(&target, &package.sha256).await? {
+            self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.counters.verified.fetch_add(1, Ordering::Relaxed);
+            bar.set_position(package.size);
+            bar.finish_with_message("cached");
             return Ok(target);
         }
-        // A temporary file is private to this process; another concurrent invocation must
-        // use a separate destination or external coordination.
         let temp = target.with_extension(format!("rpt-{}.part", std::process::id()));
-        // Retry only transport failures and temporary HTTP responses.
-        // Every attempt starts with an empty partial file.
         let mut attempt = 0;
         loop {
             attempt += 1;
+            bar.set_position(0);
+            bar.set_message(if attempt > 1 { "retrying" } else { "downloading" });
             let _ = fs::remove_file(&temp).await;
-            match self.download_into(package, &temp).await {
+            match self.download_into(package, &temp, bar).await {
                 Ok(()) => break,
                 Err(error) => {
                     let retry = attempt < 4 && is_transient(&error);
@@ -70,32 +128,34 @@ impl Downloader {
                         let _ = fs::remove_file(&temp).await;
                         return Err(error);
                     }
-                    eprintln!(
-                        "rpt: retry {attempt}/3 for {} after temporary error: {error:#}",
-                        package.name
-                    );
+                    self.counters.retries.fetch_add(1, Ordering::Relaxed);
+                    bar.println(format!("rpt: retry {attempt}/3 for {}: {error:#}", package.name));
                     tokio::time::sleep(std::time::Duration::from_millis(
                         250u64 * (1u64 << (attempt - 1)),
-                    ))
-                    .await;
+                    )).await;
                 }
             }
         }
+        bar.set_message("verifying");
         if !verify(&temp, &package.sha256).await? {
             let _ = fs::remove_file(&temp).await;
             bail!("SHA-256 mismatch: {}", package.name);
         }
         fs::rename(&temp, &target).await?;
+        self.counters.verified.fetch_add(1, Ordering::Relaxed);
+        bar.finish_with_message("verified");
         Ok(target)
     }
 
-    async fn download_into(&self, package: &Package, temp: &Path) -> Result<()> {
+    async fn download_into(&self, package: &Package, temp: &Path, bar: &ProgressBar) -> Result<()> {
         let segmented = self.segments > 1 && package.size >= 1024 * 1024
             && self.accepts_ranges(&package.url, package.size).await;
         if !segmented {
-            return self.download_single(package, temp).await;
+            bar.set_message("single stream");
+            return self.download_single(package, temp, bar).await;
         }
         let count = (self.segments as u64).min(package.size) as usize;
+        bar.set_message(format!("{count} segments"));
         let file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await?;
         file.set_len(package.size).await?;
         drop(file);
@@ -106,7 +166,9 @@ impl Downloader {
             let client = self.client.clone();
             let url = package.url.clone();
             let path = temp.to_path_buf();
-            tasks.spawn(async move { fetch_range(client, url, path, start, end).await });
+            let bar = bar.clone();
+            let counters = self.counters.clone();
+            tasks.spawn(async move { fetch_range(client, url, path, start, end, bar, counters).await });
         }
         while let Some(joined) = tasks.join_next().await {
             if let Err(e) = joined.context("segment task panicked")? {
@@ -118,13 +180,15 @@ impl Downloader {
     }
 
     async fn accepts_ranges(&self, url: &str, expected_size: u64) -> bool {
+        self.counters.requests.fetch_add(1, Ordering::Relaxed);
         let Ok(resp) = self.client.head(url).send().await else { return false };
         if !resp.status().is_success() { return false; }
         resp.headers().get(header::ACCEPT_RANGES).and_then(|x| x.to_str().ok()) == Some("bytes")
             && resp.content_length() == Some(expected_size)
     }
 
-    async fn download_single(&self, package: &Package, temp: &Path) -> Result<()> {
+    async fn download_single(&self, package: &Package, temp: &Path, bar: &ProgressBar) -> Result<()> {
+        self.counters.requests.fetch_add(1, Ordering::Relaxed);
         let response = self.client.get(&package.url).send().await?.error_for_status()?;
         if let Some(len) = response.content_length() {
             if len != package.size { bail!("unexpected Content-Length for {}", package.name); }
@@ -137,6 +201,8 @@ impl Downloader {
             written += chunk.len() as u64;
             if written > package.size { bail!("download exceeds declared size"); }
             file.write_all(&chunk).await?;
+            self.counters.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            bar.inc(chunk.len() as u64);
         }
         file.flush().await?;
         if written != package.size { bail!("truncated download of {}", package.name); }
@@ -144,7 +210,9 @@ impl Downloader {
     }
 }
 
-async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end: u64) -> Result<()> {
+async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end: u64, bar: ProgressBar, counters: Arc<Counters>) -> Result<()> {
+    counters.requests.fetch_add(1, Ordering::Relaxed);
+    counters.range_parts.fetch_add(1, Ordering::Relaxed);
     let response = client.get(&url)
         .header(header::RANGE, format!("bytes={start}-{end}"))
         .header(header::ACCEPT_ENCODING, "identity")
@@ -169,6 +237,8 @@ async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end
         written += chunk.len() as u64;
         if written > end - start + 1 { bail!("range overflow"); }
         file.write_all(&chunk).await?;
+        counters.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        bar.inc(chunk.len() as u64);
     }
     file.flush().await?;
     if written != end - start + 1 { bail!("range truncated"); }
@@ -213,6 +283,26 @@ mod tests {
         assert!(verify(&path, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").await.unwrap());
         fs::remove_file(path).await.unwrap();
     }
+    #[tokio::test]
+    async fn cache_hit_counts_as_verified_without_network() {
+        let root = std::env::temp_dir().join(format!("rpt-cache-stats-{}", std::process::id()));
+        fs::create_dir_all(&root).await.unwrap();
+        fs::write(root.join("cached.deb"), b"abc").await.unwrap();
+        let package = Package {
+            name: "cached".into(),
+            url: "https://example.org/cached.deb".into(),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+            size: 3,
+            filename: "cached.deb".into(),
+        };
+        let engine = Downloader::new(1, 1).unwrap();
+        engine.download_one(&package, &root).await.unwrap();
+        assert_eq!(engine.counters.cache_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.counters.verified.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.counters.bytes.load(Ordering::Relaxed), 0);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
     #[test]
     fn classifies_permanent_and_retryable_errors() {
         let missing = reqwest::Client::new()
