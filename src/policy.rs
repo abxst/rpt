@@ -14,6 +14,11 @@ pub struct PolicyPreview {
 /// Reject conventional preference files and target-release settings instead of
 /// knowingly giving an inaccurate result for a customized APT policy.
 pub fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
+    // APT_CONFIG can redirect or extend the configuration we would otherwise inspect.
+    // Do not claim a default-priority candidate without evaluating that configuration.
+    if std::env::var_os("APT_CONFIG").is_some() {
+        bail!("APT_CONFIG override detected; candidate preview is unsupported");
+    }
     let prefs = apt_root.join("preferences");
     if prefs.exists() && prefs.is_file() && active_lines(&prefs)? {
         bail!("APT pinning detected in {}; candidate preview is unsupported", prefs.display());
@@ -28,15 +33,15 @@ pub fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
         }
     }
     let conf = apt_root.join("apt.conf");
-    if conf.is_file() && declares_target_release(&conf)? {
-        bail!("APT target release configured in {}; candidate preview is unsupported", conf.display());
+    if conf.is_file() && declares_unsupported_policy_config(&conf)? {
+        bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", conf.display());
     }
     let conf_dir = apt_root.join("apt.conf.d");
     if conf_dir.exists() {
         for ent in fs::read_dir(&conf_dir).with_context(|| format!("reading {}", conf_dir.display()))? {
             let path = ent?.path();
-            if path.is_file() && declares_target_release(&path)? {
-                bail!("APT target release configured in {}; candidate preview is unsupported", path.display());
+            if path.is_file() && declares_unsupported_policy_config(&path)? {
+                bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", path.display());
             }
         }
     }
@@ -52,13 +57,54 @@ fn active_lines(path: &Path) -> Result<bool> {
         }))
 }
 
-fn declares_target_release(path: &Path) -> Result<bool> {
+/// Fail closed for APT settings that can change the default candidate or hide
+/// policy inputs elsewhere. Full apt.conf parsing and include resolution are
+/// intentionally outside the current read-only policy preview.
+fn declares_unsupported_policy_config(path: &Path) -> Result<bool> {
     let config = fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
-    Ok(config.lines().any(|line| {
-        let body = line.split("//").next().unwrap_or("").trim().to_ascii_lowercase();
-        !body.is_empty() && (body.contains("default-release") || body.contains("target-release"))
-    }))
+    let mut in_block_comment = false;
+    for raw_line in config.lines() {
+        let mut body = String::new();
+        let mut remaining = raw_line;
+        loop {
+            if in_block_comment {
+                if let Some(end) = remaining.find("*/") {
+                    remaining = &remaining[end + 2..];
+                    in_block_comment = false;
+                } else {
+                    break;
+                }
+            } else {
+                let block = remaining.find("/*");
+                let line_comment = remaining.find("//");
+                match (block, line_comment) {
+                    (_, Some(line)) if block.is_none_or(|start| line < start) => {
+                        body.push_str(&remaining[..line]);
+                        break;
+                    }
+                    (Some(start), _) => {
+                        body.push_str(&remaining[..start]);
+                        remaining = &remaining[start + 2..];
+                        in_block_comment = true;
+                    }
+                    (None, _) => {
+                        body.push_str(remaining);
+                        break;
+                    }
+                }
+            }
+        }
+        let body = body.trim().to_ascii_lowercase();
+        if body.starts_with("#include")
+            || body.contains("default-release")
+            || body.contains("target-release")
+            || body.contains("dir::etc")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Default-priority preview; installed versions newer than repository versions
@@ -111,6 +157,24 @@ mod tests {
         fs::create_dir_all(root.join("preferences.d")).unwrap();
         fs::write(root.join("preferences.d/custom"), "Package: bash\nPin: release a=noble\nPin-Priority: 999\n").unwrap();
         assert!(ensure_no_custom_policy(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn refuses_indirect_policy_config() {
+        let root = std::env::temp_dir().join(format!("rpt-policy-indirect-{}", std::process::id()));
+        fs::create_dir_all(root.join("apt.conf.d")).unwrap();
+        for config in [
+            "#include \"/tmp/custom-apt.conf\";",
+            "#includedir \"/tmp/apt-settings\";",
+            "Dir::Etc::preferences \"custom-pins\";",
+            "/* comment */ APT::Default-Release \"noble\";",
+        ] {
+            fs::write(root.join("apt.conf.d/99custom"), config).unwrap();
+            assert!(ensure_no_custom_policy(&root).is_err(), "must reject: {config}");
+        }
+        // Comments alone must not block an otherwise default-policy preview.
+        fs::write(root.join("apt.conf.d/99custom"), "/* APT::Default-Release \"noble\"; */\n// #include \"/tmp/custom\"\n").unwrap();
+        assert!(ensure_no_custom_policy(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
