@@ -163,6 +163,27 @@ fn scan_cache(
     Ok(())
 }
 
+/// Build an in-memory catalog of the latest published versions from verified-update
+/// cache. This is an exploratory catalog, not APT policy (pins, phased updates,
+/// multiarch and virtual providers are not applied).
+pub fn catalog(cache: &Path, architecture: &str, max_packages: usize) -> Result<BTreeMap<String, PackageSummary>> {
+    if max_packages == 0 || max_packages > 1_000_000 { bail!("max_packages must be 1..=1000000"); }
+    let mut result = BTreeMap::<String, PackageSummary>::new();
+    scan_cache(cache, architecture, |item| {
+        if let Some(old) = result.get(&item.name) {
+            if is_better(&item.version, &old.version)? {
+                result.insert(item.name.clone(), item);
+            }
+        } else {
+            if result.len() >= max_packages { bail!("package catalog exceeds max_packages"); }
+            version::compare(&item.version, &item.version)?;
+            result.insert(item.name.clone(), item);
+        }
+        Ok(())
+    })?;
+    Ok(result)
+}
+
 /// Returns the highest published version in the isolated cache, not the APT Candidate.
 pub fn show(cache: &Path, architecture: &str, package: &str) -> Result<Option<PackageSummary>> {
     let mut found: Option<PackageSummary> = None;
