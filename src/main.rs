@@ -111,6 +111,24 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         limit: usize,
     },
+    /// Show the declared direct dependencies from the newest cached package.
+    Depends {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
+    /// Find packages declaring the requested name in Depends or Pre-Depends.
+    Rdepends {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+        #[arg(long, default_value_t = 30)]
+        limit: usize,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -223,6 +241,26 @@ async fn execute(cli: Cli) -> Result<()> {
             for item in rpt::metadata_query::list(&cache, &architecture, &prefix, limit)
                 .context(ErrorCategory::System)? {
                 println!("{}/cache {} {}", item.name, item.version, item.architecture);
+            }
+        }
+        Command::Depends { cache, package, architecture } => {
+            let item = rpt::metadata_query::show(&cache, &architecture, &package)
+                .context(ErrorCategory::System)?
+                .ok_or_else(|| anyhow::anyhow!("package not found in RPT cache: {package}"))?;
+            println!("{} {}", item.name, item.version);
+            for (label, value) in [
+                ("Pre-Depends", &item.pre_depends), ("Depends", &item.depends),
+                ("Recommends", &item.recommends), ("Suggests", &item.suggests),
+                ("Provides", &item.provides), ("Conflicts", &item.conflicts),
+                ("Breaks", &item.breaks),
+            ] {
+                if !value.is_empty() { println!("{label}: {value}"); }
+            }
+        }
+        Command::Rdepends { cache, package, architecture, limit } => {
+            for item in rpt::metadata_query::rdepends(&cache, &architecture, &package, limit)
+                .context(ErrorCategory::System)? {
+                println!("{} {}", item.name, item.version);
             }
         }
         Command::Sources { root } => {
