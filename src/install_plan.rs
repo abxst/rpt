@@ -448,7 +448,8 @@ fn reject_foreign_identity_overlap(
 /// resolver for actual package transactions.
 pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, max_packages: usize) -> Result<Vec<PlanStep>> {
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
-    let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
+    let keyed = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
+    let catalog = metadata_query::native_catalog_projection(keyed)?;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
     // Missing installed relationship metadata would silently bypass critical
@@ -512,7 +513,8 @@ pub fn preview_with_policy(
             bail!("inconsistent installed version metadata for {name}");
         }
     }
-    let mut catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
+    let mut keyed = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
+    let mut catalog = metadata_query::native_catalog_projection(keyed.clone())?;
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
     let mut validated = BTreeSet::<String>::new();
@@ -531,8 +533,13 @@ pub fn preview_with_policy(
                 bail!("candidate {name} {chosen} is not present in verified repository metadata");
             }
             let summary = metadata_query::verified_exact_version(cache, architecture, name, &chosen, &origins)?;
-            if catalog.get(name) != Some(&summary) {
-                catalog.insert(name.clone(), summary);
+            // Candidate metadata may not silently switch from a native binary
+            // to Architecture: all, or pick a foreign architecture stanza.
+            // Updates are keyed by the exact binary identity first.
+            metadata_query::insert_native_candidate(&mut keyed, summary, architecture)?;
+            let selected = metadata_query::native_catalog_projection(keyed.clone())?;
+            if selected != catalog {
+                catalog = selected;
                 changed = true;
             }
             validated.insert(name.clone());
@@ -629,6 +636,17 @@ mod tests {
         assert!(reject_foreign_identity_overlap(&entries, &unrelated, "amd64").is_ok());
     }
 
+    #[test]
+    fn candidate_projection_rejects_same_name_native_all_identity() {
+        let native = item("pkg", "2", "current");
+        let mut common = item("pkg", "1", "old");
+        common.architecture = "all".into();
+        let keyed = BTreeMap::from([
+            (metadata_query::PackageKey { name: "pkg".into(), architecture: "amd64".into() }, native),
+            (metadata_query::PackageKey { name: "pkg".into(), architecture: "all".into() }, common),
+        ]);
+        assert!(metadata_query::native_catalog_projection(keyed).is_err());
+    }
     #[test]
     fn candidate_catalog_can_resolve_older_pinned_dependency_metadata() {
         let mut latest = BTreeMap::from([
