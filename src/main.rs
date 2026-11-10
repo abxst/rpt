@@ -129,6 +129,18 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         limit: usize,
     },
+    /// Plan a conservative dependency installation, read-only; NEVER runs dpkg.
+    PlanInstall {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")]
+        status: PathBuf,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+        #[arg(long, default_value_t = 200)]
+        max_packages: usize,
+        package: String,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -262,6 +274,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)? {
                 println!("{} {}", item.name, item.version);
             }
+        }
+        Command::PlanInstall { cache, status, architecture, max_packages, package } => {
+            let steps = rpt::install_plan::preview(&cache, &status, &package, &architecture, max_packages)
+                .context(ErrorCategory::System)?;
+            println!("RPT READ-ONLY PLAN (NOT APT RESOLVER): {package}");
+            for step in &steps {
+                println!("  {} {} (installed: {})", step.package, step.version,
+                    step.installed.as_deref().unwrap_or("none"));
+            }
+            println!("Plan preview: {} package(s); NO CHANGES MADE", steps.len());
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
