@@ -93,12 +93,34 @@ fn matches(record: &PinRecord, name: &str, origin: &VerifiedVersionOrigin) -> bo
 pub fn evaluate(
     package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
 ) -> Result<Vec<EvaluatedPin>> {
+    evaluate_with_target(package, origins, records, None)
+}
+
+/// For an exact target release, APT assigns priority 990 to matching signed
+/// archives/codenames. Specific package pins override the target release;
+/// general pins do not. Unmatched repositories retain priority 500.
+pub fn evaluate_with_target(
+    package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
+    target_release: Option<&str>,
+) -> Result<Vec<EvaluatedPin>> {
     if package.is_empty() { bail!("empty package name"); }
+    if let Some(target) = target_release {
+        if target.is_empty() || target.len() > 128 || !target.bytes().all(|b|
+            b.is_ascii_alphanumeric() || b".+_-".contains(&b)) {
+            bail!("unsupported target release selector");
+        }
+    }
     for record in records { validate_record(record)?; }
     Ok(origins.iter().map(|origin| {
         let specific = records.iter().find(|r| r.package == package && matches(r, package, origin));
         let general = records.iter().find(|r| r.package == "*" && matches(r, package, origin));
-        let priority = specific.or(general).map_or(500, |r| r.priority);
+        let is_target = target_release.is_some_and(|target| {
+            origin.release.archive.as_deref() == Some(target)
+                || origin.release.codename.as_deref() == Some(target)
+        });
+        let priority = if let Some(rule) = specific { rule.priority }
+            else if is_target { 990 }
+            else { general.map_or(500, |r| r.priority) };
         EvaluatedPin {
             version: origin.version.clone(),
             repository_uri: origin.repository_uri.clone(),
@@ -127,8 +149,15 @@ pub fn preview_candidate(
     package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
     installed: Option<&str>,
 ) -> Result<CandidatePreview> {
+    preview_candidate_with_target(package, origins, records, installed, None)
+}
+
+pub fn preview_candidate_with_target(
+    package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
+    installed: Option<&str>, target_release: Option<&str>,
+) -> Result<CandidatePreview> {
     use std::{cmp::Ordering, collections::BTreeMap};
-    let evaluated = evaluate(package, origins, records)?;
+    let evaluated = evaluate_with_target(package, origins, records, target_release)?;
     let mut values = BTreeMap::<String, i32>::new();
     for entry in evaluated {
         values.entry(entry.version).and_modify(|p| *p = (*p).max(entry.priority))
@@ -262,6 +291,28 @@ mod tests {
     fn rejects_unsupported_general_version_pinning() {
         let records = [PinRecord { package: "*".into(), pin: "version 1.0".into(), priority: 700 }];
         assert!(evaluate("bash", &[], &records).is_err());
+    }
+    #[test]
+    fn target_release_overrides_general_pins_but_not_specific_pins() {
+        let mut stable = origin("1.0", "noble");
+        stable.release.codename = Some("noble".into());
+        let mut updates = origin("2.0", "noble-updates");
+        updates.release.codename = Some("noble".into());
+        let other = origin("3.0", "oracular");
+        let records = [
+            PinRecord { package: "*".into(), pin: "release n=noble".into(), priority: 700 },
+            PinRecord { package: "bash".into(), pin: "version 1.0".into(), priority: 1001 },
+        ];
+        let all = [stable, updates, other];
+        let scored = evaluate_with_target("bash", &all, &records, Some("noble")).unwrap();
+        assert_eq!(scored.iter().map(|v| v.priority).collect::<Vec<_>>(), [1001, 990, 500]);
+        assert_eq!(preview_candidate_with_target("bash", &all, &records, Some("2.0"), Some("noble"))
+            .unwrap().candidate.as_deref(), Some("1.0"));
+        assert_eq!(evaluate_with_target("curl", &all, &records, Some("noble")).unwrap()
+            .iter().map(|v| v.priority).collect::<Vec<_>>(), [990, 990, 500]);
+        assert_eq!(evaluate_with_target("curl", &all, &records, None).unwrap()
+            .iter().map(|v| v.priority).collect::<Vec<_>>(), [700, 700, 500]);
+        assert!(evaluate_with_target("bash", &all, &[], Some("noble*")).is_err());
     }
     #[test]
     fn candidate_priorities_no_downgrade_and_explicit_downgrade() {
