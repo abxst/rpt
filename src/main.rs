@@ -443,6 +443,7 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Package: {}", item.name);
             println!("Version: {}", item.version);
             println!("Architecture: {}", item.architecture);
+            println!("Multi-Arch: {}", item.multi_arch);
             if !item.section.is_empty() { println!("Section: {}", item.section); }
             if !item.depends.is_empty() { println!("Depends: {}", item.depends); }
             if !item.description.is_empty() {
