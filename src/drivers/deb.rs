@@ -50,8 +50,9 @@ impl PackageDriver for DebDriver {
         &self, cache: &Path, status: &Path, configuration: &Path,
         package: &str, architecture: &str, max_packages: usize,
     ) -> Result<Vec<crate::install_plan::PlanStep>> {
-        crate::policy::ensure_no_custom_policy(configuration)?;
-        crate::install_plan::preview(cache, status, package, architecture, max_packages)
+        crate::install_plan::preview_with_policy(
+            cache, status, configuration, package, architecture, max_packages,
+        )
     }
     fn prepare_download(
         &self, cache: &Path, names: &[String], architecture: &str,
