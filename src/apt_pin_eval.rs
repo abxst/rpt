@@ -111,6 +111,16 @@ pub fn evaluate_with_target(
         }
     }
     for record in records { validate_record(record)?; }
+    // APT phases by SOURCE package and SOURCE version together with a machine
+    // identifier. Until we reproduce its implementation and overrides, an
+    // incomplete rollout cannot silently receive an ordinary 500/990 pin.
+    for entry in origins {
+        if let Some(percent) = entry.phased_update_percentage {
+            if percent < 100 {
+                bail!("Phased-Update-Percentage {percent} for {} {} requires machine-specific APT eligibility; refusing incomplete policy preview", package, entry.version);
+            }
+        }
+    }
     Ok(origins.iter().map(|origin| {
         let specific = records.iter().find(|r| r.package == package && matches(r, package, origin));
         let general = records.iter().find(|r| r.package == "*" && matches(r, package, origin));
@@ -204,11 +214,25 @@ mod tests {
             version: version.into(), architecture: "amd64".into(),
             repository_uri: "https://example.org".into(), suite: archive.into(),
             index_path: "main/binary-amd64/Packages.xz".into(), component: "main".into(),
+            phased_update_percentage: None,
             release: ReleaseIdentity {
                 archive: Some(archive.into()), origin: Some("Example".into()),
                 ..Default::default()
             },
         }
+    }
+    #[test]
+    fn phased_candidates_fail_closed_until_machine_specific_policy_supported() {
+        let mut candidate = origin("2.0", "stable");
+        candidate.phased_update_percentage = Some(25);
+        assert!(evaluate("bash", &[candidate.clone()], &[]).is_err());
+        assert!(preview_candidate_with_target("bash", &[candidate.clone()], &[], Some("1.0"), Some("stable")).is_err());
+        candidate.phased_update_percentage = Some(0);
+        assert!(evaluate("bash", &[candidate.clone()], &[]).is_err());
+        candidate.phased_update_percentage = Some(100);
+        assert_eq!(evaluate("bash", &[candidate.clone()], &[]).unwrap()[0].priority, 500);
+        candidate.phased_update_percentage = None;
+        assert_eq!(evaluate("bash", &[candidate], &[]).unwrap()[0].priority, 500);
     }
     #[test]
     fn version_and_archive_rules_are_separate_per_occurrence() {

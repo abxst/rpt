@@ -30,6 +30,7 @@ pub struct RepositoryProvenance {
 struct Fields {
     name: String, version: String, arch: String,
     filename: String, sha256: String, size: String,
+    phased_update_percentage: Option<u8>,
 }
 fn hash_valid(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit())
@@ -138,6 +139,15 @@ fn scan(
             "Filename" => fields.filename=value.to_owned(),
             "SHA256" => fields.sha256=value.to_owned(),
             "Size" => fields.size=value.to_owned(),
+            "Phased-Update-Percentage" => {
+                if fields.phased_update_percentage.is_some() {
+                    bail!("duplicate Phased-Update-Percentage in Packages stanza");
+                }
+                let percent = value.parse::<u8>()
+                    .context("invalid Phased-Update-Percentage integer")?;
+                if percent > 100 { bail!("Phased-Update-Percentage exceeds 100"); }
+                fields.phased_update_percentage = Some(percent);
+            },
             _ => (),
         }
     }
@@ -217,6 +227,8 @@ pub struct VerifiedVersionOrigin {
     pub suite: String,
     pub index_path: String,
     pub component: String,
+    /// Authenticated Packages rollout percentage; None means not phased.
+    pub phased_update_percentage: Option<u8>,
     pub release: ReleaseIdentity,
 }
 
@@ -263,6 +275,7 @@ pub fn verified_version_origins(
                         suite: meta.suite.clone(),
                         index_path: index.release_path.clone(),
                         component: component.clone(),
+                        phased_update_percentage: field.phased_update_percentage,
                         release: release.clone(),
                     });
                 }
@@ -394,5 +407,41 @@ mod release_identity_tests {
         assert!(parse_release_identity(conflicting_alias).is_err());
         assert!(parse_release_identity("Origin: Ubuntu").is_err());
         assert!(release_component("../binary-amd64/Packages.xz").is_err());
+    }
+}
+
+#[cfg(test)]
+mod phased_metadata_tests {
+    use super::*;
+    use std::io::Cursor;
+    fn get(input: &str) -> Result<Option<u8>> {
+        let mut value = None;
+        scan(Cursor::new(input.as_bytes()), |entry| {
+            value = entry.phased_update_percentage;
+            Ok(())
+        })?;
+        Ok(value)
+    }
+    #[test]
+    fn accepts_absent_zero_intermediate_and_complete_rollouts() {
+        for (input, expected) in [
+            ("Package: demo\nVersion: 1\n\n", None),
+            ("Package: demo\nVersion: 1\nPhased-Update-Percentage: 0\n\n", Some(0)),
+            ("Package: demo\nVersion: 1\nPhased-Update-Percentage: 42\n\n", Some(42)),
+            ("Package: demo\nVersion: 1\nPhased-Update-Percentage: 100\n\n", Some(100)),
+        ] {
+            assert_eq!(get(input).unwrap(), expected);
+        }
+    }
+    #[test]
+    fn rejects_invalid_and_duplicate_rollout_metadata() {
+        for input in [
+            "Phased-Update-Percentage: 101",
+            "Phased-Update-Percentage: -1",
+            "Phased-Update-Percentage: nope",
+            "Phased-Update-Percentage: 30\nPhased-Update-Percentage: 40",
+        ] {
+            assert!(get(&format!("Package: demo\nVersion: 1\n{input}\n\n")).is_err(), "{input}");
+        }
     }
 }
