@@ -172,6 +172,19 @@ jobs:
           test -s "$RUNNER_TEMP/rpt-phased-bash"
           grep -Fq 'archive.ubuntu.com/ubuntu' "$RUNNER_TEMP/rpt-phased-bash"
           echo 'PASS signed rollout metadata inspection'
+      - name: Differential C++ APT machine phasing PRNG
+        run: |
+          set -euo pipefail
+          printf '%s\n' '#include <random>' '#include <string>' '#include <iostream>' 'int main(int argc,char**argv){std::string s=std::string(argv[1])+"-"+argv[2]+"-"+argv[3];std::seed_seq seed(s.begin(),s.end());std::minstd_rand rng(seed);std::uniform_int_distribution<unsigned> dist(0,99);std::cout<<dist(rng)<<"\n";}' > "$RUNNER_TEMP/apt-phase-reference.cc"
+          g++ -std=c++17 "$RUNNER_TEMP/apt-phase-reference.cc" -o "$RUNNER_TEMP/apt-phase-reference"
+          for machine in 00000000000000000000000000000000 11111111111111111111111111111111 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+            expected="$("$RUNNER_TEMP/apt-phase-reference" foo 1.0 "$machine")"
+            actual="$(./target/debug/rpt phased-draw --source foo --version 1.0 --machine-id "$machine")"
+            test "$expected" = "$actual"
+          done
+          ./target/debug/rpt phased-inspect --cache "$RUNNER_TEMP/rpt-metadata" --package bash --machine-id 00000000000000000000000000000000 > "$RUNNER_TEMP/rpt-phasing-detail"
+          test -s "$RUNNER_TEMP/rpt-phasing-detail"
+          echo 'PASS APT libstdc++ phased random draw and signed source metadata'
       - name: Read-only APT pin priority diagnostic
         run: |
           set -euo pipefail
