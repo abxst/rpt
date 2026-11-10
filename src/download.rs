@@ -21,8 +21,9 @@ struct Counters {
     verified: AtomicU64,
 }
 
-fn progress_bar(size: u64, name: &str) -> ProgressBar {
-    let bar = ProgressBar::new(size);
+fn progress_bar(bar: ProgressBar, name: &str) -> ProgressBar {
+    // Never draw before MultiProgress owns the bar: the initial "queued"
+    // line would otherwise become an orphan that cannot be overwritten.
     bar.set_prefix(name.chars().take(22).collect::<String>());
     bar.set_style(ProgressStyle::with_template(
         "{spinner:.cyan} {prefix:22} [{bar:28.cyan/blue}] {bytes:>10}/{total_bytes:10} {bytes_per_sec:>11} {eta:>5} {msg}"
@@ -64,10 +65,15 @@ impl Downloader {
         if !std::io::stderr().is_terminal() {
             multi.set_draw_target(ProgressDrawTarget::hidden());
         }
+        // The set of bars is fixed during this fetch. Cursor movement lets
+        // progress updates replace the same terminal rows instead of appending.
+        multi.set_move_cursor(true);
         let bars = packages.iter()
-            .map(|p| multi.add(progress_bar(p.size, &p.name)))
+            .map(|p| progress_bar(multi.add(ProgressBar::new(p.size)), &p.name))
             .collect::<Vec<_>>();
-        let results = stream::iter(packages.into_iter().zip(bars).map(|(package, bar)| {
+        // Retain a handle for each completed bar to prevent it becoming a
+        // zombie and shifting/redrawing the remaining rows.
+        let results = stream::iter(packages.into_iter().zip(bars.iter().cloned()).map(|(package, bar)| {
             let this = runner.clone();
             let root = dest.to_path_buf();
             async move {
