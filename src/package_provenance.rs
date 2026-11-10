@@ -153,6 +153,72 @@ fn scan_index(path: &Path, visitor: impl FnMut(&Fields)->Result<()>) -> Result<(
     };
     scan(reader,visitor).with_context(||format!("reading {}",path.display()))
 }
+/// Repository-scoped package occurrence, not a candidate or an APT pin.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VerifiedVersionOrigin {
+    pub version: String,
+    pub architecture: String,
+    pub repository_uri: String,
+    pub suite: String,
+    pub index_path: String,
+}
+
+/// Enumerate a single package's occurrences only after verifying GPG signatures,
+/// Release freshness, signed index digests and the on-disk cache contents.
+/// Never combine occurrences into a candidate: release pinning, architecture
+/// priority, phased updates and APT preferences are not evaluated here.
+pub fn verified_version_origins(
+    cache: &Path, name: &str, arch: &str,
+) -> Result<Vec<VerifiedVersionOrigin>> {
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')) {
+        bail!("unsafe package name");
+    }
+    if arch.is_empty() || !arch.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        bail!("unsafe architecture");
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(cache).with_context(|| format!("reading {}", cache.display()))? {
+        let path = entry?.path();
+        let id = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if path.is_dir() && id.len() == 24 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    if dirs.is_empty() { bail!("no repository cache; run rpt update first"); }
+    let mut found = BTreeSet::new();
+    for dir in dirs {
+        let meta: RepositoryProvenance = serde_json::from_slice(
+            &fs::read(dir.join("provenance.json"))
+                .context("missing signed cache provenance: run rpt update again")?
+        )?;
+        validate_repo(&dir, &meta)?;
+        for index in &meta.indexes {
+            scan_index(&dir.join(&index.local_file), |field| {
+                if field.name == name && (field.arch == arch || field.arch == "all") {
+                    version::compare(&field.version, &field.version)?;
+                    found.insert(VerifiedVersionOrigin {
+                        version: field.version.clone(),
+                        architecture: field.arch.clone(),
+                        repository_uri: meta.uri.clone(),
+                        suite: meta.suite.clone(),
+                        index_path: index.release_path.clone(),
+                    });
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let mut result = found.into_iter().collect::<Vec<_>>();
+    result.sort_by(|a, b| {
+        version::compare(&b.version, &a.version).unwrap_or(Ordering::Equal)
+            .then_with(|| a.repository_uri.cmp(&b.repository_uri))
+            .then_with(|| a.suite.cmp(&b.suite))
+            .then_with(|| a.index_path.cmp(&b.index_path))
+    });
+    Ok(result)
+}
+
 /// Only the requested artifacts are selected; this is not an install plan or Candidate.
 pub fn prepare(cache:&Path, names:&[String],arch:&str)->Result<Manifest> {
     if names.is_empty() || names.len()>100 { bail!("must request 1..=100 packages"); }
