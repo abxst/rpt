@@ -184,6 +184,27 @@ pub fn catalog(cache: &Path, architecture: &str, max_packages: usize) -> Result<
     Ok(result)
 }
 
+/// Return exact-version metadata from the cache. The caller MUST first verify
+/// signed origin/index provenance for this package/version. Reject divergent
+/// dependency-bearing metadata across repositories instead of choosing one.
+pub fn exact_version(
+    cache: &Path, architecture: &str, package: &str, wanted: &str,
+) -> Result<PackageSummary> {
+    let mut selected: Option<PackageSummary> = None;
+    scan_cache(cache, architecture, |item| {
+        if item.name != package || item.version != wanted { return Ok(()); }
+        if let Some(previous) = &selected {
+            if previous != &item {
+                bail!("divergent metadata for {package} {wanted} across cached indexes");
+            }
+        } else {
+            selected = Some(item);
+        }
+        Ok(())
+    })?;
+    selected.with_context(|| format!("no exact metadata for candidate {package} {wanted}"))
+}
+
 /// Returns the highest published version in the isolated cache, not the APT Candidate.
 pub fn show(cache: &Path, architecture: &str, package: &str) -> Result<Option<PackageSummary>> {
     let mut found: Option<PackageSummary> = None;
