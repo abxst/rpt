@@ -93,6 +93,15 @@ enum Command {
         #[arg(long, default_value = "/etc/apt")]
         apt_root: PathBuf,
     },
+    /// List signed, repository-scoped versions; NOT an APT candidate/pinning decision.
+    VerifiedOrigins {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
     PolicyPreview {
         #[arg(long, default_value = "auto")]
@@ -244,6 +253,12 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Version comparison: {}", if kind == DriverKind::Deb { "implemented" } else { "not implemented" });
             println!("Read-only package query: {}", if kind == DriverKind::Deb { "partial" } else { "not implemented" });
             println!("Package transactions: NOT IMPLEMENTED");
+        }
+        Command::VerifiedOrigins { cache, package, architecture } => {
+            for entry in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {
+                println!("{} {} {} {} {}",
+                    entry.version, entry.architecture, entry.repository_uri, entry.suite, entry.index_path);
+            }
         }
         Command::PreferencesInspect { apt_root } => {
             for record in rpt::apt_preferences::load(&apt_root)? {
