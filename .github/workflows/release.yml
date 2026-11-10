@@ -1,19 +1,28 @@
 name: Release
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 permissions:
   contents: write
 jobs:
   build:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo generate-lockfile
+      - name: Resolve dependencies
+        run: cargo generate-lockfile
       - run: cargo fmt --all
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked --all-targets
@@ -25,10 +34,18 @@ jobs:
           tar -czf dist/rpt-linux-amd64.tar.gz -C target/release rpt
           cd dist
           sha256sum rpt-linux-amd64.tar.gz > SHA256SUMS
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/rpt-linux-amd64.tar.gz
-            dist/SHA256SUMS
-          generate_release_notes: true
-          prerelease: true
+      - name: Publish guarded experimental prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=v0.1.0-alpha.1
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists, skipping."
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" dist/rpt-linux-amd64.tar.gz dist/SHA256SUMS \
+            --title "RPT $TAG — experimental transport MVP" --prerelease \
+            --notes "Experimental concurrent downloader only. Does not install packages or replace APT."
