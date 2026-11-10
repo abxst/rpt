@@ -25,6 +25,14 @@ enum Command {
         #[arg(long)] path: PathBuf,
         #[arg(long)] package: Option<String>,
     },
+    /// List available versions from local uncompressed APT indexes (not candidate policy).
+    IndexVersions {
+        #[arg(long, default_value = "/var/lib/apt/lists")]
+        lists_dir: PathBuf,
+        #[arg(long)] package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -70,6 +78,11 @@ async fn execute(cli: Cli) -> Result<()> {
             for entry in entries.into_iter().filter(|entry| package.as_ref().is_none_or(|p| *p == entry.name)) {
                 println!("{} {} {} {}", entry.name, entry.version, entry.architecture, entry.filename);
             }
+        }
+        Command::IndexVersions { lists_dir, package, architecture } => {
+            let versions = rpt::index_catalog::available_versions(&lists_dir, &package, &architecture)
+                .context("scanning APT package indexes").context(ErrorCategory::System)?;
+            for version in versions { println!("{version}"); }
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {

@@ -39,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=v0.1.0-alpha.10
+          TAG=v0.1.0-alpha.11
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release already exists, skipping."
             exit 0
