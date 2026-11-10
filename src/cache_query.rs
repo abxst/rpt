@@ -120,17 +120,66 @@ pub fn installed_version(status_file: &Path, package: &str, architecture: &str) 
     Ok(found)
 }
 
+/// Debian installed binary identity is the pair (name, architecture).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InstalledKey {
+    pub name: String,
+    pub architecture: String,
+}
+
+/// Preserve every installed native and foreign architecture copy in dpkg
+/// status. Duplicate exact identities and malformed entries fail closed.
+pub fn installed_catalog_by_arch(
+    status_file: &Path,
+) -> Result<BTreeMap<InstalledKey, Installed>> {
+    let bytes = fs::read(status_file)
+        .with_context(|| format!("opening {}", status_file.display()))?;
+    if bytes.len() > 64 * 1024 * 1024 {
+        bail!("dpkg status file exceeds safe size");
+    }
+    let raw = std::str::from_utf8(&bytes)?;
+    let mut result = BTreeMap::new();
+    for entry in crate::package_index::parse(raw)? {
+        let Some(status) = entry.field("Status") else { continue };
+        if !is_installed_status(status) { continue; }
+        let name = entry.field("Package").context("installed package missing Package")?;
+        let architecture = entry.field("Architecture")
+            .context("installed package missing Architecture")?;
+        let version = entry.field("Version").context("installed package missing Version")?;
+        if name.is_empty() || !name.bytes().all(|b|
+            b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+            || architecture.is_empty() || !architecture.bytes().all(|b|
+                b.is_ascii_alphanumeric() || b == b'-')
+        {
+            bail!("invalid dpkg installed package identity");
+        }
+        version::compare(version, version)?;
+        let key = InstalledKey {
+            name: name.to_owned(),
+            architecture: architecture.to_owned(),
+        };
+        let item = Installed {
+            version: version.to_owned(),
+            architecture: architecture.to_owned(),
+            status: status.to_owned(),
+        };
+        if result.insert(key.clone(), item).is_some() {
+            bail!("duplicate dpkg installed package identity {}:{}", key.name, key.architecture);
+        }
+    }
+    Ok(result)
+}
+
 /// Load dpkg installed state once for dependency planning. Does not mutate dpkg.
 pub fn installed_catalog(status_file: &Path, architecture: &str) -> Result<BTreeMap<String, String>> {
-    let input = fs::File::open(status_file)
-        .with_context(|| format!("opening {}", status_file.display()))?;
+    let complete = installed_catalog_by_arch(status_file)?;
     let mut result = BTreeMap::new();
-    scan(input, |name, version, arch, status| {
-        if (arch == architecture || arch == "all") &&
-            is_installed_status(status) && !version.is_empty() {
-            result.insert(name.to_owned(), version.to_owned());
+    for (key, entry) in complete {
+        if key.architecture != architecture && key.architecture != "all" { continue; }
+        if result.insert(key.name.clone(), entry.version).is_some() {
+            bail!("ambiguous native/all dpkg package name {}; architecture-aware solver required", key.name);
         }
-    })?;
+    }
     Ok(result)
 }
 
@@ -160,6 +209,47 @@ mod tests {
         assert_eq!(installed_version(&dir, "core", "amd64").unwrap().unwrap().status, "hold ok installed");
         fs::remove_file(dir).unwrap();
     }
+    #[test]
+    fn installed_multiarch_index_preserves_name_architecture_pairs() {
+        let path = std::env::temp_dir().join(format!("rpt-multiarch-index-{}", std::process::id()));
+        let fixture = "\
+Package: libdemo\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
+Package: libdemo\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\n\n\
+Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n\
+Package: removed\nArchitecture: amd64\nVersion: 1\nStatus: deinstall ok config-files\n\n";
+        fs::write(&path, fixture).unwrap();
+        let all = installed_catalog_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[&InstalledKey { name: "libdemo".into(), architecture: "amd64".into() }].version, "2");
+        assert_eq!(all[&InstalledKey { name: "libdemo".into(), architecture: "i386".into() }].status, "hold ok installed");
+        assert_eq!(installed_catalog(&path, "amd64").unwrap()["libdemo"], "2");
+        assert_eq!(installed_catalog(&path, "i386").unwrap()["libdemo"], "1");
+        assert_eq!(installed_catalog(&path, "amd64").unwrap()["docs"], "4");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn installed_multiarch_index_rejects_duplicate_exact_identity() {
+        let path = std::env::temp_dir().join(format!("rpt-multiarch-duplicate-{}", std::process::id()));
+        fs::write(&path, "\
+Package: libdemo\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: libdemo\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n").unwrap();
+        assert!(installed_catalog_by_arch(&path).is_err());
+        assert!(installed_catalog(&path, "amd64").is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn installed_multiarch_index_rejects_native_all_collision() {
+        let path = std::env::temp_dir().join(format!("rpt-multiarch-collision-{}", std::process::id()));
+        fs::write(&path, "\
+Package: shared\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: shared\nArchitecture: all\nVersion: 1\nStatus: install ok installed\n\n").unwrap();
+        assert_eq!(installed_catalog_by_arch(&path).unwrap().len(), 2);
+        assert!(installed_catalog(&path, "amd64").is_err());
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn scans_xz_indexes() {
         use std::io::Read;
