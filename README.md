@@ -11,9 +11,10 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 - Multi-package concurrent HTTP(S) downloads, optional byte-range segmentation.
 - Bounded worker counts, expected-size and SHA-256 verification before publishing files.
 - Rust unit tests, CI and automated **pre-release** workflow for Linux amd64.
+- In-process bounded FIFO single-worker transaction queue primitive with serialization tests (not connected to dpkg).
 
 **NOT IMPLEMENTED:** signed repository metadata verification, complete APT configuration
-and policy compatibility, dependency solver, dpkg transaction queue, installation,
+and policy compatibility, dependency solver, durable dpkg transaction executor, installation,
 upgrade or removal. The sample manifest is illustrative, not installable.
 Do not use this release to replace system APT.
 
