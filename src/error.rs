@@ -27,9 +27,13 @@ impl ErrorCategory {
 /// Format the causal chain without duplicating internal category markers.
 /// The category is already displayed by the CLI as `[download]` or `[system]`.
 pub fn describe(error: &anyhow::Error) -> String {
+    let category = error.downcast_ref::<ErrorCategory>();
     error.chain()
-        .filter(|cause| cause.downcast_ref::<ErrorCategory>().is_none())
-        .map(ToString::to_string)
+        .enumerate()
+        .filter(|(index, cause)| {
+            !(*index == 0 && category.is_some_and(|kind| cause.to_string() == kind.label()))
+        })
+        .map(|(_, cause)| cause.to_string())
         .collect::<Vec<_>>()
         .join(": ")
 }
