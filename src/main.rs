@@ -63,7 +63,7 @@ async fn execute(cli: Cli) -> Result<()> {
             });
         }
         Command::InspectIndex { path, package } => {
-            let text = tokio::fs::read_to_string(&path)
+            let text = tokio::fs::read_to_string(&path).await
                 .context("reading Packages index").context(ErrorCategory::System)?;
             let entries = rpt::package_index::entries(&text)
                 .context("parsing Packages index").context(ErrorCategory::System)?;
