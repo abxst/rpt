@@ -195,3 +195,22 @@ packages only in residual-config state. CI compares both commands against
 
 These commands do NOT implement `apt-cache policy`, dependency resolution,
 candidate selection, multi-arch policy or repository pin priorities.
+
+### Default-priority policy preview (alpha.16)
+
+`rpt policy-preview --cache ./rpt-lists --package bash` reads the isolated
+RPT index cache and `/var/lib/dpkg/status`, prints installed and available
+versions, and computes a **baseline** candidate for default APT priorities
+(repository 500, installed 100), respecting the no-downgrade rule. RPT
+refuses to compute a candidate when nonempty APT preference files or an
+explicit target-release configuration are detected.
+
+This **is not apt-cache policy parity**: cache may include only a subset of
+system repositories, no origin/priority labels, phasing, package holds,
+multi-architecture resolution or complete apt.conf semantics are applied.
+The preview never installs or changes packages. Do not use its candidate
+as the basis for actual package transactions.
+
+Ubuntu CI compares an uncomplicated `bash` candidate with
+`apt-cache policy bash`, and unit tests reject pinning and target-release
+configurations.
