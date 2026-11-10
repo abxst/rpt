@@ -1,0 +1,18 @@
+[package]
+name = "rpt"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Experimental Rust APT-compatible package transport and transaction engine"
+repository = "https://github.com/abxst/rpt"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
