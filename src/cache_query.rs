@@ -104,20 +104,17 @@ pub fn cache_versions(cache: &Path, package: &str, architecture: &str) -> Result
 /// Inspect the installed version from dpkg's state, without changing the system.
 /// Ignore residual-config entries and not-installed states.
 pub fn installed_version(status_file: &Path, package: &str, architecture: &str) -> Result<Option<Installed>> {
-    let mut found = None;
-    let input = fs::File::open(status_file)
-        .with_context(|| format!("opening {}", status_file.display()))?;
-    scan(input, |name, version, arch, status| {
-        if name == package && (arch == architecture || arch == "all")
-            && is_installed_status(status) && !version.is_empty() {
-            found = Some(Installed {
-                version: version.to_owned(),
-                architecture: arch.to_owned(),
-                status: status.to_owned(),
-            });
-        }
-    })?;
-    Ok(found)
+    let complete = installed_catalog_by_arch(status_file)?;
+    let specific = complete.get(&InstalledKey {
+        name: package.to_owned(), architecture: architecture.to_owned(),
+    });
+    let common = complete.get(&InstalledKey {
+        name: package.to_owned(), architecture: "all".into(),
+    });
+    if specific.is_some() && common.is_some() {
+        bail!("ambiguous installed binary {package}: both native and all architectures");
+    }
+    Ok(specific.or(common).cloned())
 }
 
 /// Debian installed binary identity is the pair (name, architecture).
