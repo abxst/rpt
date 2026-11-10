@@ -199,6 +199,28 @@ jobs:
             exit 1
           fi
           echo 'PASS read-only candidate diagnostic and conservative pin rejection'
+      - name: Differential APT Release conjunctive pin fixture
+        run: |
+          set -euo pipefail
+          set -x
+          root="$RUNNER_TEMP/rpt-release-selectors"
+          mkdir -p "$root/preferences.d"
+          printf 'Package: bash\nPin: release o=Ubuntu, n=noble, a=noble, c=main\nPin-Priority: 751\n' > "$root/preferences"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-release-candidate"
+          cat "$RUNNER_TEMP/rpt-release-candidate"
+          grep -q 'Priority: 751' "$RUNNER_TEMP/rpt-release-candidate"
+          apt-cache -o Dir::Etc::preferences="$root/preferences" -o Dir::Etc::preferencesparts="$root/preferences.d" policy bash > "$RUNNER_TEMP/apt-release-candidate"
+          cat "$RUNNER_TEMP/apt-release-candidate"
+          grep -Eq '^[[:space:]]*\*\*\*[[:space:]]+[^[:space:]]+[[:space:]]+751$' "$RUNNER_TEMP/apt-release-candidate"
+          expected="$(awk '/^[[:space:]]*Candidate:/{print $2;exit}' "$RUNNER_TEMP/apt-release-candidate")"
+          actual="$(awk '/^Candidate:/{print $2;exit}' "$RUNNER_TEMP/rpt-release-candidate")"
+          test "$expected" = "$actual"
+          printf 'Package: bash\nPin: release o=Ubuntu,o=Other\nPin-Priority: 751\n' > "$root/preferences"
+          if ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash >/dev/null 2>&1; then
+            echo 'duplicate Release selector accepted' >&2
+            exit 1
+          fi
+          echo 'PASS exact conjunctive Release selectors and APT comparison'
       - name: Read-only metadata show search list on Ubuntu
         run: |
           set -euo pipefail

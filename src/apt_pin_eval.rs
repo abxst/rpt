@@ -12,6 +12,41 @@ pub struct EvaluatedPin {
     pub priority: i32,
 }
 
+/// Supported APT Release selectors use exact, comma-separated conjunctive
+/// matches. In particular, "o=" is the signed Release Origin, not the host.
+fn parse_release_predicates(value: &str) -> Result<Vec<(&str, &str)>> {
+    let mut result = Vec::new();
+    for clause in value.split(',') {
+        let (key, expected) = clause.trim().split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid APT release predicate"))?;
+        let key = key.trim();
+        let expected = expected.trim();
+        if !matches!(key, "a" | "n" | "o" | "l" | "c")
+            || expected.is_empty()
+            || !expected.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
+            || result.iter().any(|(seen, _)| *seen == key) {
+            bail!("unsupported or duplicate APT release predicate: {clause}");
+        }
+        result.push((key, expected));
+    }
+    if result.is_empty() { bail!("empty APT release selector"); }
+    Ok(result)
+}
+
+fn release_matches(value: &str, origin: &VerifiedVersionOrigin) -> bool {
+    // Validated before evaluating. This non-fallible match is only called from
+    // evaluate() after validate_record() has rejected unsupported expressions.
+    let Ok(clauses) = parse_release_predicates(value) else { return false };
+    clauses.into_iter().all(|(key, value)| match key {
+        "a" => origin.release.archive.as_deref() == Some(value),
+        "n" => origin.release.codename.as_deref() == Some(value),
+        "o" => origin.release.origin.as_deref() == Some(value),
+        "l" => origin.release.label.as_deref() == Some(value),
+        "c" => origin.component == value,
+        _ => false,
+    })
+}
+
 /// APT policy accepts many wildcard, origin, architecture and preference forms.
 /// Reject all unsupported forms before evaluating any version, including records
 /// for unrelated packages: otherwise a caller could mistake partial policy for
@@ -26,8 +61,7 @@ fn validate_record(record: &PinRecord) -> Result<()> {
     let valid = match kind {
         "version" => !value.is_empty() && !value.contains('*') && !value.contains('?')
             && crate::version::compare(value, value).is_ok(),
-        "release" => value.starts_with("a=") && value.len() > 2
-            && value[2..].bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+        "release" => parse_release_predicates(value).is_ok(),
         _ => false,
     };
     if !valid { bail!("unsupported pin selector: {}", record.pin); }
@@ -43,7 +77,7 @@ fn matches(record: &PinRecord, name: &str, origin: &VerifiedVersionOrigin) -> bo
     let value = value.trim();
     match kind {
         "version" => origin.version == value,
-        "release" => origin.release.archive.as_deref() == Some(&value[2..]),
+        "release" => release_matches(value, origin),
         _ => false,
     }
 }
@@ -159,10 +193,42 @@ mod tests {
                 package: package.into(), pin: "version 1.0".into(), priority: 500,
             }]).is_err());
         }
-        for pin in ["origin example.org", "release n=stable", "version 1.*", "release a=stable,o=Example"] {
+        for pin in ["origin example.org", "release x=stable", "version 1.*", "release a=stable,o=Example,o=Other", "release a=stable,*", "release a="] {
             assert!(evaluate("bash", &[], &[PinRecord {
                 package: "bash".into(), pin: pin.into(), priority: 500,
             }]).is_err());
+        }
+    }
+    #[test]
+    fn conjunctive_signed_release_selectors_and_component() {
+        let mut first = origin("1.0", "noble");
+        first.release.codename = Some("noble".into());
+        first.release.label = Some("Ubuntu".into());
+        first.release.origin = Some("Ubuntu".into());
+        let mut second = first.clone();
+        second.component = "universe".into();
+        second.index_path = "universe/binary-amd64/Packages.xz".into();
+        let records = [
+            PinRecord { package: "bash".into(),
+                pin: "release o=Ubuntu, n=noble, c=main, l=Ubuntu, a=noble".into(),
+                priority: 901 },
+        ];
+        let result = evaluate("bash", &[first, second], &records).unwrap();
+        assert_eq!(result.iter().map(|p| p.priority).collect::<Vec<_>>(), [901, 500]);
+        assert!(parse_release_predicates("o=Ubuntu,o=Other").is_err());
+        assert!(parse_release_predicates("o=Ubuntu,*").is_err());
+        assert!(parse_release_predicates("a=").is_err());
+    }
+    #[test]
+    fn single_release_keys_match_signed_values() {
+        let mut item = origin("1.0", "noble-updates");
+        item.release.codename = Some("noble".into());
+        item.release.label = Some("Ubuntu".into());
+        item.release.origin = Some("Ubuntu".into());
+        for pin in ["release n=noble", "release o=Ubuntu", "release l=Ubuntu",
+                    "release a=noble-updates", "release c=main"] {
+            let records = [PinRecord { package: "bash".into(), pin: pin.into(), priority: 723 }];
+            assert_eq!(evaluate("bash", &[item.clone()], &records).unwrap()[0].priority, 723, "{pin}");
         }
     }
     #[test]
