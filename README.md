@@ -299,3 +299,7 @@ native support for RPM, apk-tools or pacman is advertised.
 ### Read-only APT preferences inspection (post-alpha.20 development)
 
 `rpt preferences-inspect --apt-root /etc/apt` parses simple `Package`, `Pin`, and `Pin-Priority` records in `preferences` and `preferences.d` without changing system state. It intentionally rejects unknown, duplicate or malformed fields rather than silently applying incorrect policy. The parsed data is **not** used for candidate selection or installation. Full APT pinning parity, regular expressions, complex selectors, and repository-specific version priority remain unimplemented. `policy-preview` still refuses active preference files.
+
+### Signed repository-scoped version inventory (experimental)
+
+`rpt verified-origins --cache ./rpt-lists --package bash --architecture amd64` prints one line per matching signed repository/index occurrence: version, architecture, repository URI, suite and index path. It revalidates the `InRelease` signature/freshness and each cached index SHA-256/size before reading metadata. Multiple repositories advertising an identical package version remain separate entries. This is intentionally **not** `apt-cache policy`: no pin priority, Release Origin/Label fields, candidate selection or transaction permission is inferred. It requires a fresh signed RPT cache and a valid Signed-By keyring.
