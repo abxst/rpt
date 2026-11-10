@@ -114,6 +114,38 @@ jobs:
           ./target/debug/rpt rdepends --cache "$target" --limit 10 libc6 > "$RUNNER_TEMP/rpt-rdepends"
           test -s "$RUNNER_TEMP/rpt-rdepends"
           echo "PASS cached show/search/list/depends/rdepends"
+      - name: Fail-closed dependency install-plan fixture (read only)
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/rpt-plan-fixture"
+          mkdir -p "$fixture/cache/abcdefabcdefabcdefabcdef" "$fixture/apt"
+          printf 'test fixture only\n' > "$fixture/cache/abcdefabcdefabcdefabcdef/InRelease"
+          cat > "$fixture/cache/abcdefabcdefabcdefabcdef/index-0.raw" <<'EOF'
+          Package: app
+          Version: 2.0
+          Architecture: amd64
+          Depends: libdemo (>= 1.0)
+
+          Package: libdemo
+          Version: 1.1
+          Architecture: amd64
+
+          EOF
+          touch "$fixture/status"
+          ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app > "$fixture/plan"
+          grep -Fq 'libdemo 1.1' "$fixture/plan"
+          grep -Fq 'app 2.0' "$fixture/plan"
+          grep -Fq 'NO CHANGES MADE' "$fixture/plan"
+          cat > "$fixture/apt/preferences" <<'EOF'
+          Package: *
+          Pin: release a=noble
+          Pin-Priority: 900
+          EOF
+          if ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app > /dev/null 2>&1; then
+            echo "Plan incorrectly accepted unhandled APT pinning" >&2
+            exit 1
+          fi
+          echo "PASS dry-run dependency plan and pinning refusal"
       - name: Reject unsupported APT update flags
         run: |
           if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then

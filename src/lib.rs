@@ -2,6 +2,7 @@
 pub mod download;
 pub mod cache_query;
 pub mod metadata_query;
+pub mod install_plan;
 pub mod policy;
 pub mod update;
 pub mod package_index;
