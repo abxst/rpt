@@ -283,6 +283,26 @@ mod tests {
         assert!(verify(&path, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").await.unwrap());
         fs::remove_file(path).await.unwrap();
     }
+    #[tokio::test]
+    async fn cache_hit_counts_as_verified_without_network() {
+        let root = std::env::temp_dir().join(format!("rpt-cache-stats-{}", std::process::id()));
+        fs::create_dir_all(&root).await.unwrap();
+        fs::write(root.join("cached.deb"), b"abc").await.unwrap();
+        let package = Package {
+            name: "cached".into(),
+            url: "https://example.org/cached.deb".into(),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+            size: 3,
+            filename: "cached.deb".into(),
+        };
+        let engine = Downloader::new(1, 1).unwrap();
+        engine.download_one(&package, &root).await.unwrap();
+        assert_eq!(engine.counters.cache_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.counters.verified.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.counters.bytes.load(Ordering::Relaxed), 0);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
     #[test]
     fn classifies_permanent_and_retryable_errors() {
         let missing = reqwest::Client::new()
