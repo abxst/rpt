@@ -133,10 +133,12 @@ pub fn emit(
 /// The category is already displayed by the CLI as `[download]` or `[system]`.
 pub fn describe(error: &anyhow::Error) -> String {
     let category = error.downcast_ref::<ErrorCategory>();
+    let explicit_code = error.downcast_ref::<ErrorCode>();
     error.chain()
         .enumerate()
         .filter(|(index, cause)| {
             !(*index == 0 && category.is_some_and(|kind| cause.to_string() == kind.label()))
+                && !explicit_code.is_some_and(|kind| cause.to_string() == kind.label())
         })
         .map(|(_, cause)| cause.to_string())
         .collect::<Vec<_>>()
