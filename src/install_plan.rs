@@ -328,14 +328,14 @@ impl Solver<'_> {
         let staged: BTreeMap<&str, &str> = self.plan.iter()
             .map(|step| (step.package.as_str(), step.version.as_str())).collect();
         for (new_name, new_version) in &staged {
-            let new_pkg = self.catalog.get(*new_name)
+            let new_pkg = self.key_for(new_name)?.and_then(|key| self.catalog.get(&key))
                 .context("staged package missing repository metadata")?;
             for (installed_name, installed_version) in self.installed {
                 if installed_name == *new_name { continue; }
                 let effective_version = staged.get(installed_name.as_str())
                     .copied().unwrap_or(installed_version);
                 let (conflicts, breaks, provider) =
-                    if let Some(pkg) = self.catalog.get(installed_name)
+                    if let Some(pkg) = self.key_for(installed_name)?.and_then(|key| self.catalog.get(&key))
                         .filter(|_| staged.contains_key(installed_name.as_str())) {
                         (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
                     } else if let Some(status) = self.installed_relations.get(installed_name) {
@@ -357,7 +357,7 @@ impl Solver<'_> {
             }
             for (peer_name, peer_version) in &staged {
                 if peer_name == new_name { continue; }
-                let peer = self.catalog.get(*peer_name)
+                let peer = self.key_for(peer_name)?.and_then(|key| self.catalog.get(&key))
                     .context("staged peer missing repository metadata")?;
                 if relations_hit(&new_pkg.conflicts, peer_name, peer_version, &peer.provides)?
                     || relations_hit(&new_pkg.breaks, peer_name, peer_version, &peer.provides)?
@@ -451,7 +451,7 @@ fn reject_foreign_identity_overlap(
 pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, max_packages: usize) -> Result<Vec<PlanStep>> {
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
     let keyed = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
-    let catalog = metadata_query::native_catalog_projection(keyed)?;
+    let catalog = keyed;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
     // Missing installed relationship metadata would silently bypass critical
@@ -472,7 +472,7 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
 /// Shared read-only solver used both for ordinary previews and candidate
 /// metadata selection. No transaction state or dpkg writes.
 fn solve_catalog(
-    catalog: &BTreeMap<String, PackageSummary>,
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
     installed: &BTreeMap<String, String>,
     installed_relations: &BTreeMap<String, InstalledRelations>,
     package: &str, max_packages: usize, architecture: &str,
@@ -515,8 +515,7 @@ pub fn preview_with_policy(
             bail!("inconsistent installed version metadata for {name}");
         }
     }
-    let mut keyed = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
-    let mut catalog = metadata_query::native_catalog_projection(keyed.clone())?;
+    let mut catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
     let mut validated = BTreeSet::<String>::new();
@@ -538,12 +537,10 @@ pub fn preview_with_policy(
             // Candidate metadata may not silently switch from a native binary
             // to Architecture: all, or pick a foreign architecture stanza.
             // Updates are keyed by the exact binary identity first.
-            let key = metadata_query::insert_native_candidate(&mut keyed, summary, architecture)?;
-            let selected = keyed.get(&key).context("candidate identity missing after insertion")?;
-            if catalog.get(name) != Some(selected) {
-                catalog.insert(name.clone(), selected.clone());
-                changed = true;
-            }
+            let key = metadata_query::native_key_for(&catalog, name, architecture)?;
+            let old = catalog.get(&key).context("missing preexisting binary metadata")?;
+            if old != &summary { changed = true; }
+            metadata_query::insert_native_candidate(&mut catalog, summary, architecture)?;
             validated.insert(name.clone());
         }
         // Select metadata for mandatory concrete dependencies *before* trying
@@ -552,10 +549,12 @@ pub fn preview_with_policy(
         let mut mandatory = BTreeSet::new();
         for name in &roots {
             if !validated.contains(name) { continue; }
-            let summary = catalog.get(name).context("validated candidate missing catalog metadata")?;
+            let key = metadata_query::native_key_for(&catalog, name, architecture)?;
+            let summary = catalog.get(&key).context("validated candidate missing catalog metadata")?;
             for group in parse_groups_for_arch(&summary.pre_depends, architecture)?.into_iter()
                 .chain(parse_groups_for_arch(&summary.depends, architecture)?) {
-                if group.len() == 1 && catalog.contains_key(&group[0].name) {
+                if group.len() == 1 && (catalog.contains_key(&PackageKey { name: group[0].name.clone(), architecture: architecture.into() })
+                    || catalog.contains_key(&PackageKey { name: group[0].name.clone(), architecture: "all".into() })) {
                     mandatory.insert(group[0].name.clone());
                 }
             }
@@ -615,9 +614,14 @@ mod tests {
             provides: String::new(), conflicts: String::new(), breaks: String::new(),
         }
     }
+    fn test_keyed(catalog: &BTreeMap<String, PackageSummary>) -> BTreeMap<PackageKey, PackageSummary> {
+        catalog.values().map(|item| (PackageKey {
+            name: item.name.clone(), architecture: item.architecture.clone(),
+        }, item.clone())).collect()
+    }
     fn solve(catalog: &BTreeMap<String, PackageSummary>, installed: &BTreeMap<String,String>, name: &str) -> Result<Vec<PlanStep>> {
         let mut s = Solver {
-            catalog, installed, installed_relations: &BTreeMap::new(),
+            catalog: &test_keyed(catalog), installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)),
         };
@@ -661,7 +665,7 @@ mod tests {
         // different dependency graph from the latest published version.
         latest.insert("app".into(), item("app", "1", "lib (>= 1)"));
         latest.insert("lib".into(), item("lib", "1", ""));
-        let plan = solve_catalog(&latest, &installed, &relations, "app", 20, "amd64").unwrap();
+        let plan = solve_catalog(&test_keyed(&latest), &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|x| (x.package.as_str(), x.version.as_str()))
             .collect::<Vec<_>>(), [("lib", "1"), ("app", "1")]);
     }
