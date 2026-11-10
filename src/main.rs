@@ -119,8 +119,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 workers, retries, quiet,
                 progress: !no_progress && quiet == 0, log_format: format,
             };
-            rpt::update::update(&root, &output, settings).await
-                .context(ErrorCategory::Download)?;
+            rpt::update::update(&root, &output, settings).await?;
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
