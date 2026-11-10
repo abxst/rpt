@@ -169,7 +169,7 @@ impl Downloader {
             let bar = bar.clone();
             let package_size = package.size;
             let counters = self.counters.clone();
-            tasks.spawn(async move { fetch_range(client, url, path, start, end, package_size, bar, counters).await });
+            tasks.spawn(async move { fetch_range(client, url, path, (start, end, package_size), bar, counters).await });
         }
         while let Some(joined) = tasks.join_next().await {
             if let Err(e) = joined.context("segment task panicked")? {
@@ -231,7 +231,8 @@ fn valid_content_range(value: &str, start: u64, end: u64, total: u64) -> bool {
     value.trim() == format!("bytes {start}-{end}/{total}")
 }
 
-async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end: u64, total_size: u64, bar: ProgressBar, counters: Arc<Counters>) -> Result<()> {
+async fn fetch_range(client: Client, url: String, path: PathBuf, range: (u64, u64, u64), bar: ProgressBar, counters: Arc<Counters>) -> Result<()> {
+    let (start, end, total_size) = range;
     counters.requests.fetch_add(1, Ordering::Relaxed);
     counters.range_parts.fetch_add(1, Ordering::Relaxed);
     let response = client.get(&url)
