@@ -3,7 +3,7 @@
 use crate::version;
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
-use std::{cmp::Ordering, collections::HashSet, fs, io::{BufRead, BufReader, Read}, path::Path};
+use std::{cmp::Ordering, collections::{HashSet, BTreeMap}, fs, io::{BufRead, BufReader, Read}, path::Path};
 use xz2::read::XzDecoder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +111,20 @@ pub fn installed_version(status_file: &Path, package: &str, architecture: &str) 
         }
     })?;
     Ok(found)
+}
+
+/// Load dpkg installed state once for dependency planning. Does not mutate dpkg.
+pub fn installed_catalog(status_file: &Path, architecture: &str) -> Result<BTreeMap<String, String>> {
+    let input = fs::File::open(status_file)
+        .with_context(|| format!("opening {}", status_file.display()))?;
+    let mut result = BTreeMap::new();
+    scan(input, |name, version, arch, status| {
+        if (arch == architecture || arch == "all") &&
+            status == "install ok installed" && !version.is_empty() {
+            result.insert(name.to_owned(), version.to_owned());
+        }
+    })?;
+    Ok(result)
 }
 
 #[cfg(test)]
