@@ -458,7 +458,7 @@ pub async fn update(root: &Path, dest: &Path, opts: UpdateOptions) -> Result<()>
         }
     }
     if opts.quiet < 2 {
-        println!("Update summary: {good}/{count} repositories, {total} indexes, {:.2} MiB transferred, {} requests, {} retries",
+        println!("Update summary: {good}/{count} repositories, {total} indexes, {:.2} MiB transferred, {} index attempts, {} retries",
             bytes as f64 / 1_048_576.0,
             stats.attempts.load(Ordering::Relaxed), stats.retries.load(Ordering::Relaxed));
     }
