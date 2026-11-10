@@ -290,13 +290,14 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::CandidateInspect { cache, status, apt_root, package, architecture } => {
-            rpt::policy::ensure_supported_apt_configuration(&apt_root)?;
+            let default_release = rpt::policy::read_default_release(&apt_root)?;
             let records = rpt::apt_preferences::load(&apt_root)?;
             let origins = rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)?;
             let installed = rpt::cache_query::installed_version(&status, &package, &architecture)?
                 .map(|entry| entry.version);
-            let result = rpt::apt_pin_eval::preview_candidate(
+            let result = rpt::apt_pin_eval::preview_candidate_with_target(
                 &package, &origins, &records, installed.as_deref(),
+                default_release.as_deref(),
             )?;
             println!("Installed: {}", result.installed.as_deref().unwrap_or("(none)"));
             println!("Candidate: {}", result.candidate.as_deref().unwrap_or("(none)"));
@@ -306,10 +307,12 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::PinInspect { cache, apt_root, package, architecture } => {
             // This independent diagnostic never changes existing policy-preview behaviour.
-            rpt::policy::ensure_supported_apt_configuration(&apt_root)?;
+            let default_release = rpt::policy::read_default_release(&apt_root)?;
             let records = rpt::apt_preferences::load(&apt_root)?;
             let origins = rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)?;
-            for item in rpt::apt_pin_eval::evaluate(&package, &origins, &records)? {
+            for item in rpt::apt_pin_eval::evaluate_with_target(
+                &package, &origins, &records, default_release.as_deref(),
+            )? {
                 println!("{} {} {} {}", item.version, item.priority, item.repository_uri, item.suite);
             }
         }

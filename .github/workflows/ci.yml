@@ -240,6 +240,28 @@ jobs:
             exit 1
           fi
           echo 'PASS exact conjunctive Release selectors and APT comparison'
+      - name: APT Default-Release 990 differential and fail-closed config
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rpt-default-release"
+          mkdir -p "$root/apt.conf.d" "$root/preferences.d"
+          printf 'APT::Default-Release "noble";\n' > "$root/apt.conf.d/50target"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-target-result"
+          grep -Fq 'Priority: 990' "$RUNNER_TEMP/rpt-target-result"
+          apt-cache -o APT::Default-Release=noble -o Dir::Etc::preferences="$root/preferences" -o Dir::Etc::preferencesparts="$root/preferences.d" policy bash > "$RUNNER_TEMP/apt-target-result"
+          grep -Eq '[[:space:]]990$' "$RUNNER_TEMP/apt-target-result"
+          expected="$(awk '/^[[:space:]]*Candidate:/{print $2;exit}' "$RUNNER_TEMP/apt-target-result")"
+          actual="$(awk '/^Candidate:/{print $2;exit}' "$RUNNER_TEMP/rpt-target-result")"
+          test "$expected" = "$actual"
+          printf 'Package: bash\nPin: release a=noble\nPin-Priority: 1001\n' > "$root/preferences"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-target-specific"
+          grep -Fq 'Priority: 1001' "$RUNNER_TEMP/rpt-target-specific"
+          printf 'APT::Default-Release "noble*";\n' > "$root/apt.conf.d/50target"
+          if ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash >/dev/null 2>&1; then
+            echo 'Unsafe target release syntax accepted' >&2
+            exit 1
+          fi
+          echo 'PASS target release priority and fail-closed config'
       - name: Read-only metadata show search list on Ubuntu
         run: |
           set -euo pipefail
