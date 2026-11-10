@@ -132,3 +132,27 @@ The current implementation supports Packages.xz, Packages.gz, and uncompressed
 Packages on the wire, but stores them without decompression. Repository
 metadata date/Valid-Until policy, By-Hash acquisition, apt.conf source options,
 all APT transports and key management still require further compatibility work.
+
+### Queued metadata scheduler and index progress (alpha.13)
+
+`rpt update --root /etc/apt --output ./rpt-lists --workers 8 -o Acquire::Retries=2`
+runs an in-process, bounded FIFO index-job queue. Each signed repository
+InRelease is fetched and checked before its index jobs are added. Multiple
+worker tasks consume queued index jobs with a global semaphore capping
+simultaneous network transfers across repositories. Each index reports
+bytes, speed, ETA, queued/downloading/retrying/verified/failed on an
+interactive terminal; `--no-progress` suppresses the display.
+The scheduler uses bounded memory for queued jobs, but a full repository's
+job descriptors are still held while dispatching.
+
+APT-style **update-only** options implemented: `-q`/`--quiet`, `-qq`,
+`-o Acquire::Retries=N`/`--option Acquire::Retries=N` (0–10).
+Unimplemented APT options fail closed and must not be treated as supported.
+`--log-format json` emits JSON errors/retries on stderr, not JSON summaries.
+The summary distinguishes authenticated repositories and indexes;
+`index attempts` excludes the preliminary InRelease requests.
+
+Partial repository failures return nonzero and leave the affected repository's
+prior cache unchanged. Other repositories may have committed successfully;
+the update is not an all-repository atomic transaction. RPT still does NOT
+overwrite /var/lib/apt/lists or provide full APT update compatibility.
