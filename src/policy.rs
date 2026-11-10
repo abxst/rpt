@@ -81,6 +81,9 @@ pub fn read_default_release(apt_root: &Path) -> Result<Option<String>> {
             .with_context(|| format!("reading {}", path.display()))?;
         for line in data.lines() {
             let line = line.trim();
+            if line.to_ascii_lowercase().starts_with("#include") {
+                bail!("APT configuration includes are unsupported: {}", path.display());
+            }
             if line.is_empty() || line.starts_with("//") || line.starts_with('#') { continue; }
             let value = line.strip_prefix("APT::Default-Release ")
                 .and_then(|v| v.strip_suffix(';'))
