@@ -5,6 +5,8 @@ use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use crate::error::{code, describe, emit, classify, ErrorCategory, ErrorCode, LogFormat};
 use reqwest::{Client, Url};
+use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,6 +14,8 @@ use std::{
     time::Duration,
     sync::{Arc, atomic::{AtomicU64, Ordering}},
     io::IsTerminal,
+    fs::OpenOptions,
+    time::SystemTime,
 };
 use tokio::{fs, io::AsyncWriteExt, process::Command, sync::{Semaphore, mpsc, oneshot, Mutex}, task::JoinSet};
 
@@ -224,15 +228,73 @@ struct Index {
     path: String,
     size: u64,
     digest: String,
+    by_hash: bool,
 }
 
-fn release_hashes(signed: &str) -> Result<BTreeMap<String, (u64, String)>> {
+
+fn release_payload(signed: &str) -> Result<&str> {
     if !signed.starts_with("-----BEGIN PGP SIGNED MESSAGE-----") {
         bail!("not a clearsigned InRelease");
     }
     let clear = signed.split_once("\n\n").context("invalid clearsigned headers")?.1;
-    let clear = clear.split("-----BEGIN PGP SIGNATURE-----").next()
-        .context("missing signature block")?;
+    clear.split_once("-----BEGIN PGP SIGNATURE-----")
+        .map(|x| x.0).context("missing signature block")
+}
+
+fn parse_release_time(value: &str) -> Result<DateTime<Utc>> {
+    let normalized = value.trim().replace(" UTC", " +0000").replace(" GMT", " +0000");
+    Ok(DateTime::parse_from_rfc2822(&normalized)
+        .with_context(|| format!("invalid Release timestamp: {value}"))?
+        .with_timezone(&Utc))
+}
+
+/// Authenticated timestamps are checked before selecting or publishing indexes.
+/// Repositories without Valid-Until are currently permitted, matching APT's
+/// treatment of archives lacking this optional field.
+fn check_release_freshness(signed: &str, now: DateTime<Utc>) -> Result<()> {
+    let payload = release_payload(signed)?;
+    let mut date = None;
+    let mut valid_until = None;
+    for line in payload.lines() {
+        if line.starts_with(' ') || line.starts_with('-') { continue; }
+        if let Some(value) = line.strip_prefix("Date:") {
+            if date.is_some() { bail!("duplicate Release Date"); }
+            date = Some(parse_release_time(value)?);
+        }
+        if let Some(value) = line.strip_prefix("Valid-Until:") {
+            if valid_until.is_some() { bail!("duplicate Release Valid-Until"); }
+            valid_until = Some(parse_release_time(value)?);
+        }
+    }
+    let date = date.context("missing Release Date")?;
+    if date > now + chrono::Duration::minutes(10) {
+        bail!("Release Date is more than 10 minutes in the future");
+    }
+    if let Some(expiry) = valid_until {
+        if expiry < date { bail!("Valid-Until precedes Date"); }
+        if now > expiry { bail!("Release metadata has expired (Valid-Until)"); }
+    }
+    Ok(())
+}
+
+fn by_hash_enabled(signed: &str) -> Result<bool> {
+    let payload = release_payload(signed)?;
+    for line in payload.lines() {
+        if let Some(value) = line.strip_prefix("Acquire-By-Hash:") {
+            return Ok(value.trim().eq_ignore_ascii_case("yes"));
+        }
+    }
+    Ok(false)
+}
+
+fn index_url(base: &str, entry: &Index) -> String {
+    if !entry.by_hash { return format!("{base}/{}", entry.path); }
+    let (directory, _) = entry.path.rsplit_once('/').expect("index in subdirectory");
+    format!("{base}/{directory}/by-hash/SHA256/{}", entry.digest)
+}
+
+fn release_hashes(signed: &str) -> Result<BTreeMap<String, (u64, String)>> {
+    let clear = release_payload(signed)?;
     let mut in_sha = false;
     let mut hashes = BTreeMap::new();
     for line in clear.lines() {
@@ -255,13 +317,13 @@ fn release_hashes(signed: &str) -> Result<BTreeMap<String, (u64, String)>> {
     Ok(hashes)
 }
 
-fn indexes(repo: &Repo, hashes: &BTreeMap<String, (u64, String)>) -> Result<Vec<Index>> {
+fn indexes(repo: &Repo, hashes: &BTreeMap<String, (u64, String)>, by_hash: bool) -> Result<Vec<Index>> {
     let mut result = Vec::new();
     for component in &repo.components {
         let base = format!("{component}/binary-amd64/Packages");
         let choices = [format!("{base}.xz"), format!("{base}.gz"), base];
         let selected = choices.iter().find_map(|p| hashes.get(p).map(|(size, digest)| Index {
-            path: p.clone(), size: *size, digest: digest.clone(),
+            path: p.clone(), size: *size, digest: digest.clone(), by_hash,
         }));
         let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-amd64/Packages"))?;
         if index.size == 0 || index.size > 256 * 1024 * 1024 {
@@ -352,9 +414,13 @@ async fn update_repo(
         verify_signature(&release_file, &repo.keyring).await
             .context(ErrorCode::DownloadSignature)
             .with_context(|| format!("authenticating {base}/InRelease"))?;
-        let hashes = release_hashes(std::str::from_utf8(&signed)?)
+        let signed_text = std::str::from_utf8(&signed)?;
+        check_release_freshness(signed_text, Utc::now())
             .context(ErrorCode::DownloadIndex)?;
-        let entries = indexes(&repo, &hashes)
+        let hashes = release_hashes(signed_text)
+            .context(ErrorCode::DownloadIndex)?;
+        let by_hash = by_hash_enabled(signed_text)?;
+        let entries = indexes(&repo, &hashes, by_hash)
             .context(ErrorCode::DownloadIndex)?;
         let total = entries.len();
 
@@ -378,7 +444,7 @@ async fn update_repo(
             bar.set_message("queued");
             let (reply, rx) = oneshot::channel();
             let job = IndexJob {
-                client: client.clone(), url: format!("{base}/{}", entry.path),
+                client: client.clone(), url: index_url(&base, &entry),
                 file, entry, bar, reply,
             };
             sender.send(job).await.context("index queue has stopped")?;
@@ -419,6 +485,14 @@ pub async fn update(root: &Path, dest: &Path, opts: UpdateOptions) -> Result<()>
     if opts.retries > 10 { bail!("retries must be 0..=10"); }
     let repositories = parse_sources(root).context(ErrorCategory::System)?;
     fs::create_dir_all(dest).await?;
+    // File stays in place between runs to prevent an inode-replacement race.
+    // The handle is held across every await for the entire update transaction.
+    let lock_path = dest.join(".rpt-update.lock");
+    let lock_file = OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).open(&lock_path).context(ErrorCategory::System)?;
+    lock_file.try_lock_exclusive()
+        .context("another RPT update is using this cache")
+        .context(ErrorCategory::System)?;
     let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
     let count = repositories.len();
     let budget = Arc::new(Semaphore::new(opts.workers));
@@ -492,6 +566,36 @@ mod tests {
         let text = "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Ubuntu\nSHA256:\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-amd64/Packages.xz\n-----BEGIN PGP SIGNATURE-----";
         let hashes = release_hashes(text).unwrap();
         let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into() };
-        assert_eq!(indexes(&repo, &hashes).unwrap().len(), 1);
+        assert_eq!(indexes(&repo, &hashes, false).unwrap().len(), 1);
     }
+    #[test]
+    fn rejects_expired_or_future_release() {
+        let now = Utc::now();
+        let base = |date: String, expiry: String| format!(
+            "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nDate: {date}\nValid-Until: {expiry}\nSHA256:\n abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd 4 main/binary-amd64/Packages.xz\n-----BEGIN PGP SIGNATURE-----"
+        );
+        let date = now.format("%a, %d %b %Y %H:%M:%S +0000").to_string();
+        let expired = (now - chrono::Duration::days(1)).format("%a, %d %b %Y %H:%M:%S +0000").to_string();
+        let future = (now + chrono::Duration::days(1)).format("%a, %d %b %Y %H:%M:%S +0000").to_string();
+        assert!(check_release_freshness(&base(date.clone(), expired), now).is_err());
+        assert!(check_release_freshness(&base(future.clone(), future), now).is_err());
+        let valid = (now + chrono::Duration::days(1)).format("%a, %d %b %Y %H:%M:%S +0000").to_string();
+        assert!(check_release_freshness(&base(date, valid), now).is_ok());
+    }
+
+    #[test]
+    fn uses_content_addressed_index_if_advertised() {
+        let entry = Index {
+            path: "main/binary-amd64/Packages.xz".into(),
+            size: 4,
+            digest: "abc123".into(),
+            by_hash: true,
+        };
+        assert_eq!(index_url("https://example.org/ubuntu/dists/noble", &entry),
+            "https://example.org/ubuntu/dists/noble/main/binary-amd64/by-hash/SHA256/abc123");
+        let plain = Index { by_hash: false, ..entry };
+        assert_eq!(index_url("https://example.org/ubuntu/dists/noble", &plain),
+            "https://example.org/ubuntu/dists/noble/main/binary-amd64/Packages.xz");
+    }
+
 }
