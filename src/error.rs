@@ -27,9 +27,7 @@ impl ErrorCategory {
 /// Explicit category markers in an error chain take precedence; download is
 /// the default for errors originating in the transport layer.
 pub fn classify(error: &anyhow::Error, fallback: ErrorCategory) -> ErrorCategory {
-    error.chain()
-        .find_map(|cause| cause.downcast_ref::<ErrorCategory>().copied())
-        .unwrap_or(fallback)
+    error.downcast_ref::<ErrorCategory>().copied().unwrap_or(fallback)
 }
 
 #[cfg(test)]
