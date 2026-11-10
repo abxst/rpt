@@ -165,6 +165,22 @@ jobs:
             exit 1
           fi
           echo 'PASS signed version origins and tamper rejection'
+      - name: Read-only APT pin priority diagnostic
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rpt-pin-root"
+          mkdir -p "$root/preferences.d"
+          printf 'Package: bash\nPin: release a=noble\nPin-Priority: 700\n' > "$root/preferences.d/50rpt"
+          ./target/debug/rpt pin-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/pin-output"
+          grep -Fq ' 700 ' "$RUNNER_TEMP/pin-output"
+          if ./target/debug/rpt policy-preview --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash >/dev/null 2>&1; then
+            exit 1
+          fi
+          echo 'Pin: origin example.org' > "$root/preferences.d/50rpt"
+          if ./target/debug/rpt pin-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash >/dev/null 2>&1; then
+            exit 1
+          fi
+          echo 'PASS conservative pin evaluation'
       - name: Read-only metadata show search list on Ubuntu
         run: |
           set -euo pipefail

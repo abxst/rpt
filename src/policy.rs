@@ -32,6 +32,16 @@ pub fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
             }
         }
     }
+    ensure_supported_apt_configuration(apt_root)?;
+    Ok(())
+}
+
+/// Reject config indirection and target-release options while allowing the
+/// separate read-only preference parser to inspect pin records.
+pub fn ensure_supported_apt_configuration(apt_root: &Path) -> Result<()> {
+    if std::env::var_os("APT_CONFIG").is_some() {
+        bail!("APT_CONFIG override detected; pin inspection is unsupported");
+    }
     let conf = apt_root.join("apt.conf");
     if conf.is_file() && declares_unsupported_policy_config(&conf)? {
         bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", conf.display());
