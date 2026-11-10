@@ -141,7 +141,7 @@ pub fn evaluate_with_phasing(
             }
         }
     }
-    Ok(origins.iter().map(|origin| {
+    origins.iter().map(|origin| -> Result<EvaluatedPin> {
         let specific = records.iter().find(|r| r.package == package && matches(r, package, origin));
         let general = records.iter().find(|r| r.package == "*" && matches(r, package, origin));
         let is_target = target_release.is_some_and(|target| {
@@ -161,13 +161,13 @@ pub fn evaluate_with_phasing(
                 } else { priority }
             } else { priority }
         } else { priority };
-        EvaluatedPin {
+        Ok(EvaluatedPin {
             version: origin.version.clone(),
             repository_uri: origin.repository_uri.clone(),
             suite: origin.suite.clone(),
             priority,
-        }
-    }).collect())
+        })
+    }).collect::<Result<Vec<_>>>()
 }
 
 /// Candidate diagnostic for the restricted policy subset. This is NOT an
