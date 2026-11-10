@@ -64,7 +64,7 @@ fn signed_hashes(signed: &str) -> Result<BTreeMap<String,(String,u64)>> {
         if !in_sha { continue; }
         if !line.starts_with(' ') { in_sha = false; continue; }
         let parts = line.split_whitespace().collect::<Vec<_>>();
-        if parts.len()!=3 || !hash_valid(parts[0]) || !safe_path(parts[2]) { bail!("malformed Release checksum entry: {}", line); }
+        if parts.len()!=3 || !hash_valid(parts[0]) || parts[2].starts_with('/') || parts[2].split('/').any(|part| part.is_empty() || part == ".." || part == ".") { bail!("malformed Release checksum entry: {}", line); }
         let size = parts[1].parse::<u64>()?;
         if entries.insert(parts[2].to_owned(), (parts[0].to_ascii_lowercase(),size)).is_some() {
             bail!("duplicate signed Release checksum path");
@@ -93,7 +93,7 @@ fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
     if meta.indexes.is_empty() { bail!("repository provenance has no indexes"); }
     let mut seen = BTreeSet::new();
     for idx in &meta.indexes {
-        if !safe_path(&idx.release_path) || !safe_path(&idx.local_file)
+        if idx.release_path.starts_with('/') || idx.release_path.split('/').any(|part| part.is_empty() || part == ".." || part == ".") || !safe_path(&idx.local_file)
             || idx.local_file.contains('/') || !idx.local_file.starts_with("index-")
             || !hash_valid(&idx.sha256) { bail!("unsafe index provenance"); }
         if !seen.insert(&idx.release_path) { bail!("duplicate repository index path"); }
