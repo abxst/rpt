@@ -56,3 +56,32 @@ rpt fetch --manifest manifest.json --output ./rpt-cache 1>rpt.stdout.log 2>rpt.s
 ```
 
 The system category currently covers pre-install processing only; this transport MVP does not execute dpkg transactions.
+
+### Structured diagnostics and APT migration safety
+
+Use `rpt --log-format json fetch ...` for line-delimited JSON diagnostics on **stderr**.
+Each event has `event`, `category`, `code`, `package` (nullable), and `message`.
+Text mode includes stable codes such as `DOWNLOAD_HTTP`, `DOWNLOAD_TIMEOUT`,
+`DOWNLOAD_NETWORK`, `DOWNLOAD_CHECKSUM`, `DOWNLOAD_INTEGRITY`,
+`SYSTEM_IO`, `SYSTEM_CONFIG`, and `SYSTEM_WORKER`.
+Statistics remain human-readable stdout; progress is hidden when stderr is not a TTY.
+
+**APT 1:1 compatibility status: NOT ACHIEVED.** RPT still supports only `sources` and
+`fetch`; none of `apt update`, `install`, `remove`, `upgrade`, dpkg transaction
+behavior, or APT option semantics is implemented. A parity gate in
+`tests/apt_parity_gate.rs` verifies unsupported APT commands and options fail
+instead of pretending success. The tests do **not** validate APT parity.
+
+`scripts/stage-apt.sh` is a **staging-only** tool for Ubuntu amd64. For instance:
+
+```sh
+sudo env RPT_TAG=v0.1.0-alpha.9 bash scripts/stage-apt.sh stage
+sudo bash scripts/stage-apt.sh status
+sudo bash scripts/stage-apt.sh restore
+```
+
+It downloads/verifies the release into `/opt/rpt/rpt`, saves an unchanged
+`/opt/rpt/aptbak` copy of system `/usr/bin/apt`, and deliberately **never**
+changes `/usr/bin/apt`. `activate` always refuses until a real compatible
+APT engine and comprehensive safe integration tests exist. A symlink from
+`/usr/bin/apt` to the current RPT would break package management.
