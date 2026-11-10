@@ -321,20 +321,22 @@ jobs:
 
           EOF
           touch "$fixture/status"
-          ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app > "$fixture/plan"
-          grep -Fq 'libdemo 1.1' "$fixture/plan"
-          grep -Fq 'app 2.0' "$fixture/plan"
-          grep -Fq 'NO CHANGES MADE' "$fixture/plan"
+          # Unsigned fixture metadata can be inspected by standalone unit tests,
+          # but may no longer authorize an install-plan preview.
+          if ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app >/dev/null 2>&1; then
+            echo "Plan accepted metadata without verified repository provenance" >&2
+            exit 1
+          fi
           cat > "$fixture/apt/preferences" <<'EOF'
           Package: *
           Pin: release a=noble
           Pin-Priority: 900
           EOF
-          if ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app > /dev/null 2>&1; then
-            echo "Plan incorrectly accepted unhandled APT pinning" >&2
+          if ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app >/dev/null 2>&1; then
+            echo "Plan incorrectly accepted unsigned data with APT preferences" >&2
             exit 1
           fi
-          echo "PASS dry-run dependency plan and pinning refusal"
+          echo "PASS install-plan policy gate rejects unsigned cache and unsafe preferences"
       - name: Signed package acquisition manifest and tamper detection
         run: |
           set -euo pipefail
