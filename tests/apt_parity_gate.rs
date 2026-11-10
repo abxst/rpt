@@ -44,3 +44,29 @@ fn update_is_not_misrepresented_as_apt_parity() {
     assert!(help.contains("isolated cache"), "{help}");
     assert!(help.contains("--workers"), "{help}");
 }
+
+#[test]
+fn update_apt_style_options_are_validated() {
+    // Parsing these options is supported; missing source directory must still
+    // fail instead of reporting a successful package update.
+    for args in [
+        vec!["update", "-q", "--workers", "2", "--root", "/nonexistent-rpt-sources"],
+        vec!["update", "-qq", "-o", "Acquire::Retries=3", "--root", "/nonexistent-rpt-sources"],
+        vec!["update", "--no-progress", "-o", "Acquire::Retries=0", "--root", "/nonexistent-rpt-sources"],
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_rpt"))
+            .args(&args).output().unwrap();
+        assert!(!result.status.success(), "{args:?} must fail on missing sources");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!stderr.contains("unexpected argument"), "{args:?}: {stderr}");
+    }
+    for args in [
+        vec!["update", "-o", "APT::Get::Assume-Yes=true"],
+        vec!["update", "-o", "Acquire::Retries=-1"],
+        vec!["update", "-o", "Acquire::Retries=11", "--root", "/nonexistent-rpt-sources"],
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_rpt"))
+            .args(&args).output().unwrap();
+        assert!(!result.status.success(), "unsupported configuration must fail: {args:?}");
+    }
+}
