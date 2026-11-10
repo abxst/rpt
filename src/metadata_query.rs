@@ -289,6 +289,26 @@ pub fn rdepends(
 mod tests {
     use super::*;
     #[test]
+    fn exact_version_returns_candidate_stanza_and_rejects_divergent_duplicates() {
+        let root = std::env::temp_dir().join(format!("rpt-exact-candidate-{}", std::process::id()));
+        let one = root.join("aaaaaaaaaaaaaaaaaaaaaaaa");
+        let two = root.join("bbbbbbbbbbbbbbbbbbbbbbbb");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        fs::write(one.join("InRelease"), "fixture").unwrap();
+        fs::write(two.join("InRelease"), "fixture").unwrap();
+        fs::write(one.join("index-0.raw"),
+            "Package: lib\nVersion: 2\nArchitecture: amd64\nDepends: missing\n\nPackage: lib\nVersion: 1\nArchitecture: amd64\nDepends: old-api\n\n").unwrap();
+        let old = exact_version(&root, "amd64", "lib", "1").unwrap();
+        assert_eq!(old.depends, "old-api");
+        assert_eq!(old.version, "1");
+        assert!(exact_version(&root, "amd64", "lib", "3").is_err());
+        fs::write(two.join("index-0.raw"),
+            "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: conflicting-api\n\n").unwrap();
+        assert!(exact_version(&root, "amd64", "lib", "1").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn multiline_and_latest_version() {
         let raw = b"Package: demo\nVersion: 1.0\nArchitecture: amd64\nDescription: old\n\nPackage: demo\nVersion: 2.0\nArchitecture: amd64\nDescription: New text\n next line\nDepends: libc6 (>= 2.39)\n\nPackage: other\nVersion: 9.0\nArchitecture: arm64\n\n";
         let mut entries = Vec::new();
