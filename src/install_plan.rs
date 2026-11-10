@@ -74,13 +74,6 @@ fn parse_groups_for_arch(raw: &str, arch: &str) -> Result<Vec<Vec<Requirement>>>
     }).collect()
 }
 
-fn parse_groups(raw: &str) -> Result<Vec<Vec<Requirement>>> {
-    if raw.trim().is_empty() { return Ok(Vec::new()); }
-    raw.split(',').map(|group| {
-        group.split('|').map(parse_atom).collect::<Result<Vec<_>>>()
-    }).collect()
-}
-
 fn satisfies(version_string: &str, required: &Requirement) -> Result<bool> {
     let Some((op, value)) = &required.constraint else { return Ok(true) };
     let cmp = version::compare(version_string, value)?;
@@ -757,7 +750,7 @@ mod tests {
         let mut solver = Solver {
             catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
-            plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(100)),
+            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
