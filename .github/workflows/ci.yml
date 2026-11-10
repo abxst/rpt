@@ -181,6 +181,24 @@ jobs:
             exit 1
           fi
           echo 'PASS conservative pin evaluation'
+      - name: Compare restricted candidate against APT on Ubuntu
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rpt-candidate-apt"
+          mkdir -p "$root/preferences.d"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-candidate-result"
+          actual="$(awk '/^Candidate:/{print $2;exit}' "$RUNNER_TEMP/rpt-candidate-result")"
+          expected="$(apt-cache policy bash | awk '/^[[:space:]]*Candidate:/{print $2;exit}')"
+          test "$actual" = "$expected"
+          printf 'Package: bash\nPin: release a=noble\nPin-Priority: 1001\n' > "$root/preferences.d/50rpt"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-candidate-pinned"
+          grep -Fq 'Priority: 1001' "$RUNNER_TEMP/rpt-candidate-pinned"
+          printf 'Package: *\nPin: release a=noble\nPin-Priority: 1001\n' > "$root/preferences.d/50rpt"
+          if ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash >/dev/null 2>&1; then
+            echo 'unsupported wildcard pin was accepted' >&2
+            exit 1
+          fi
+          echo 'PASS read-only candidate diagnostic and conservative pin rejection'
       - name: Read-only metadata show search list on Ubuntu
         run: |
           set -euo pipefail
