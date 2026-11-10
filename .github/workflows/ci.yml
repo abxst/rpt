@@ -211,7 +211,7 @@ jobs:
           grep -q 'Priority: 751' "$RUNNER_TEMP/rpt-release-candidate"
           apt-cache -o Dir::Etc::preferences="$root/preferences" -o Dir::Etc::preferencesparts="$root/preferences.d" policy bash > "$RUNNER_TEMP/apt-release-candidate"
           cat "$RUNNER_TEMP/apt-release-candidate"
-          grep -Eq '^[[:space:]]*751[[:space:]]' "$RUNNER_TEMP/apt-release-candidate"
+          grep -Eq '^[[:space:]]*\*\*\*[[:space:]]+[^[:space:]]+[[:space:]]+751$' "$RUNNER_TEMP/apt-release-candidate"
           expected="$(awk '/^[[:space:]]*Candidate:/{print $2;exit}' "$RUNNER_TEMP/apt-release-candidate")"
           actual="$(awk '/^Candidate:/{print $2;exit}' "$RUNNER_TEMP/rpt-release-candidate")"
           test "$expected" = "$actual"
