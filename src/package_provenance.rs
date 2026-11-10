@@ -29,6 +29,7 @@ pub struct RepositoryProvenance {
 #[derive(Default)]
 struct Fields {
     name: String, version: String, arch: String,
+    source: Option<String>,
     filename: String, sha256: String, size: String,
     phased_update_percentage: Option<u8>,
 }
@@ -138,6 +139,11 @@ fn scan(
             "Architecture" => fields.arch=value.to_owned(),
             "Filename" => fields.filename=value.to_owned(),
             "SHA256" => fields.sha256=value.to_owned(),
+            "Source" => {
+                if fields.source.is_some() { bail!("duplicate Source field in Packages stanza"); }
+                if value.is_empty() || value.len() > 1024 { bail!("invalid Source field"); }
+                fields.source = Some(value.to_owned());
+            },
             "Size" => fields.size=value.to_owned(),
             "Phased-Update-Percentage" => {
                 if fields.phased_update_percentage.is_some() {
@@ -218,6 +224,28 @@ fn release_component(index_path: &str) -> Result<String> {
     Ok(component.to_owned())
 }
 
+/// Debian binary Source: may be "name" or "name (version)".
+/// When absent, source name and version equal binary name and version.
+fn source_identity(fields: &Fields) -> Result<(String, String)> {
+    let Some(source) = fields.source.as_deref() else {
+        return Ok((fields.name.clone(), fields.version.clone()));
+    };
+    let (name, version) = if let Some((name, suffix)) = source.split_once(" (") {
+        let version = suffix.strip_suffix(')')
+            .context("invalid Source version field")?;
+        (name, version)
+    } else {
+        (source, fields.version.as_str())
+    };
+    if name.is_empty() || name.len() > 256
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+        || version.is_empty() || version.len() > 512 {
+        bail!("invalid Source package name or version");
+    }
+    version::compare(version, version)?;
+    Ok((name.to_owned(), version.to_owned()))
+}
+
 /// Repository-scoped package occurrence, not a candidate or an APT pin.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VerifiedVersionOrigin {
@@ -229,6 +257,9 @@ pub struct VerifiedVersionOrigin {
     pub component: String,
     /// Authenticated Packages rollout percentage; None means not phased.
     pub phased_update_percentage: Option<u8>,
+    /// Effective source package and source version from authenticated Packages.
+    pub source_package: String,
+    pub source_version: String,
     pub release: ReleaseIdentity,
 }
 
@@ -276,6 +307,8 @@ pub fn verified_version_origins(
                         index_path: index.release_path.clone(),
                         component: component.clone(),
                         phased_update_percentage: field.phased_update_percentage,
+                        source_package: source_identity(field)?.0,
+                        source_version: source_identity(field)?.1,
                         release: release.clone(),
                     });
                 }
@@ -410,6 +443,23 @@ mod release_identity_tests {
     }
 }
 
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+    #[test]
+    fn source_name_and_version_fallback_and_override() {
+        let mut fields = Fields { name: "libdemo1".into(), version: "1.2-3".into(), ..Default::default() };
+        assert_eq!(source_identity(&fields).unwrap(), ("libdemo1".into(), "1.2-3".into()));
+        fields.source = Some("demo".into());
+        assert_eq!(source_identity(&fields).unwrap(), ("demo".into(), "1.2-3".into()));
+        fields.source = Some("demo (2:1.0-4)".into());
+        assert_eq!(source_identity(&fields).unwrap(), ("demo".into(), "2:1.0-4".into()));
+        for invalid in ["", "bad name", "demo ()", "demo (invalid)", "demo (1.0) garbage"] {
+            fields.source = Some(invalid.into());
+            assert!(source_identity(&fields).is_err(), "{invalid}");
+        }
+    }
+}
 #[cfg(test)]
 mod phased_metadata_tests {
     use super::*;

@@ -103,6 +103,15 @@ pub fn evaluate_with_target(
     package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
     target_release: Option<&str>,
 ) -> Result<Vec<EvaluatedPin>> {
+    evaluate_with_phasing(package, origins, records, target_release, None)
+}
+
+/// Diagnostic using an explicit machine ID; absent ID preserves fail-closed
+/// behavior for incomplete phasing. No machine ID is read implicitly.
+pub fn evaluate_with_phasing(
+    package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
+    target_release: Option<&str>, machine_id: Option<&str>,
+) -> Result<Vec<EvaluatedPin>> {
     if package.is_empty() { bail!("empty package name"); }
     if let Some(target) = target_release {
         if target.is_empty() || target.len() > 128 || !target.bytes().all(|b|
@@ -111,17 +120,28 @@ pub fn evaluate_with_target(
         }
     }
     for record in records { validate_record(record)?; }
-    // APT phases by SOURCE package and SOURCE version together with a machine
-    // identifier. Until we reproduce its implementation and overrides, an
-    // incomplete rollout cannot silently receive an ordinary 500/990 pin.
+    // APT phases at the binary-version level, not per repository URI. Require
+    // all occurrences of the same binary version to agree on source metadata
+    // and rollout percentage. Conflicts cannot safely be guessed.
+    let mut phase_by_version = std::collections::BTreeMap::new();
     for entry in origins {
+        let identity = (
+            entry.source_package.as_str(),
+            entry.source_version.as_str(),
+            entry.phased_update_percentage,
+        );
+        if let Some(previous) = phase_by_version.insert(entry.version.as_str(), identity) {
+            if previous != identity {
+                bail!("inconsistent signed source/phasing metadata for version {}", entry.version);
+            }
+        }
         if let Some(percent) = entry.phased_update_percentage {
-            if percent < 100 {
-                bail!("Phased-Update-Percentage {percent} for {} {} requires machine-specific APT eligibility; refusing incomplete policy preview", package, entry.version);
+            if percent < 100 && machine_id.is_none() {
+                bail!("Phased-Update-Percentage {percent} for {} {} requires explicit --machine-id; refusing incomplete policy preview", package, entry.version);
             }
         }
     }
-    Ok(origins.iter().map(|origin| {
+    origins.iter().map(|origin| -> Result<EvaluatedPin> {
         let specific = records.iter().find(|r| r.package == package && matches(r, package, origin));
         let general = records.iter().find(|r| r.package == "*" && matches(r, package, origin));
         let is_target = target_release.is_some_and(|target| {
@@ -131,13 +151,23 @@ pub fn evaluate_with_target(
         let priority = if let Some(rule) = specific { rule.priority }
             else if is_target { 990 }
             else { general.map_or(500, |r| r.priority) };
-        EvaluatedPin {
+        let priority = if let Some(percent) = origin.phased_update_percentage {
+            if percent < 100 {
+                let machine = machine_id.expect("validated phased machine ID");
+                if !crate::apt_phasing::eligible(
+                    &origin.source_package, &origin.source_version, machine, percent,
+                )? {
+                    priority.min(1)
+                } else { priority }
+            } else { priority }
+        } else { priority };
+        Ok(EvaluatedPin {
             version: origin.version.clone(),
             repository_uri: origin.repository_uri.clone(),
             suite: origin.suite.clone(),
             priority,
-        }
-    }).collect())
+        })
+    }).collect::<Result<Vec<_>>>()
 }
 
 /// Candidate diagnostic for the restricted policy subset. This is NOT an
@@ -166,8 +196,15 @@ pub fn preview_candidate_with_target(
     package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
     installed: Option<&str>, target_release: Option<&str>,
 ) -> Result<CandidatePreview> {
+    preview_candidate_with_phasing(package, origins, records, installed, target_release, None)
+}
+
+pub fn preview_candidate_with_phasing(
+    package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
+    installed: Option<&str>, target_release: Option<&str>, machine_id: Option<&str>,
+) -> Result<CandidatePreview> {
     use std::{cmp::Ordering, collections::BTreeMap};
-    let evaluated = evaluate_with_target(package, origins, records, target_release)?;
+    let evaluated = evaluate_with_phasing(package, origins, records, target_release, machine_id)?;
     let mut values = BTreeMap::<String, i32>::new();
     for entry in evaluated {
         values.entry(entry.version).and_modify(|p| *p = (*p).max(entry.priority))
@@ -215,11 +252,41 @@ mod tests {
             repository_uri: "https://example.org".into(), suite: archive.into(),
             index_path: "main/binary-amd64/Packages.xz".into(), component: "main".into(),
             phased_update_percentage: None,
+            source_package: "bash".into(),
+            source_version: version.into(),
             release: ReleaseIdentity {
                 archive: Some(archive.into()), origin: Some("Example".into()),
                 ..Default::default()
             },
         }
+    }
+    #[test]
+    fn machine_specific_phase_ceils_held_back_priority_to_one() {
+        let mut entry = origin("2.0", "stable");
+        entry.source_package = "foo".into();
+        entry.source_version = "1.0".into();
+        entry.phased_update_percentage = Some(40);
+        // C++ reference draw for source foo / 1.0 on machine 0000... is 52.
+        let machine = "00000000000000000000000000000000";
+        assert_eq!(evaluate_with_phasing("bash", &[entry.clone()], &[], None, Some(machine))
+            .unwrap()[0].priority, 1);
+        // Once the rollout reaches 53, this machine joins.
+        entry.phased_update_percentage = Some(53);
+        assert_eq!(evaluate_with_phasing("bash", &[entry.clone()], &[], None, Some(machine))
+            .unwrap()[0].priority, 500);
+        let candidate = preview_candidate_with_phasing(
+            "bash", &[entry], &[], Some("1.0"), None, Some(machine),
+        ).unwrap();
+        assert_eq!(candidate.candidate.as_deref(), Some("2.0"));
+    }
+    #[test]
+    fn conflicting_phase_metadata_for_same_version_is_rejected() {
+        let mut first = origin("2.0", "stable");
+        first.phased_update_percentage = Some(20);
+        let mut second = origin("2.0", "testing");
+        second.phased_update_percentage = Some(40);
+        assert!(evaluate_with_phasing("bash", &[first, second], &[], None,
+            Some("00000000000000000000000000000000")).is_err());
     }
     #[test]
     fn phased_candidates_fail_closed_until_machine_specific_policy_supported() {
