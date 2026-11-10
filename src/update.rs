@@ -258,7 +258,7 @@ fn parse_release_time(value: &str) -> Result<DateTime<Utc>> {
 /// Authenticated timestamps are checked before selecting or publishing indexes.
 /// Repositories without Valid-Until are currently permitted, matching APT's
 /// treatment of archives lacking this optional field.
-fn check_release_freshness(signed: &str, now: DateTime<Utc>) -> Result<()> {
+pub(crate) fn check_release_freshness(signed: &str, now: DateTime<Utc>) -> Result<()> {
     let payload = release_payload(signed)?;
     let mut date = None;
     let mut valid_until = None;
