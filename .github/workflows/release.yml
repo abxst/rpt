@@ -1,0 +1,33 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo build --release --locked
+      - name: Package amd64 binary and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf dist/rpt-linux-amd64.tar.gz -C target/release rpt
+          cd dist
+          sha256sum rpt-linux-amd64.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/rpt-linux-amd64.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
+          prerelease: true
