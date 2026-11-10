@@ -9,6 +9,7 @@ use std::{cell::Cell, cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Pa
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanStep {
     pub package: String,
+    pub architecture: String,
     pub version: String,
     pub installed: Option<String>,
 }
@@ -417,7 +418,8 @@ impl Solver<'_> {
                 }
             }
             self.plan.push(PlanStep {
-                package: requested.name.clone(), version: current.version.clone(), installed,
+                package: requested.name.clone(), architecture: key.architecture.clone(),
+                version: current.version.clone(), installed,
             });
             self.check_negative_relations()?;
         }
@@ -620,8 +622,9 @@ mod tests {
         }, item.clone())).collect()
     }
     fn solve(catalog: &BTreeMap<String, PackageSummary>, installed: &BTreeMap<String,String>, name: &str) -> Result<Vec<PlanStep>> {
+        let keyed = test_keyed(catalog);
         let mut s = Solver {
-            catalog: &test_keyed(catalog), installed, installed_relations: &BTreeMap::new(),
+            catalog: &keyed, installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)),
         };
@@ -636,9 +639,9 @@ mod tests {
             (cache_query::InstalledKey { name: "lib".into(), architecture: "i386".into() },
                 cache_query::Installed { version: "1".into(), architecture: "i386".into(), status: "install ok installed".into() }),
         ]);
-        let plan = [PlanStep { package: "lib".into(), version: "2".into(), installed: Some("1".into()) }];
+        let plan = [PlanStep { architecture: "amd64".into(), package: "lib".into(), version: "2".into(), installed: Some("1".into()) }];
         assert!(reject_foreign_identity_overlap(&entries, &plan, "amd64").is_err());
-        let unrelated = [PlanStep { package: "app".into(), version: "1".into(), installed: None }];
+        let unrelated = [PlanStep { architecture: "amd64".into(), package: "app".into(), version: "1".into(), installed: None }];
         assert!(reject_foreign_identity_overlap(&entries, &unrelated, "amd64").is_ok());
     }
 
@@ -671,7 +674,7 @@ mod tests {
     }
     #[test]
     fn plan_candidate_gate_rejects_pinned_or_held_back_versions() {
-        let steps = vec![PlanStep { package: "lib".into(), version: "2.0".into(), installed: None }];
+        let steps = vec![PlanStep { architecture: "amd64".into(), package: "lib".into(), version: "2.0".into(), installed: None }];
         assert!(check_plan_candidates(&steps, |_, _| Ok(Some("1.0".into()))).is_err());
         assert!(check_plan_candidates(&steps, |_, _| Ok(None)).is_err());
         assert!(check_plan_candidates(&steps, |_, _| Ok(Some("2.0".into()))).is_ok());
@@ -679,8 +682,8 @@ mod tests {
     #[test]
     fn gate_validates_each_dependency_not_only_requested_package() {
         let steps = vec![
-            PlanStep { package: "lib".into(), version: "2".into(), installed: Some("1".into()) },
-            PlanStep { package: "app".into(), version: "1".into(), installed: None },
+            PlanStep { architecture: "amd64".into(), package: "lib".into(), version: "2".into(), installed: Some("1".into()) },
+            PlanStep { architecture: "amd64".into(), package: "app".into(), version: "1".into(), installed: None },
         ];
         let mut seen = Vec::new();
         assert!(check_plan_candidates(&steps, |name, installed| {
@@ -704,7 +707,7 @@ mod tests {
         let pins = [crate::apt_preferences::PinRecord {
             package: "lib".into(), pin: "release a=stable".into(), priority: 900,
         }];
-        let plan = [PlanStep { package: "lib".into(), version: "2.0".into(), installed: None }];
+        let plan = [PlanStep { architecture: "amd64".into(), package: "lib".into(), version: "2.0".into(), installed: None }];
         assert!(check_plan_candidates(&plan, |name, installed| {
             Ok(crate::apt_pin_eval::preview_candidate_with_phasing(
                 name, &origins, &pins, installed, None, None,
@@ -717,12 +720,13 @@ mod tests {
             let mut interpreter = item("interpreter", "3", "");
             interpreter.architecture = arch.into();
             interpreter.multi_arch = "allowed".into();
-            let app = item("app", "1", "interpreter:any (>= 2)");
+            let mut app = item("app", "1", "interpreter:any (>= 2)");
+            app.architecture = arch.into();
             let catalog = BTreeMap::from([
                 ("app".into(), app.clone()),
                 ("interpreter".into(), interpreter.clone()),
             ]);
-            let result = solve_catalog(&catalog, &BTreeMap::new(),
+            let result = solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
                 &BTreeMap::new(), "app", 20, arch).unwrap();
             assert_eq!(result.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
                 ["interpreter", "app"]);
@@ -732,7 +736,7 @@ mod tests {
                 let catalog = BTreeMap::from([
                     ("app".into(), app.clone()), ("interpreter".into(), denied),
                 ]);
-                assert!(solve_catalog(&catalog, &BTreeMap::new(),
+                assert!(solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
                     &BTreeMap::new(), "app", 20, arch).is_err());
             }
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
@@ -787,7 +791,7 @@ mod tests {
         let relations = BTreeMap::from([("held-dep".into(), InstalledRelations {
             version: "1".into(), held: true, ..Default::default()
         })]);
-        let plan = solve_catalog(&catalog, &installed, &relations, "app", 20, "amd64").unwrap();
+        let plan = solve_catalog(&test_keyed(&catalog), &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["other", "app"]);
     }
 
@@ -800,7 +804,7 @@ mod tests {
             if name == "essential" { state.essential = true; }
             else { state.protected = true; }
             let relations = BTreeMap::from([("core".into(), state)]);
-            assert!(solve_catalog(&catalog, &installed, &relations, "core", 20, "amd64").is_err());
+            assert!(solve_catalog(&test_keyed(&catalog), &installed, &relations, "core", 20, "amd64").is_err());
         }
     }
     #[test]
@@ -815,11 +819,11 @@ mod tests {
         ]);
         let installed = BTreeMap::from([("lib".into(), "1".into())]);
         assert!(solve_catalog(
-            &catalog, &installed, &installed_relations, "app", 20, "amd64",
+            &test_keyed(&catalog), &installed, &installed_relations, "app", 20, "amd64",
         ).is_err());
         installed_relations.get_mut("lib").unwrap().held = false;
         assert!(solve_catalog(
-            &catalog, &installed, &installed_relations, "app", 20, "amd64",
+            &test_keyed(&catalog), &installed, &installed_relations, "app", 20, "amd64",
         ).is_ok());
     }
     #[test]
@@ -982,8 +986,9 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         let catalog = BTreeMap::from([("app".into(), item("app", "2", ""))]);
         let installed = BTreeMap::from([("legacy".into(), "3".into())]);
+        let keyed = test_keyed(&catalog);
         let mut solver = Solver {
-            catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
+            catalog: &keyed, installed: &installed, installed_relations: &installed_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)),
         };
