@@ -41,6 +41,15 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value_t = 8)]
         workers: usize,
+        /// APT-compatible quiet level: -q or -qq (for the update command).
+        #[arg(short = 'q', long = "quiet", action = clap::ArgAction::Count)]
+        quiet: u8,
+        /// Disable interactive index progress (also disabled automatically when redirected).
+        #[arg(long)]
+        no_progress: bool,
+        /// Supported apt-style option: Acquire::Retries=N. Others fail closed.
+        #[arg(short = 'o', long = "option")]
+        option: Vec<String>,
     },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
@@ -93,8 +102,24 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context("scanning APT package indexes").context(ErrorCategory::System)?;
             for version in versions { println!("{version}"); }
         }
-        Command::Update { root, output, workers } => {
-            rpt::update::update(&root, &output, workers).await
+        Command::Update { root, output, workers, quiet, no_progress, option } => {
+            let mut retries = 2usize;
+            for setting in option {
+                let (name, value) = setting.split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("APT -o expects Name=Value"))?;
+                match name.trim() {
+                    "Acquire::Retries" => {
+                        retries = value.trim().parse::<usize>()
+                            .context("Acquire::Retries must be a nonnegative integer")?;
+                    }
+                    _ => anyhow::bail!("unsupported APT configuration option: {name}"),
+                }
+            }
+            let settings = rpt::update::UpdateOptions {
+                workers, retries, quiet,
+                progress: !no_progress && quiet == 0, log_format: format,
+            };
+            rpt::update::update(&root, &output, settings).await
                 .context(ErrorCategory::Download)?;
         }
         Command::Sources { root } => {
