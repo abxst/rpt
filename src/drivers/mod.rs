@@ -7,6 +7,7 @@ pub mod apk;
 pub mod pacman;
 
 use anyhow::{bail, Context, Result};
+use futures_util::future::BoxFuture;
 use std::{cmp::Ordering, collections::BTreeMap, fs, path::Path, str::FromStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +75,43 @@ pub trait PackageDriver: Send + Sync {
         &self, _cache: &Path, _names: &[String], _architecture: &str,
     ) -> Result<crate::Manifest> {
         bail!("{} driver has no signed package acquisition", self.kind().as_str())
+    }
+    fn update_indexes<'a>(
+        &'a self, _root: &'a Path, _output: &'a Path,
+        _options: crate::update::UpdateOptions,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            bail!("{} repository update is not implemented", self.kind().as_str())
+        })
+    }
+    fn cache_versions(&self, _cache: &Path, _package: &str, _arch: &str) -> Result<Vec<String>> {
+        bail!("{} package cache reader not implemented", self.kind().as_str())
+    }
+    fn policy_preview(
+        &self, _cache: &Path, _status: &Path, _config: &Path,
+        _package: &str, _arch: &str,
+    ) -> Result<crate::policy::PolicyPreview> {
+        bail!("{} candidate policy not implemented", self.kind().as_str())
+    }
+    fn show_package(
+        &self, _cache: &Path, _arch: &str, _package: &str,
+    ) -> Result<Option<crate::metadata_query::PackageSummary>> {
+        bail!("{} package metadata reader not implemented", self.kind().as_str())
+    }
+    fn search_packages(
+        &self, _cache: &Path, _arch: &str, _query: &str, _limit: usize,
+    ) -> Result<Vec<crate::metadata_query::PackageSummary>> {
+        bail!("{} package metadata search not implemented", self.kind().as_str())
+    }
+    fn list_packages(
+        &self, _cache: &Path, _arch: &str, _prefix: &str, _limit: usize,
+    ) -> Result<Vec<crate::metadata_query::PackageSummary>> {
+        bail!("{} package metadata listing not implemented", self.kind().as_str())
+    }
+    fn reverse_dependencies(
+        &self, _cache: &Path, _arch: &str, _package: &str, _limit: usize,
+    ) -> Result<Vec<crate::metadata_query::PackageSummary>> {
+        bail!("{} reverse dependency lookup not implemented", self.kind().as_str())
     }
     fn operation_supported(&self, _operation: Operation) -> bool { false }
     fn require_operation(&self, operation: Operation) -> Result<()> {
