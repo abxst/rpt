@@ -3,7 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use crate::error::{code, describe, emit, classify, ErrorCategory, LogFormat};
+use crate::error::{code, describe, emit, classify, ErrorCategory, ErrorCode, LogFormat};
 use reqwest::{Client, Url};
 use sha2::{Digest, Sha256};
 use std::{
@@ -310,7 +310,8 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
     let _permit = budget.acquire().await?;
     let response = client.get(&url).send().await?.error_for_status()?;
     if response.content_length().is_some_and(|len| len != expected.size) {
-        bail!("index Content-Length mismatch: {}", expected.path);
+        return Err(anyhow!("index Content-Length mismatch: {}", expected.path)
+            .context(ErrorCode::DownloadIndex));
     }
     let mut file = fs::File::create(&path).await?;
     let mut hasher = Sha256::new();
@@ -319,14 +320,17 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
     while let Some(chunk) = chunks.next().await {
         let chunk = chunk?;
         downloaded += chunk.len() as u64;
-        if downloaded > expected.size { bail!("index exceeds Release size"); }
+        if downloaded > expected.size {
+            return Err(anyhow!("index exceeds Release size").context(ErrorCode::DownloadIndex));
+        }
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
         bar.inc(chunk.len() as u64);
     }
     file.flush().await?;
     if downloaded != expected.size || hex::encode(hasher.finalize()) != expected.digest {
-        bail!("index size/SHA256 mismatch: {}", expected.path);
+        return Err(anyhow!("index size/SHA256 mismatch: {}", expected.path)
+            .context(ErrorCode::DownloadIndex));
     }
     Ok(downloaded)
 }
@@ -346,9 +350,12 @@ async fn update_repo(
         let release_file = stage.join("InRelease");
         fs::write(&release_file, &signed).await?;
         verify_signature(&release_file, &repo.keyring).await
+            .context(ErrorCode::DownloadSignature)
             .with_context(|| format!("authenticating {base}/InRelease"))?;
-        let hashes = release_hashes(std::str::from_utf8(&signed)?)?;
-        let entries = indexes(&repo, &hashes)?;
+        let hashes = release_hashes(std::str::from_utf8(&signed)?)
+            .context(ErrorCode::DownloadIndex)?;
+        let entries = indexes(&repo, &hashes)
+            .context(ErrorCode::DownloadIndex)?;
         let total = entries.len();
 
         // Index jobs are dispatched to a bounded FIFO channel; N workers
@@ -410,7 +417,7 @@ async fn update_repo(
 pub async fn update(root: &Path, dest: &Path, opts: UpdateOptions) -> Result<()> {
     if !(1..=64).contains(&opts.workers) { bail!("workers must be 1..=64"); }
     if opts.retries > 10 { bail!("retries must be 0..=10"); }
-    let repositories = parse_sources(root)?;
+    let repositories = parse_sources(root).context(ErrorCategory::System)?;
     fs::create_dir_all(dest).await?;
     let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
     let count = repositories.len();
