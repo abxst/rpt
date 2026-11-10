@@ -2,7 +2,7 @@
 //! This is not APT's full dependency resolver: only uniquely resolvable
 //! alternatives and virtual Provides, plus bounded alternative backtracking;
 //! no architecture qualifiers, pinning, package holds, triggers or removals.
-use crate::{cache_query, metadata_query::{self, PackageSummary}, version};
+use crate::{cache_query, metadata_query::{self, PackageKey, PackageSummary}, version};
 use anyhow::{bail, Context, Result};
 use std::{cell::Cell, cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path, rc::Rc};
 
@@ -209,9 +209,24 @@ fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
     Ok(false)
 }
 
+/// Resolve a binary identity without silently collapsing Architecture: all
+/// and native package stanzas. Cross-architecture selection remains unsupported.
+fn candidate_key(
+    catalog: &BTreeMap<PackageKey, PackageSummary>, name: &str, architecture: &str,
+) -> Result<Option<PackageKey>> {
+    let native = PackageKey { name: name.to_owned(), architecture: architecture.to_owned() };
+    let common = PackageKey { name: name.to_owned(), architecture: "all".into() };
+    let has_native = catalog.contains_key(&native);
+    let has_common = catalog.contains_key(&common);
+    if has_native && has_common {
+        bail!("ambiguous native/all package {name}; full architecture-aware candidate policy required");
+    }
+    Ok(if has_native { Some(native) } else if has_common { Some(common) } else { None })
+}
+
 #[derive(Clone)]
 struct Solver<'a> {
-    catalog: &'a BTreeMap<String, PackageSummary>,
+    catalog: &'a BTreeMap<PackageKey, PackageSummary>,
     installed: &'a BTreeMap<String, String>,
     installed_relations: &'a BTreeMap<String, InstalledRelations>,
     visiting: BTreeSet<String>,
@@ -223,14 +238,19 @@ struct Solver<'a> {
 }
 
 impl Solver<'_> {
+    fn lookup(&self, name: &str) -> Result<Option<&PackageSummary>> {
+        Ok(candidate_key(self.catalog, name, &self.architecture)?
+            .and_then(|key| self.catalog.get(&key)))
+    }
+
     /// Return the concrete package to install only when there is exactly one
     /// verified catalog candidate. No automatic preference between multiple
     /// virtual providers or mutually satisfiable alternatives.
     fn concrete(&self, required: &Requirement) -> Result<Option<String>> {
-        if required.any_arch && !self.catalog.contains_key(&required.name) {
+        if required.any_arch && !self.lookup(&required.name)?.is_some() {
             bail!("virtual Provides with :any require a full Multi-Arch resolver");
         }
-        if let Some(real) = self.catalog.get(&required.name) {
+        if let Some(real) = self.lookup(&required.name)? {
             // Debian policy permits :any only for a target explicitly marked
             // Multi-Arch: allowed. The native architecture is the sole candidate
             // in this experimental planner; foreign installations are disabled.
@@ -242,7 +262,12 @@ impl Solver<'_> {
             } else { None });
         }
         let mut candidates = Vec::new();
-        for (name, item) in self.catalog {
+        for (key, item) in self.catalog {
+            // Do not consider a provider whose native/all identity is ambiguous.
+            if candidate_key(self.catalog, &key.name, &self.architecture)?.as_ref() != Some(key) {
+                continue;
+            }
+            let name = &key.name;
             let caps = provides(item)?;
             let mut is_provider = false;
             for cap in &caps {
@@ -280,7 +305,7 @@ impl Solver<'_> {
         for alternative in group {
             if let Some(installed) = self.installed.get(&alternative.name) {
                 let allowed_installed = !alternative.any_arch
-                    || self.catalog.get(&alternative.name).is_some_and(|item|
+                    || self.lookup(&alternative.name)?.is_some_and(|item|
                         item.multi_arch == "allowed" && item.version == *installed);
                 if allowed_installed && satisfies(installed, alternative)? {
                     return self.resolve_groups(groups, index + 1);
@@ -326,14 +351,14 @@ impl Solver<'_> {
         let staged: BTreeMap<&str, &str> = self.plan.iter()
             .map(|step| (step.package.as_str(), step.version.as_str())).collect();
         for (new_name, new_version) in &staged {
-            let new_pkg = self.catalog.get(*new_name)
+            let new_pkg = self.lookup(new_name)?
                 .context("staged package missing repository metadata")?;
             for (installed_name, installed_version) in self.installed {
                 if installed_name == *new_name { continue; }
                 let effective_version = staged.get(installed_name.as_str())
                     .copied().unwrap_or(installed_version);
                 let (conflicts, breaks, provider) =
-                    if let Some(pkg) = self.catalog.get(installed_name)
+                    if let Some(pkg) = self.lookup(installed_name)?
                         .filter(|_| staged.contains_key(installed_name.as_str())) {
                         (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
                     } else if let Some(status) = self.installed_relations.get(installed_name) {
@@ -355,7 +380,7 @@ impl Solver<'_> {
             }
             for (peer_name, peer_version) in &staged {
                 if peer_name == new_name { continue; }
-                let peer = self.catalog.get(*peer_name)
+                let peer = self.lookup(peer_name)?
                     .context("staged peer missing repository metadata")?;
                 if relations_hit(&new_pkg.conflicts, peer_name, peer_version, &peer.provides)?
                     || relations_hit(&new_pkg.breaks, peer_name, peer_version, &peer.provides)?
@@ -370,7 +395,7 @@ impl Solver<'_> {
 
     fn resolve_concrete(&mut self, requested: &Requirement) -> Result<()> {
         if self.done.contains(&requested.name) {
-            let current = self.catalog.get(&requested.name)
+            let current = self.lookup(&requested.name)?
                 .context("already resolved package missing from catalog")?;
             if !satisfies(&current.version, requested)? {
                 bail!("conflicting version requirements for {}", requested.name);
@@ -381,7 +406,7 @@ impl Solver<'_> {
             // APT can resolve cycles, but this preview refuses them.
             bail!("dependency cycle involving {}", requested.name);
         }
-        let current = self.catalog.get(&requested.name)
+        let current = self.lookup(&requested.name)?
             .with_context(|| format!("unresolved dependency {} (virtual packages unsupported)", requested.name))?;
         if !satisfies(&current.version, requested)? {
             bail!("repository version {} does not satisfy dependency {}", current.version, requested.name);
@@ -448,7 +473,7 @@ fn reject_foreign_identity_overlap(
 /// resolver for actual package transactions.
 pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, max_packages: usize) -> Result<Vec<PlanStep>> {
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
-    let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
+    let catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
     // Missing installed relationship metadata would silently bypass critical
@@ -469,7 +494,7 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
 /// Shared read-only solver used both for ordinary previews and candidate
 /// metadata selection. No transaction state or dpkg writes.
 fn solve_catalog(
-    catalog: &BTreeMap<String, PackageSummary>,
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
     installed: &BTreeMap<String, String>,
     installed_relations: &BTreeMap<String, InstalledRelations>,
     package: &str, max_packages: usize, architecture: &str,
@@ -512,7 +537,7 @@ pub fn preview_with_policy(
             bail!("inconsistent installed version metadata for {name}");
         }
     }
-    let mut catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
+    let mut catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
     let mut validated = BTreeSet::<String>::new();
@@ -531,8 +556,12 @@ pub fn preview_with_policy(
                 bail!("candidate {name} {chosen} is not present in verified repository metadata");
             }
             let summary = metadata_query::verified_exact_version(cache, architecture, name, &chosen, &origins)?;
-            if catalog.get(name) != Some(&summary) {
-                catalog.insert(name.clone(), summary);
+            let key = PackageKey { name: name.clone(), architecture: summary.architecture.clone() };
+            if !matches!(summary.architecture.as_str(), "all" | architecture) {
+                bail!("candidate {name} has incompatible architecture {}", summary.architecture);
+            }
+            if catalog.get(&key) != Some(&summary) {
+                catalog.insert(key, summary);
                 changed = true;
             }
             validated.insert(name.clone());
@@ -543,10 +572,13 @@ pub fn preview_with_policy(
         let mut mandatory = BTreeSet::new();
         for name in &roots {
             if !validated.contains(name) { continue; }
-            let summary = catalog.get(name).context("validated candidate missing catalog metadata")?;
+            let key = candidate_key(&catalog, name, architecture)?
+                .context("validated candidate missing catalog identity")?;
+            let summary = catalog.get(&key)
+                .context("validated candidate missing catalog metadata")?;
             for group in parse_groups_for_arch(&summary.pre_depends, architecture)?.into_iter()
                 .chain(parse_groups_for_arch(&summary.depends, architecture)?) {
-                if group.len() == 1 && catalog.contains_key(&group[0].name) {
+                if group.len() == 1 && candidate_key(&catalog, &group[0].name, architecture)?.is_some() {
                     mandatory.insert(group[0].name.clone());
                 }
             }
