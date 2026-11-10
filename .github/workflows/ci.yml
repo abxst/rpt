@@ -153,8 +153,7 @@ jobs:
           test -s "$RUNNER_TEMP/rpt-origins"
           grep -Fq 'archive.ubuntu.com/ubuntu' "$RUNNER_TEMP/rpt-origins"
           grep -Eq ' noble(-updates)? ' "$RUNNER_TEMP/rpt-origins"
-          # Origin/Label/Archive/Codename/Component are now taken from
-          # authenticated InRelease plus the signed Packages index path.
+          # Verify identity fields parsed from signed Ubuntu InRelease.
           grep -Eq ' main Ubuntu Ubuntu noble(-updates)? noble$' "$RUNNER_TEMP/rpt-origins"
           bad="$RUNNER_TEMP/rpt-corrupt-origins"
           cp -a "$cache" "$bad"
@@ -282,15 +281,3 @@ jobs:
           fi
           grep -q '"code":"DOWNLOAD_SIGNATURE"' "$RUNNER_TEMP/rpt-bad.stderr"
           test "$(find "$target" -name InRelease -type f | wc -l)" -eq 0
- "$RUNNER_TEMP/rpt-origins"
-
-          bad="$RUNNER_TEMP/rpt-corrupt-origins"
-          cp -a "$cache" "$bad"
-          index="$(find "$bad" -name 'index-*.xz' -print -quit)"
-          test -n "$index"
-          printf corruption >> "$index"
-          if ./target/debug/rpt verified-origins --cache "$bad" --package bash >/dev/null 2>&1; then
-            echo 'Tampered repository index accepted for version origins' >&2
-            exit 1
-          fi
-          echo 'PASS signed version origins and tamper rejection'
