@@ -138,14 +138,7 @@ impl Solver<'_> {
 pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, max_packages: usize) -> Result<Vec<PlanStep>> {
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
     let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
-    let mut installed = BTreeMap::new();
-    // This scan is bounded by the catalog; avoiding an unbounded installed-state cache.
-    // Use the package's dpkg status only if the package is present in the repo catalog.
-    for name in catalog.keys() {
-        if let Some(item) = cache_query::installed_version(status, name, architecture)? {
-            installed.insert(name.clone(), item.version);
-        }
-    }
+    let installed = cache_query::installed_catalog(status, architecture)?;
     let mut solver = Solver {
         catalog: &catalog, installed: &installed, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
