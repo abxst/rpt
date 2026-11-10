@@ -110,6 +110,9 @@ enum Command {
         package: String,
         #[arg(long, default_value = "amd64")]
         architecture: String,
+        /// Explicit APT machine ID for deterministic phased eligibility.
+        #[arg(long)]
+        machine_id: Option<String>,
     },
     /// Read-only restricted pin diagnostic; never selects or installs a candidate.
     PinInspect {
@@ -121,6 +124,9 @@ enum Command {
         package: String,
         #[arg(long, default_value = "amd64")]
         architecture: String,
+        /// Explicit APT machine ID for deterministic phased eligibility.
+        #[arg(long)]
+        machine_id: Option<String>,
     },
     /// Restricted read-only candidate selection; not full APT policy parity.
     CandidateInspect {
@@ -134,6 +140,9 @@ enum Command {
         package: String,
         #[arg(long, default_value = "amd64")]
         architecture: String,
+        /// Explicit APT machine ID for deterministic phased eligibility.
+        #[arg(long)]
+        machine_id: Option<String>,
     },
     /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
     PolicyPreview {
@@ -298,22 +307,33 @@ async fn execute(cli: Cli) -> Result<()> {
                     entry.release.codename.as_deref().unwrap_or("-"));
             }
         }
-        Command::PhasedInspect { cache, package, architecture } => {
+        Command::PhasedInspect { cache, package, architecture, machine_id } => {
             for item in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {
                 let rollout = item.phased_update_percentage
                     .map_or("unphased".to_owned(), |value| value.to_string());
-                println!("{} {} {} {}", item.version, item.repository_uri, item.suite, rollout);
+                let eligibility = match (item.phased_update_percentage, machine_id.as_deref()) {
+                    (Some(percent), Some(machine)) => {
+                        if rpt::apt_phasing::eligible(&item.source_package, &item.source_version, machine, percent)? {
+                            "included"
+                        } else { "held-back" }
+                    }
+                    (Some(percent), None) if percent < 100 => "unknown",
+                    _ => "included",
+                };
+                println!("{} {} {} {} {} {} {}",
+                    item.version, item.repository_uri, item.suite, rollout,
+                    item.source_package, item.source_version, eligibility);
             }
         }
-        Command::CandidateInspect { cache, status, apt_root, package, architecture } => {
+        Command::CandidateInspect { cache, status, apt_root, package, architecture, machine_id } => {
             let default_release = rpt::policy::read_default_release(&apt_root)?;
             let records = rpt::apt_preferences::load(&apt_root)?;
             let origins = rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)?;
             let installed = rpt::cache_query::installed_version(&status, &package, &architecture)?
                 .map(|entry| entry.version);
-            let result = rpt::apt_pin_eval::preview_candidate_with_target(
+            let result = rpt::apt_pin_eval::preview_candidate_with_phasing(
                 &package, &origins, &records, installed.as_deref(),
-                default_release.as_deref(),
+                default_release.as_deref(), machine_id.as_deref(),
             )?;
             println!("Installed: {}", result.installed.as_deref().unwrap_or("(none)"));
             println!("Candidate: {}", result.candidate.as_deref().unwrap_or("(none)"));
@@ -321,13 +341,13 @@ async fn execute(cli: Cli) -> Result<()> {
                 println!("Version: {} Priority: {}", version, priority);
             }
         }
-        Command::PinInspect { cache, apt_root, package, architecture } => {
+        Command::PinInspect { cache, apt_root, package, architecture, machine_id } => {
             // This independent diagnostic never changes existing policy-preview behaviour.
             let default_release = rpt::policy::read_default_release(&apt_root)?;
             let records = rpt::apt_preferences::load(&apt_root)?;
             let origins = rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)?;
-            for item in rpt::apt_pin_eval::evaluate_with_target(
-                &package, &origins, &records, default_release.as_deref(),
+            for item in rpt::apt_pin_eval::evaluate_with_phasing(
+                &package, &origins, &records, default_release.as_deref(), machine_id.as_deref(),
             )? {
                 println!("{} {} {} {}", item.version, item.priority, item.repository_uri, item.suite);
             }
