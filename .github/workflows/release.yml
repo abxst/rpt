@@ -13,8 +13,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo generate-lockfile
+      - run: cargo fmt --all
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked --all-targets
       - run: cargo build --release --locked
       - name: Package amd64 binary and checksums
