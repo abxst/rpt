@@ -53,7 +53,7 @@ fn release_matches(value: &str, origin: &VerifiedVersionOrigin) -> bool {
 /// a complete and authoritative result.
 fn validate_record(record: &PinRecord) -> Result<()> {
     if record.package.contains(char::is_whitespace)
-        || !record.package.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b)) {
+        || (record.package != "*" && !record.package.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))) {
         bail!("unsupported pin Package selector: {}", record.package);
     }
     let (kind, value) = record.pin.split_once(' ').ok_or_else(|| anyhow::anyhow!("invalid Pin"))?;
