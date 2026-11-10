@@ -51,6 +51,24 @@ enum Command {
         #[arg(short = 'o', long = "option")]
         option: Vec<String>,
     },
+    /// Query versions in the isolated RPT update cache (not apt policy).
+    CacheVersions {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
+    /// Read installed version from dpkg status (read-only).
+    InstalledVersion {
+        #[arg(long, default_value = "/var/lib/dpkg/status")]
+        status: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -120,6 +138,14 @@ async fn execute(cli: Cli) -> Result<()> {
                 progress: !no_progress && quiet == 0, log_format: format,
             };
             rpt::update::update(&root, &output, settings).await?;
+        }
+        Command::CacheVersions { cache, package, architecture } => {
+            for version in rpt::cache_query::cache_versions(&cache, &package, &architecture)
+                .context(ErrorCategory::System)? { println!("{version}"); }
+        }
+        Command::InstalledVersion { status, package, architecture } => {
+            if let Some(installed) = rpt::cache_query::installed_version(&status, &package, &architecture)
+                .context(ErrorCategory::System)? { println!("{}", installed.version); }
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
