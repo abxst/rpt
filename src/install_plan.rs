@@ -446,6 +446,28 @@ mod tests {
         assert_eq!(seen, vec![("lib".into(), Some("1".into())), ("app".into(), None)]);
     }
     #[test]
+    fn policy_gate_uses_pinning_candidate_instead_of_latest() {
+        use crate::package_provenance::{ReleaseIdentity, VerifiedVersionOrigin};
+        let origin = |version: &str, archive: &str| VerifiedVersionOrigin {
+            version: version.into(), architecture: "amd64".into(),
+            repository_uri: "https://example.org".into(), suite: archive.into(),
+            index_path: "main/binary-amd64/Packages.xz".into(),
+            component: "main".into(), phased_update_percentage: None,
+            source_package: "lib".into(), source_version: version.into(),
+            release: ReleaseIdentity { archive: Some(archive.into()), ..Default::default() },
+        };
+        let origins = [origin("1.0", "stable"), origin("2.0", "testing")];
+        let pins = [crate::apt_preferences::PinRecord {
+            package: "lib".into(), pin: "release a=stable".into(), priority: 900,
+        }];
+        let plan = [PlanStep { package: "lib".into(), version: "2.0".into(), installed: None }];
+        assert!(check_plan_candidates(&plan, |name, installed| {
+            Ok(crate::apt_pin_eval::preview_candidate_with_phasing(
+                name, &origins, &pins, installed, None, None,
+            )?.candidate)
+        }).is_err());
+    }
+    #[test]
     fn dependency_order_and_installed_satisfaction() {
         let catalog = BTreeMap::from([
             ("app".into(), item("app", "2.0", "lib (>= 1.0)")),
