@@ -5,7 +5,7 @@ use std::process::Command;
 #[test]
 fn unsupported_apt_commands_never_succeed() {
     for command in [
-        "update", "install", "reinstall", "remove", "purge", "upgrade",
+        "install", "reinstall", "remove", "purge", "upgrade",
         "full-upgrade", "dist-upgrade", "autoremove", "autoclean",
         "clean", "search", "show", "list", "depends", "rdepends",
         "policy", "download", "satisfy", "edit-sources",
@@ -33,4 +33,14 @@ fn unsupported_apt_arguments_never_succeed() {
             .args(&args).output().expect("launch RPT");
         assert!(!result.status.success(), "unsupported apt args {args:?} must fail");
     }
+}
+
+#[test]
+fn update_is_not_misrepresented_as_apt_parity() {
+    let result = Command::new(env!("CARGO_BIN_EXE_rpt"))
+        .args(["update", "--help"]).output().expect("launch RPT");
+    assert!(result.status.success());
+    let help = String::from_utf8_lossy(&result.stdout);
+    assert!(help.contains("isolated cache"), "{help}");
+    assert!(help.contains("--workers"), "{help}");
 }
