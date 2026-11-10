@@ -263,7 +263,7 @@ impl Solver<'_> {
                     .copied().unwrap_or(installed_version);
                 let (conflicts, breaks, provider) =
                     if let Some(pkg) = self.catalog.get(installed_name)
-                        .filter(|pkg| staged.contains_key(installed_name.as_str())) {
+                        .filter(|_| staged.contains_key(installed_name.as_str())) {
                         (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
                     } else if let Some(status) = self.installed_relations.get(installed_name) {
                         if status.version != *installed_version {
