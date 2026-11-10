@@ -275,3 +275,11 @@ This remains a read-only/download-only experimental subsystem. It does not
 provide full APT pinning, alternatives, virtual Provides, multiarch, phased
 updates, system dpkg locks, transaction journaling, recovery or install/remove/
 upgrade compatibility. Do not replace /usr/bin/apt.
+
+## Primary goal: full APT behavioral replacement
+
+The release gate is defined in [APT replacement acceptance criteria](docs/apt-parity-acceptance.md).
+**Do not replace /usr/bin/apt** until APT CLI/config, candidate policy, dependency
+resolution, signed acquisition, actual dpkg transactions and recovery pass
+their differential acceptance suites on isolated Ubuntu VMs. Performance
+optimization follows compatibility, not the reverse.
