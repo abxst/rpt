@@ -1,0 +1,44 @@
+# rpt — Rust Package Transport (experimental)
+
+A clean-room Rust foundation for an APT-compatible package engine. The planned
+architecture is an asynchronous download/preparation layer feeding a **single-writer
+system transaction queue**. Configuration and package policy aim to remain compatible
+with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
+
+## Current implementation (v0.1.0)
+
+- Read-only inventory of traditional `.list` and Deb822 `.sources` APT source files.
+- Multi-package concurrent HTTP(S) downloads, optional byte-range segmentation.
+- Bounded worker counts, expected-size and SHA-256 verification before publishing files.
+- Rust unit tests, CI and automated **pre-release** workflow for Linux amd64.
+
+**NOT IMPLEMENTED:** signed repository metadata verification, complete APT configuration
+and policy compatibility, dependency solver, dpkg transaction queue, installation,
+upgrade or removal. The sample manifest is illustrative, not installable.
+Do not use this release to replace system APT.
+
+## Build
+
+```bash
+cargo build --release
+cargo test
+cargo run -- sources
+cargo run -- fetch --manifest your-manifest.json --output ./rpt-cache --workers 8 --segments 4
+```
+
+Manifest schema: `packages[]` contains `name`, `url`, `sha256`, `size`, `filename`.
+Only trusted manifests should be supplied. Download URLs are not yet bound to signed
+APT repository metadata. Output paths must be relative to the chosen cache directory.
+
+## Architecture roadmap
+
+1. Parse apt.conf, Deb822 and sources.list with strict compatible behavior.
+2. Implement signed InRelease/Release verification and trusted Packages indexes.
+3. Implement Debian version comparison, dependency solver and APT pinning policy.
+4. Build persistent FIFO transaction journal and single-writer dpkg executor, with
+   OS-level locks, state revalidation and crash recovery.
+5. Differential testing against APT in disposable Ubuntu/Debian containers.
+6. Benchmarks against APT/apt-fast for download and end-to-end install time.
+
+The release workflow is intentionally prerelease-only until compatibility and
+system-mutation testing are complete.
