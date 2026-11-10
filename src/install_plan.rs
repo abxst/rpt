@@ -495,10 +495,67 @@ mod tests {
         assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
     }
     #[test]
+    fn versioned_conflicts_and_breaks_match_only_existing_versions() {
+        let mut app = item("app", "1", "");
+        app.conflicts = "old-lib (<< 2.0)".into();
+        let catalog = BTreeMap::from([("app".into(), app.clone())]);
+        assert!(solve(&catalog, &BTreeMap::from([("old-lib".into(), "1.9".into())]), "app").is_err());
+        assert!(solve(&catalog, &BTreeMap::from([("old-lib".into(), "2.1".into())]), "app").is_ok());
+        app.breaks = "other (>= 3.0)".into();
+        let catalog = BTreeMap::from([("app".into(), app)]);
+        assert!(solve(&catalog, &BTreeMap::from([("other".into(), "3.0".into())]), "app").is_err());
+    }
+    #[test]
+    fn conflict_with_previous_planned_dependency_is_rejected() {
+        let mut app = item("app", "1", "lib");
+        app.breaks = "lib".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), app), ("lib".into(), item("lib", "1", "")),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
+    fn backtracking_skips_conflicting_alternative() {
+        let mut bad = item("bad", "1", "");
+        bad.conflicts = "already".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "bad | good")),
+            ("bad".into(), bad), ("good".into(), item("good", "1", "")),
+        ]);
+        let installed = BTreeMap::from([("already".into(), "1".into())]);
+        let plan = solve(&catalog, &installed, "app").unwrap();
+        assert_eq!(plan.iter().map(|p|p.package.as_str()).collect::<Vec<_>>(), ["good", "app"]);
+    }
+    #[test]
+    fn reverse_installed_breaks_and_conflicts_use_status_metadata() {
+        let raw = "Package: legacy\nStatus: install ok installed\nArchitecture: amd64\nVersion: 3\nBreaks: app (>= 2)\n\n";
+        let path = std::env::temp_dir().join(format!("rpt-conflicts-{}.status", std::process::id()));
+        std::fs::write(&path, raw).unwrap();
+        let installed_relations = read_installed_relations(&path, "amd64").unwrap();
+        std::fs::remove_file(path).unwrap();
+        let catalog = BTreeMap::from([("app".into(), item("app", "2", ""))]);
+        let installed = BTreeMap::from([("legacy".into(), "3".into())]);
+        let mut solver = Solver {
+            catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
+            visiting: BTreeSet::new(), done: BTreeSet::new(),
+            plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(100)),
+        };
+        assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
+    }
+    #[test]
+    fn invalid_conflict_syntax_is_not_ignored() {
+        let mut app = item("app", "1", "");
+        app.conflicts = "other:any".into();
+        assert!(solve(&BTreeMap::from([("app".into(), app)]), &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
     fn conflict_and_downgrade_fail_closed() {
         let mut p = item("pkg", "1", "");
         p.conflicts = "other".into();
-        assert!(solve(&BTreeMap::from([("pkg".into(), p)]), &BTreeMap::new(), "pkg").is_err());
+        // A simple absent conflict does not need a package removal.
+        assert!(solve(&BTreeMap::from([("pkg".into(), p.clone())]), &BTreeMap::new(), "pkg").is_ok());
+        assert!(solve(&BTreeMap::from([("pkg".into(), p)]),
+            &BTreeMap::from([("other".into(), "1".into())]), "pkg").is_err());
         let p = item("pkg", "1", "");
         assert!(solve(&BTreeMap::from([("pkg".into(), p)]),
             &BTreeMap::from([("pkg".into(), "2".into())]), "pkg").is_err());
