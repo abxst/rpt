@@ -16,7 +16,7 @@ pub struct Installed {
 fn read_index(path: &Path) -> Result<Box<dyn Read>> {
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some("xz") => Ok(Box::new(XzDecoder::new(file))),
+        Some("xz") => Ok(Box::new(XzDecoder::new_multi_decoder(file))),
         Some("gz") => Ok(Box::new(GzDecoder::new(file))),
         Some("raw") => Ok(Box::new(file)),
         _ => bail!("unsupported cached index compression: {}", path.display()),
@@ -124,6 +124,23 @@ mod tests {
         assert_eq!(matches[0].0, "bash");
         assert_eq!(matches[0].1, "5.2");
         assert_eq!(matches[1].3, "deinstall ok config-files");
+    }
+
+    #[test]
+    fn scans_xz_indexes() {
+        use std::io::Read;
+        let bytes = b"Package: bash\nVersion: 3.0\nArchitecture: amd64\n\n";
+        let compressed = {
+            let mut decoder = xz2::read::XzEncoder::new(&bytes[..], 6);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).unwrap();
+            out
+        };
+        let mut names = Vec::new();
+        scan(XzDecoder::new_multi_decoder(&compressed[..]), |name, ver, _, _| {
+            names.push((name.to_owned(), ver.to_owned()));
+        }).unwrap();
+        assert_eq!(names, vec![("bash".into(), "3.0".into())]);
     }
 
     #[test]
