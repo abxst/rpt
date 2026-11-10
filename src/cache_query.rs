@@ -45,7 +45,7 @@ fn scan<R: Read>(reader: R, mut found: impl FnMut(&str, &str, &str, &str)) -> Re
         let clean = line.trim_end_matches(['\r', '\n']);
         if clean.is_empty() {
             row(&mut pkg, &mut ver, &mut arch, &mut status);
-        } else if clean.starts_with([' ', '\t']) {
+        } else if (clean.starts_with(' ') || clean.starts_with('\t')) {
             continue;
         } else if let Some((key, value)) = clean.split_once(':') {
             match key {
