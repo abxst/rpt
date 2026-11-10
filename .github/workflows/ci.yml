@@ -70,7 +70,7 @@ jobs:
           apt-cache madison bash | awk -F'|' 'NF>=2 {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' | sort -u > "$RUNNER_TEMP/apt-bash-versions"
           sort -u "$RUNNER_TEMP/rpt-bash-versions" > "$RUNNER_TEMP/rpt-bash-sorted"
           diff -u "$RUNNER_TEMP/apt-bash-versions" "$RUNNER_TEMP/rpt-bash-sorted"
-          printf '%s\\n' "$(dpkg-query -W -f='\${Version}' bash)" > "$RUNNER_TEMP/dpkg-bash-version"
+          printf '%s\n' "$(dpkg-query -W -f='${Version}' bash)" > "$RUNNER_TEMP/dpkg-bash-version"
           ./target/debug/rpt installed-version --package bash > "$RUNNER_TEMP/rpt-installed-bash"
           diff -u "$RUNNER_TEMP/dpkg-bash-version" "$RUNNER_TEMP/rpt-installed-bash"
       - name: Reject unsupported APT update flags
