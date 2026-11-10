@@ -25,3 +25,20 @@ jobs:
         run: cargo test --all-targets --locked
       - name: Release build
         run: cargo build --release --locked
+  apt-metadata-differential:
+    name: Ubuntu APT metadata differential
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Refresh APT indexes and install decompressor
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq liblz4-tool
+      - name: Build RPT
+        run: |
+          cargo generate-lockfile
+          cargo build --locked
+      - name: Compare against apt-cache madison
+        run: bash tests/ci_apt_metadata.sh
