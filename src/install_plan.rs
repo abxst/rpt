@@ -352,9 +352,19 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
+    solve_catalog(&catalog, &installed, &installed_relations, package, max_packages)
+}
+
+/// Shared read-only solver used both for ordinary previews and candidate
+/// metadata selection. No transaction state or dpkg writes.
+fn solve_catalog(
+    catalog: &BTreeMap<String, PackageSummary>,
+    installed: &BTreeMap<String, String>,
+    installed_relations: &BTreeMap<String, InstalledRelations>,
+    package: &str, max_packages: usize,
+) -> Result<Vec<PlanStep>> {
     let mut solver = Solver {
-        catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
-        visiting: BTreeSet::new(),
+        catalog, installed, installed_relations, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         branch_budget: Rc::new(Cell::new(4096)),
     };
@@ -362,30 +372,69 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     Ok(solver.plan)
 }
 
-/// Read-only policy gate for dependency plans. The current solver still
-/// resolves using latest-version metadata; if APT policy chooses anything
-/// else, refuse the plan rather than pairing a policy version with the wrong
-/// Depends/Provides/Conflicts metadata. No dpkg transaction is authorized.
+/// Build a candidate-specific read-only catalog for the current dependency
+/// closure. Start by replacing the requested package with its verified candidate,
+/// then repeat with dependencies discovered from the selected metadata. Only
+/// complete and stable plans may be returned; unsupported alternatives and
+/// unverified/missing candidate metadata fail closed.
 pub fn preview_with_policy(
     cache: &Path, status: &Path, apt_root: &Path, package: &str,
     architecture: &str, max_packages: usize,
 ) -> Result<Vec<PlanStep>> {
+    if max_packages == 0 || max_packages > 5000 {
+        bail!("max_packages must be 1..=5000");
+    }
     let target_release = crate::policy::read_default_release(apt_root)?;
     let preferences = crate::apt_preferences::load(apt_root)?;
-    // Validate pin syntax even when the plan contains zero changes.
     crate::apt_pin_eval::evaluate_with_phasing(
         package, &[], &preferences, target_release.as_deref(), None,
     )?;
-    let steps = preview(cache, status, package, architecture, max_packages)?;
-    check_plan_candidates(&steps, |name, installed| {
-        let origins = crate::package_provenance::verified_version_origins(cache, name, architecture)?;
-        let result = crate::apt_pin_eval::preview_candidate_with_phasing(
-            name, &origins, &preferences, installed,
-            target_release.as_deref(), None,
-        )?;
-        Ok(result.candidate)
-    })?;
-    Ok(steps)
+    let installed = cache_query::installed_catalog(status, architecture)?;
+    let installed_relations = read_installed_relations(status, architecture)?;
+    let mut catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
+    // A package's installed version is not sufficient evidence that its
+    // dependency metadata is available from a signed repository occurrence.
+    let mut validated = BTreeSet::<String>::new();
+    let mut roots = BTreeSet::new();
+    roots.insert(package.to_owned());
+    for _ in 0..16 {
+        let mut changed = false;
+        for name in &roots {
+            if validated.contains(name) { continue; }
+            let origins = crate::package_provenance::verified_version_origins(cache, name, architecture)?;
+            let chosen = crate::apt_pin_eval::preview_candidate_with_phasing(
+                name, &origins, &preferences, installed.get(name).map(String::as_str),
+                target_release.as_deref(), None,
+            )?.candidate.with_context(|| format!("APT policy has no candidate for {name}"))?;
+            if !origins.iter().any(|origin| origin.version == chosen) {
+                bail!("candidate {name} {chosen} is not present in verified repository metadata");
+            }
+            let summary = metadata_query::exact_version(cache, architecture, name, &chosen)?;
+            if catalog.get(name) != Some(&summary) {
+                catalog.insert(name.clone(), summary);
+                changed = true;
+            }
+            validated.insert(name.clone());
+        }
+        let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages)?;
+        let mut discovered = false;
+        for step in &plan {
+            if roots.insert(step.package.clone()) {
+                discovered = true;
+            }
+        }
+        if !changed && !discovered {
+            check_plan_candidates(&plan, |name, current| {
+                let origins = crate::package_provenance::verified_version_origins(cache, name, architecture)?;
+                Ok(crate::apt_pin_eval::preview_candidate_with_phasing(
+                    name, &origins, &preferences, current,
+                    target_release.as_deref(), None,
+                )?.candidate)
+            })?;
+            return Ok(plan);
+        }
+    }
+    bail!("candidate metadata dependency closure did not converge in 16 rounds")
 }
 
 /// Separate the candidate comparison so mismatch and candidate absence are
@@ -424,6 +473,22 @@ mod tests {
         };
         s.resolve(&parse_atom(name)?)?;
         Ok(s.plan)
+    }
+    #[test]
+    fn candidate_catalog_can_resolve_older_pinned_dependency_metadata() {
+        let mut latest = BTreeMap::from([
+            ("app".into(), item("app", "2", "impossible")),
+            ("lib".into(), item("lib", "2", "impossible")),
+        ]);
+        let installed = BTreeMap::new();
+        let relations = BTreeMap::new();
+        // The real candidate selected by policy may carry a completely
+        // different dependency graph from the latest published version.
+        latest.insert("app".into(), item("app", "1", "lib (>= 1)"));
+        latest.insert("lib".into(), item("lib", "1", ""));
+        let plan = solve_catalog(&latest, &installed, &relations, "app", 20).unwrap();
+        assert_eq!(plan.iter().map(|x| (x.package.as_str(), x.version.as_str()))
+            .collect::<Vec<_>>(), [("lib", "1"), ("app", "1")]);
     }
     #[test]
     fn plan_candidate_gate_rejects_pinned_or_held_back_versions() {
