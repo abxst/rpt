@@ -7,6 +7,7 @@ pub mod install_plan;
 pub mod policy;
 pub mod apt_preferences;
 pub mod apt_pin_eval;
+pub mod apt_phasing;
 pub mod update;
 pub mod package_provenance;
 pub mod package_index;
