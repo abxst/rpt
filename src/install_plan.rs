@@ -25,7 +25,7 @@ fn parse_atom(text: &str) -> Result<Requirement> {
         bail!("unsupported dependency syntax: {atom}");
     }
     // Explicitly reject architecture qualifiers and build profile syntax.
-    if atom.contains(['[', ']', '!', ':']) || (atom.contains(['<', '>']) && !atom.contains('(')) {
+    if atom.contains(['[', ']', '!']) || (atom.contains(['<', '>']) && !atom.contains('(')) {
         bail!("unsupported architecture/profile dependency: {atom}");
     }
     let (name, constraint) = if let Some((name, remainder)) = atom.split_once('(') {
@@ -493,6 +493,13 @@ mod tests {
             ("first".into(), first),
         ]);
         assert!(solve(&catalog, &BTreeMap::from([("old".into(), "1".into())]), "app").is_err());
+    }
+    #[test]
+    fn allows_debian_epoch_in_versions_not_architecture_suffixes() {
+        let requirement = parse_atom("old-lib (<< 2:3.0)").unwrap();
+        assert!(satisfies("1:9.0", &requirement).unwrap());
+        assert!(!satisfies("2:3.0", &requirement).unwrap());
+        assert!(parse_atom("old-lib:any").is_err());
     }
     #[test]
     fn versioned_conflicts_and_breaks_match_only_existing_versions() {
