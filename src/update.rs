@@ -342,7 +342,7 @@ fn indexes(repo: &Repo, hashes: &BTreeMap<String, (u64, String)>, by_hash: bool)
         let selected = choices.iter().find_map(|p| hashes.get(p).map(|(size, digest)| Index {
             path: p.clone(), size: *size, digest: digest.clone(), by_hash,
         }));
-        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-{}/Packages", native_architecture()?"))?;
+        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-{}/Packages", native_architecture()?))?;
         if index.size == 0 || index.size > 256 * 1024 * 1024 {
             bail!("repository index size outside supported bounds");
         }
