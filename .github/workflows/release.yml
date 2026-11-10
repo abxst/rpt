@@ -39,9 +39,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=v0.1.0-alpha.1
+          TAG=v0.1.0-alpha.2
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release already exists, skipping."
+            exit 0
+          fi
+          git fetch origin main
+          CURRENT=$(git rev-parse origin/main)
+          BUILT=$(git rev-parse HEAD)
+          if [ "$CURRENT" != "$BUILT" ]; then
+            echo "Skipping stale commit: $BUILT != $CURRENT"
             exit 0
           fi
           git tag "$TAG"
