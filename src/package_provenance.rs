@@ -87,7 +87,9 @@ fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
     let result = Command::new("gpgv").arg("--keyring").arg(key).arg(&inrelease)
         .output().context("running gpgv")?;
     if !result.status.success() { bail!("cached InRelease signature verification failed"); }
-    let checksums = signed_hashes(&fs::read_to_string(&inrelease)?)?;
+    let signed = fs::read_to_string(&inrelease)?;
+    crate::update::check_release_freshness(&signed, chrono::Utc::now())?;
+    let checksums = signed_hashes(&signed)?;
     if meta.indexes.is_empty() { bail!("repository provenance has no indexes"); }
     let mut seen = BTreeSet::new();
     for idx in &meta.indexes {
