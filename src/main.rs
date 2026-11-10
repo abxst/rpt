@@ -33,6 +33,15 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Concurrently refresh signed repository metadata to an isolated cache.
+    Update {
+        #[arg(long, default_value = "/etc/apt")]
+        root: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")]
+        output: PathBuf,
+        #[arg(long, default_value_t = 8)]
+        workers: usize,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -83,6 +92,10 @@ async fn execute(cli: Cli) -> Result<()> {
             let versions = rpt::index_catalog::available_versions(&lists_dir, &package, &architecture)
                 .context("scanning APT package indexes").context(ErrorCategory::System)?;
             for version in versions { println!("{version}"); }
+        }
+        Command::Update { root, output, workers } => {
+            rpt::update::update(&root, &output, workers).await
+                .context(ErrorCategory::Download)?;
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
