@@ -102,6 +102,15 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Inspect authenticated rollout percentages; no machine eligibility decision.
+    PhasedInspect {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Read-only restricted pin diagnostic; never selects or installs a candidate.
     PinInspect {
         #[arg(long, default_value = "./rpt-lists")]
@@ -287,6 +296,13 @@ async fn execute(cli: Cli) -> Result<()> {
                     entry.release.label.as_deref().unwrap_or("-"),
                     entry.release.archive.as_deref().unwrap_or("-"),
                     entry.release.codename.as_deref().unwrap_or("-"));
+            }
+        }
+        Command::PhasedInspect { cache, package, architecture } => {
+            for item in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {
+                let rollout = item.phased_update_percentage
+                    .map_or("unphased".to_owned(), |value| value.to_string());
+                println!("{} {} {} {}", item.version, item.repository_uri, item.suite, rollout);
             }
         }
         Command::CandidateInspect { cache, status, apt_root, package, architecture } => {
