@@ -109,7 +109,7 @@ impl Downloader {
         if let Some(len) = response.content_length() {
             if len != package.size { bail!("unexpected Content-Length for {}", package.name); }
         }
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await?;
+        let file = OpenOptions::new().create(true).write(true).truncate(true).open(temp).await?;
         let mut written = 0u64;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
