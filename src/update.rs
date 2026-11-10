@@ -8,8 +8,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::Duration,
+    sync::Arc,
 };
-use tokio::{fs, io::AsyncWriteExt, process::Command};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Semaphore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
@@ -185,7 +186,8 @@ fn scoped_name(repo: &Repo) -> String {
     h[..24].to_owned()
 }
 
-async fn get_limited(client: &Client, url: &str, maximum: usize) -> Result<Vec<u8>> {
+async fn get_limited(client: &Client, url: &str, maximum: usize, budget: Arc<Semaphore>) -> Result<Vec<u8>> {
+    let _permit = budget.acquire().await?;
     let response = client.get(url).send().await?.error_for_status()?;
     if response.content_length().is_some_and(|len| len > maximum as u64) {
         bail!("response too large");
@@ -202,14 +204,15 @@ async fn get_limited(client: &Client, url: &str, maximum: usize) -> Result<Vec<u
 
 async fn verify_signature(path: &Path, keyring: &Path) -> Result<()> {
     if !keyring.is_file() { bail!("Signed-By keyring not found: {}", keyring.display()); }
-    let status = Command::new("gpgv")
+    let result = Command::new("gpgv")
         .arg("--keyring").arg(keyring).arg(path)
-        .status().await.context("executing gpgv")?;
-    if !status.success() { bail!("InRelease signature verification failed"); }
+        .output().await.context("executing gpgv")?;
+    if !result.status.success() { bail!("InRelease signature verification failed: {}", String::from_utf8_lossy(&result.stderr)); }
     Ok(())
 }
 
-async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index) -> Result<u64> {
+async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index, budget: Arc<Semaphore>) -> Result<u64> {
+    let _permit = budget.acquire().await?;
     let response = client.get(&url).send().await?.error_for_status()?;
     if response.content_length().is_some_and(|len| len != expected.size) {
         bail!("index Content-Length mismatch: {}", expected.path);
@@ -232,13 +235,13 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
     Ok(downloaded)
 }
 
-async fn update_repo(client: Client, repo: Repo, dest: PathBuf, workers: usize) -> Result<(usize, u64)> {
+async fn update_repo(client: Client, repo: Repo, dest: PathBuf, workers: usize, budget: Arc<Semaphore>) -> Result<(usize, u64)> {
     let name = scoped_name(&repo);
     let stage = dest.join(format!(".{name}-{}", std::process::id()));
     fs::create_dir_all(&stage).await?;
     let work = async {
         let base = format!("{}/dists/{}", repo.uri, repo.suite);
-        let signed = get_limited(&client, &format!("{base}/InRelease"), 16 * 1024 * 1024).await?;
+        let signed = get_limited(&client, &format!("{base}/InRelease"), 16 * 1024 * 1024, budget.clone()).await?;
         let release_file = stage.join("InRelease");
         fs::write(&release_file, &signed).await?;
         verify_signature(&release_file, &repo.keyring).await?;
@@ -247,9 +250,10 @@ async fn update_repo(client: Client, repo: Repo, dest: PathBuf, workers: usize) 
         let total = entries.len();
         let results = stream::iter(entries.into_iter().enumerate().map(|(index, entry)| {
             let client = client.clone();
+            let budget = budget.clone();
             let url = format!("{base}/{}", entry.path);
             let file = stage.join(format!("index-{index}.{}", if entry.path.ends_with(".xz") { "xz" } else if entry.path.ends_with(".gz") { "gz" } else { "raw" }));
-            async move { fetch_index(client, url, file, entry).await }
+            async move { fetch_index(client, url, file, entry, budget).await }
         })).buffer_unordered(workers).collect::<Vec<_>>().await;
         let mut bytes = signed.len() as u64;
         for result in results { bytes += result?; }
@@ -276,12 +280,14 @@ pub async fn update(root: &Path, dest: &Path, workers: usize) -> Result<()> {
     fs::create_dir_all(dest).await?;
     let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
     let count = repositories.len();
+    let budget = Arc::new(Semaphore::new(workers));
     let results = stream::iter(repositories.into_iter().map(|repo| {
         let client = client.clone();
         let dest = dest.to_path_buf();
+        let budget = budget.clone();
         async move {
             let name = format!("{} {}", repo.uri, repo.suite);
-            (name, update_repo(client, repo, dest, workers).await)
+            (name, update_repo(client, repo, dest, workers, budget).await)
         }
     })).buffer_unordered(workers).collect::<Vec<_>>().await;
     let mut good = 0;
