@@ -15,7 +15,6 @@ use std::{
     sync::{Arc, atomic::{AtomicU64, Ordering}},
     io::IsTerminal,
     fs::OpenOptions,
-    time::SystemTime,
 };
 use tokio::{fs, io::AsyncWriteExt, process::Command, sync::{Semaphore, mpsc, oneshot, Mutex}, task::JoinSet};
 
@@ -581,6 +580,21 @@ mod tests {
         assert!(check_release_freshness(&base(future.clone(), future), now).is_err());
         let valid = (now + chrono::Duration::days(1)).format("%a, %d %b %Y %H:%M:%S +0000").to_string();
         assert!(check_release_freshness(&base(date, valid), now).is_ok());
+    }
+
+    #[test]
+    fn rejects_concurrent_cache_lock() {
+        let dir = std::env::temp_dir().join(format!("rpt-update-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".rpt-update.lock");
+        let first = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).unwrap();
+        let second = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).unwrap();
+        first.try_lock_exclusive().unwrap();
+        assert!(second.try_lock_exclusive().is_err());
+        first.unlock().unwrap();
+        second.try_lock_exclusive().unwrap();
+        second.unlock().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
