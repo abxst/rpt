@@ -5,6 +5,7 @@ pub mod metadata_query;
 pub mod install_plan;
 pub mod policy;
 pub mod update;
+pub mod package_provenance;
 pub mod package_index;
 pub mod index_catalog;
 pub mod version;
@@ -13,10 +14,10 @@ pub mod sources;
 pub mod transaction;
 
 use anyhow::{bail, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Package {
     pub name: String,
     pub url: String,
@@ -26,7 +27,7 @@ pub struct Package {
     pub filename: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub packages: Vec<Package>,
 }

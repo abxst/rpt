@@ -143,6 +143,17 @@ enum Command {
         max_packages: usize,
         package: String,
     },
+    /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
+    PrepareDownload {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -293,6 +304,16 @@ async fn execute(cli: Cli) -> Result<()> {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
             }
+        }
+        Command::PrepareDownload { cache, architecture, manifest, packages } => {
+            let ready = rpt::package_provenance::prepare(&cache, &packages, &architecture)
+                .context(ErrorCategory::System)?;
+            // Only trusted package filenames and content hashes from authenticated
+            // Release -> Packages are exported; no package is installed.
+            let data = serde_json::to_vec_pretty(&ready)?;
+            tokio::fs::write(&manifest, data).await
+                .context("writing verified download manifest")?;
+            println!("Manifest ready: {} package(s); no system changes", ready.packages.len());
         }
         Command::Fetch { manifest, output, workers, segments } => {
             let input = tokio::fs::read(&manifest).await
