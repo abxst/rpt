@@ -156,3 +156,24 @@ Partial repository failures return nonzero and leave the affected repository's
 prior cache unchanged. Other repositories may have committed successfully;
 the update is not an all-repository atomic transaction. RPT still does NOT
 overwrite /var/lib/apt/lists or provide full APT update compatibility.
+
+### Release freshness, By-Hash and isolated cache locking (alpha.14)
+
+Authenticated `InRelease` metadata is checked for `Date` (required; reject if
+more than 10 minutes in the future) and `Valid-Until` (reject if expired
+or earlier than Date). Metadata without optional `Valid-Until` is currently
+allowed, as with APT's standard archive treatment. RPT uses the
+content-addressed `by-hash/SHA256/<digest>` URL when `Acquire-By-Hash: yes`
+is advertised. It does not silently fall back to mutable filenames when
+By-Hash acquisition fails.
+
+`rpt update` acquires an advisory exclusive file lock on
+`<output>/.rpt-update.lock` before modifying its isolated cache; a second
+process targeting the same output returns nonzero. The lock file is retained
+intentionally to avoid inode replacement races. This protects RPT's own
+cache only, **not APT's system lock or /var/lib/apt/lists**.
+
+Existing limitations remain: compressed indexes are retained as received;
+repository Release-info change confirmation, By-Hash force modes, APT's
+full configuration and transports, complete APT pinning and dpkg integration
+are not implemented. Do not replace system APT.
