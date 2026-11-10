@@ -416,8 +416,26 @@ pub fn preview_with_policy(
             }
             validated.insert(name.clone());
         }
-        let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages)?;
+        // Select metadata for mandatory concrete dependencies *before* trying
+        // the solver. Otherwise latest-version dependencies could fail
+        // prematurely even though an older pinned candidate is satisfiable.
+        let mut mandatory = BTreeSet::new();
+        for name in &roots {
+            if !validated.contains(name) { continue; }
+            let summary = catalog.get(name).context("validated candidate missing catalog metadata")?;
+            for group in parse_groups(&summary.pre_depends)?.into_iter()
+                .chain(parse_groups(&summary.depends)?) {
+                if group.len() == 1 && catalog.contains_key(&group[0].name) {
+                    mandatory.insert(group[0].name.clone());
+                }
+            }
+        }
         let mut discovered = false;
+        for name in mandatory {
+            if roots.insert(name) { discovered = true; }
+        }
+        if discovered { continue; }
+        let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages)?;
         for step in &plan {
             if roots.insert(step.package.clone()) {
                 discovered = true;
