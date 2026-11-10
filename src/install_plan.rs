@@ -536,10 +536,10 @@ pub fn preview_with_policy(
             // Candidate metadata may not silently switch from a native binary
             // to Architecture: all, or pick a foreign architecture stanza.
             // Updates are keyed by the exact binary identity first.
-            metadata_query::insert_native_candidate(&mut keyed, summary, architecture)?;
-            let selected = metadata_query::native_catalog_projection(keyed.clone())?;
-            if selected != catalog {
-                catalog = selected;
+            let key = metadata_query::insert_native_candidate(&mut keyed, summary, architecture)?;
+            let selected = keyed.get(&key).context("candidate identity missing after insertion")?;
+            if catalog.get(name) != Some(selected) {
+                catalog.insert(name.clone(), selected.clone());
                 changed = true;
             }
             validated.insert(name.clone());
