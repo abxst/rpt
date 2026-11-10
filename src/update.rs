@@ -2,15 +2,110 @@
 //! Does not modify /var/lib/apt/lists or dpkg state.
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{stream, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use crate::error::{code, describe, emit, classify, ErrorCategory, LogFormat};
 use reqwest::{Client, Url};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::Duration,
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    io::IsTerminal,
 };
-use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Semaphore};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::{Semaphore, mpsc, oneshot, Mutex}, task::JoinSet};
+
+
+/// Options for the isolated metadata acquisition (not an APT drop-in).
+#[derive(Debug, Clone, Copy)]
+pub struct UpdateOptions {
+    pub workers: usize,
+    pub retries: usize,
+    pub quiet: u8,
+    pub progress: bool,
+    pub log_format: LogFormat,
+}
+
+impl Default for UpdateOptions {
+    fn default() -> Self {
+        Self { workers: 8, retries: 2, quiet: 0, progress: true, log_format: LogFormat::Text }
+    }
+}
+
+#[derive(Default)]
+struct Stats {
+    attempts: AtomicU64,
+    retries: AtomicU64,
+}
+
+struct IndexJob {
+    client: Client,
+    url: String,
+    file: PathBuf,
+    entry: Index,
+    bar: ProgressBar,
+    reply: oneshot::Sender<Result<u64>>,
+}
+
+fn update_style() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "{spinner:.cyan} {prefix:38} [{bar:24.cyan/blue}] {bytes:>9}/{total_bytes:9} {bytes_per_sec:>10} {eta:>5} {msg}"
+    ).expect("static progress style").progress_chars("=>-")
+}
+
+fn transient(error: &anyhow::Error) -> bool {
+    error.chain().filter_map(|c| c.downcast_ref::<reqwest::Error>()).any(|e| {
+        if let Some(status) = e.status() {
+            status.as_u16() == 429 || status.as_u16() == 408 || status.is_server_error()
+        } else {
+            e.is_timeout() || e.is_connect() || e.is_body() || e.is_request()
+        }
+    })
+}
+
+/// Workers pull from a bounded FIFO queue. Network concurrency is additionally
+/// limited by a global semaphore shared across all repositories.
+async fn worker_loop(
+    receiver: Arc<Mutex<mpsc::Receiver<IndexJob>>>,
+    budget: Arc<Semaphore>,
+    stats: Arc<Stats>,
+    opts: UpdateOptions,
+) {
+    loop {
+        let Some(job) = receiver.lock().await.recv().await else { break };
+        let mut outcome = None;
+        for attempt in 0..=opts.retries {
+            job.bar.set_position(0);
+            job.bar.set_message(if attempt == 0 { "downloading" } else { "retrying" });
+            stats.attempts.fetch_add(1, Ordering::Relaxed);
+            let _ = fs::remove_file(&job.file).await;
+            let result = fetch_index(
+                job.client.clone(), job.url.clone(), job.file.clone(),
+                job.entry.clone(), budget.clone(), job.bar.clone(),
+            ).await;
+            match result {
+                Ok(bytes) => {
+                    job.bar.finish_with_message("verified");
+                    outcome = Some(Ok(bytes));
+                    break;
+                }
+                Err(e) if attempt < opts.retries && transient(&e) => {
+                    stats.retries.fetch_add(1, Ordering::Relaxed);
+                    let category = classify(&e, ErrorCategory::Download);
+                    emit(opts.log_format, "retry", category, code(&e, category),
+                        Some(&job.entry.path), &format!("attempt {}/{}: {}", attempt+1, opts.retries, describe(&e)));
+                    tokio::time::sleep(Duration::from_millis(250u64.saturating_mul(1u64 << attempt.min(8)))).await;
+                }
+                Err(e) => {
+                    job.bar.abandon_with_message("failed");
+                    outcome = Some(Err(e.context(format!("index {}", job.entry.path))));
+                    break;
+                }
+            }
+        }
+        let _ = job.reply.send(outcome.expect("at least one attempt"));
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
@@ -211,7 +306,7 @@ async fn verify_signature(path: &Path, keyring: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index, budget: Arc<Semaphore>) -> Result<u64> {
+async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index, budget: Arc<Semaphore>, bar: ProgressBar) -> Result<u64> {
     let _permit = budget.acquire().await?;
     let response = client.get(&url).send().await?.error_for_status()?;
     if response.content_length().is_some_and(|len| len != expected.size) {
@@ -227,6 +322,7 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
         if downloaded > expected.size { bail!("index exceeds Release size"); }
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
+        bar.inc(chunk.len() as u64);
     }
     file.flush().await?;
     if downloaded != expected.size || hex::encode(hasher.finalize()) != expected.digest {
@@ -235,30 +331,67 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
     Ok(downloaded)
 }
 
-async fn update_repo(client: Client, repo: Repo, dest: PathBuf, workers: usize, budget: Arc<Semaphore>) -> Result<(usize, u64)> {
+
+async fn update_repo(
+    client: Client, repo: Repo, dest: PathBuf, budget: Arc<Semaphore>,
+    opts: UpdateOptions, multi: MultiProgress, stats: Arc<Stats>,
+) -> Result<(usize, u64)> {
     let name = scoped_name(&repo);
     let stage = dest.join(format!(".{name}-{}", std::process::id()));
     fs::create_dir_all(&stage).await?;
     let work = async {
         let base = format!("{}/dists/{}", repo.uri, repo.suite);
-        let signed = get_limited(&client, &format!("{base}/InRelease"), 16 * 1024 * 1024, budget.clone()).await?;
+        let signed = get_limited(&client, &format!("{base}/InRelease"), 16 * 1024 * 1024, budget.clone()).await
+            .with_context(|| format!("fetching {base}/InRelease"))?;
         let release_file = stage.join("InRelease");
         fs::write(&release_file, &signed).await?;
-        verify_signature(&release_file, &repo.keyring).await?;
+        verify_signature(&release_file, &repo.keyring).await
+            .with_context(|| format!("authenticating {base}/InRelease"))?;
         let hashes = release_hashes(std::str::from_utf8(&signed)?)?;
         let entries = indexes(&repo, &hashes)?;
         let total = entries.len();
-        let results = stream::iter(entries.into_iter().enumerate().map(|(index, entry)| {
-            let client = client.clone();
-            let budget = budget.clone();
-            let url = format!("{base}/{}", entry.path);
-            let file = stage.join(format!("index-{index}.{}", if entry.path.ends_with(".xz") { "xz" } else if entry.path.ends_with(".gz") { "gz" } else { "raw" }));
-            async move { fetch_index(client, url, file, entry, budget).await }
-        })).buffer_unordered(workers).collect::<Vec<_>>().await;
+
+        // Index jobs are dispatched to a bounded FIFO channel; N workers
+        // pull tasks rather than creating one task per HTTP request.
+        let (sender, receiver) = mpsc::channel::<IndexJob>(opts.workers.saturating_mul(2).max(1));
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut workers = JoinSet::new();
+        for _ in 0..opts.workers.min(total.max(1)) {
+            workers.spawn(worker_loop(receiver.clone(), budget.clone(), stats.clone(), opts));
+        }
+        let mut replies = Vec::with_capacity(total);
+        for (index, entry) in entries.into_iter().enumerate() {
+            let suffix = if entry.path.ends_with(".xz") { "xz" }
+                else if entry.path.ends_with(".gz") { "gz" } else { "raw" };
+            let file = stage.join(format!("index-{index}.{suffix}"));
+            let label = format!("{}:{}", repo.suite, entry.path);
+            let bar = multi.add(ProgressBar::new(entry.size));
+            bar.set_style(update_style());
+            bar.set_prefix(label.chars().take(38).collect::<String>());
+            bar.set_message("queued");
+            let (reply, rx) = oneshot::channel();
+            let job = IndexJob {
+                client: client.clone(), url: format!("{base}/{}", entry.path),
+                file, entry, bar, reply,
+            };
+            sender.send(job).await.context("index queue has stopped")?;
+            replies.push(rx);
+        }
+        drop(sender);
         let mut bytes = signed.len() as u64;
-        for result in results { bytes += result?; }
-        // Directory-level atomic swap is not portable when destination exists.
-        // Preserve existing authenticated data until replacement is complete.
+        let mut failure = None;
+        for reply in replies {
+            match reply.await.context("index worker exited without reporting")? {
+                Ok(value) => bytes += value,
+                Err(error) => { if failure.is_none() { failure = Some(error); } }
+            }
+        }
+        while let Some(joined) = workers.join_next().await {
+            joined.context("index scheduler worker panicked")?;
+        }
+        if let Some(error) = failure { return Err(error); }
+
+        // Preserve existing verified cache until all new index files are checked.
         let final_dir = dest.join(&name);
         let old_dir = dest.join(format!(".{name}-old-{}", std::process::id()));
         if fs::try_exists(&final_dir).await? { fs::rename(&final_dir, &old_dir).await?; }
@@ -273,34 +406,59 @@ async fn update_repo(client: Client, repo: Repo, dest: PathBuf, workers: usize, 
     work
 }
 
-/// Update independently authenticated repositories in parallel into an isolated cache.
-pub async fn update(root: &Path, dest: &Path, workers: usize) -> Result<()> {
-    if !(1..=64).contains(&workers) { bail!("workers must be 1..=64"); }
+/// Update independently authenticated repositories concurrently into an isolated cache.
+pub async fn update(root: &Path, dest: &Path, opts: UpdateOptions) -> Result<()> {
+    if !(1..=64).contains(&opts.workers) { bail!("workers must be 1..=64"); }
+    if opts.retries > 10 { bail!("retries must be 0..=10"); }
     let repositories = parse_sources(root)?;
     fs::create_dir_all(dest).await?;
     let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
     let count = repositories.len();
-    let budget = Arc::new(Semaphore::new(workers));
+    let budget = Arc::new(Semaphore::new(opts.workers));
+    let stats = Arc::new(Stats::default());
+    let multi = MultiProgress::new();
+    if !opts.progress || opts.log_format == LogFormat::Json || !std::io::stderr().is_terminal() {
+        multi.set_draw_target(ProgressDrawTarget::hidden());
+    }
+    multi.set_move_cursor(true);
     let results = stream::iter(repositories.into_iter().map(|repo| {
         let client = client.clone();
         let dest = dest.to_path_buf();
         let budget = budget.clone();
+        let stats = stats.clone();
+        let multi = multi.clone();
         async move {
             let name = format!("{} {}", repo.uri, repo.suite);
-            (name, update_repo(client, repo, dest, workers, budget).await)
+            (name, update_repo(client, repo, dest, budget, opts, multi, stats).await)
         }
-    })).buffer_unordered(workers).collect::<Vec<_>>().await;
+    })).buffer_unordered(opts.workers).collect::<Vec<_>>().await;
     let mut good = 0;
     let mut total = 0;
     let mut bytes = 0;
     for (name, result) in results {
         match result {
-            Ok((indexes, size)) => { good += 1; total += indexes; bytes += size; println!("Verified: {name} ({indexes} indexes)"); }
-            Err(error) => eprintln!("rpt: error [download] repository {name}: {error:#}"),
+            Ok((indexes, size)) => {
+                good += 1;
+                total += indexes;
+                bytes += size;
+                if opts.quiet == 0 { println!("Verified: {name} ({indexes} indexes)"); }
+            }
+            Err(error) => {
+                let category = classify(&error, ErrorCategory::Download);
+                emit(opts.log_format, "error", category, code(&error, category),
+                    Some(&name), &describe(&error));
+            }
         }
     }
-    println!("Update summary: {good}/{count} repositories, {total} indexes, {:.2} MiB transferred", bytes as f64 / 1_048_576.0);
-    if good != count { bail!("{} repository update(s) failed", count - good); }
+    if opts.quiet < 2 {
+        println!("Update summary: {good}/{count} repositories, {total} indexes, {:.2} MiB transferred, {} requests, {} retries",
+            bytes as f64 / 1_048_576.0,
+            stats.attempts.load(Ordering::Relaxed), stats.retries.load(Ordering::Relaxed));
+    }
+    if good != count {
+        return Err(anyhow!("{}/{} repository update(s) failed", count - good, count)
+            .context(ErrorCategory::Download));
+    }
     Ok(())
 }
 
