@@ -25,7 +25,7 @@ fn parse_atom(text: &str) -> Result<Requirement> {
         bail!("unsupported dependency syntax: {atom}");
     }
     // Explicitly reject architecture qualifiers and build profile syntax.
-    if atom.contains(['[', ']', '!', ':']) || (atom.contains(['<', '>']) && !atom.contains('(')) {
+    if atom.contains(['[', ']', '!']) || (atom.contains(['<', '>']) && !atom.contains('(')) {
         bail!("unsupported architecture/profile dependency: {atom}");
     }
     let (name, constraint) = if let Some((name, remainder)) = atom.split_once('(') {
@@ -86,10 +86,76 @@ fn capability_satisfies(cap: &Requirement, required: &Requirement) -> Result<boo
     satisfies(version, required)
 }
 
+#[derive(Clone, Debug, Default)]
+struct InstalledRelations {
+    version: String,
+    conflicts: String,
+    breaks: String,
+    provides: String,
+}
+
+/// Read conflict metadata from the *installed* dpkg status, never infer it
+/// from the latest repository version. Dpkg status is local, not signed policy.
+fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+    let data = std::fs::read(status)?;
+    if data.len() > 64 * 1024 * 1024 { bail!("dpkg status file exceeds safe size"); }
+    let text = std::str::from_utf8(&data)?;
+    let mut result = BTreeMap::new();
+    for record in crate::package_index::parse(text)? {
+        if record.field("Status") != Some("install ok installed") { continue; }
+        if !matches!(record.field("Architecture"), Some(a) if a == arch || a == "all") { continue; }
+        let name = record.field("Package").context("installed status missing Package")?;
+        let version = record.field("Version").context("installed status missing Version")?;
+        parse_atom(name)?;
+        version::compare(version, version)?;
+        let entry = InstalledRelations {
+            version: version.into(),
+            conflicts: record.field("Conflicts").unwrap_or("").into(),
+            breaks: record.field("Breaks").unwrap_or("").into(),
+            provides: record.field("Provides").unwrap_or("").into(),
+        };
+        if result.insert(name.to_owned(), entry).is_some() {
+            bail!("duplicate installed package in dpkg status: {name}");
+        }
+    }
+    Ok(result)
+}
+
+/// A negative relationship must be a simple comma-separated set of names
+/// with optional version constraints. Alternatives, arch qualifiers and
+/// profiles require a fuller dpkg/APT resolver and therefore fail closed.
+fn negative_relations(raw: &str) -> Result<Vec<Requirement>> {
+    if raw.trim().is_empty() { return Ok(Vec::new()); }
+    if raw.contains('|') { bail!("unsupported alternative in Conflicts/Breaks"); }
+    raw.split(',').map(parse_atom).collect()
+}
+
+fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
+    provided: &str) -> Result<bool> {
+    for requirement in negative_relations(raw)? {
+        if requirement.name == subject_name && satisfies(subject_version, &requirement)? {
+            return Ok(true);
+        }
+        let advertised = PackageSummary {
+            name: subject_name.into(), version: subject_version.into(),
+            architecture: String::new(), description: String::new(),
+            section: String::new(), depends: String::new(),
+            pre_depends: String::new(), recommends: String::new(),
+            suggests: String::new(), provides: provided.into(),
+            conflicts: String::new(), breaks: String::new(),
+        };
+        for cap in provides(&advertised)? {
+            if capability_satisfies(&cap, &requirement)? { return Ok(true); }
+        }
+    }
+    Ok(false)
+}
+
 #[derive(Clone)]
 struct Solver<'a> {
     catalog: &'a BTreeMap<String, PackageSummary>,
     installed: &'a BTreeMap<String, String>,
+    installed_relations: &'a BTreeMap<String, InstalledRelations>,
     visiting: BTreeSet<String>,
     done: BTreeSet<String>,
     plan: Vec<PlanStep>,
@@ -182,6 +248,55 @@ impl Solver<'_> {
         Ok(())
     }
 
+    /// Validate the final effective set (installed packages overridden by
+    /// staged upgrades plus all staged additions). Include reverse relations
+    /// from installed dpkg status, rather than newest repository metadata.
+    fn check_negative_relations(&self) -> Result<()> {
+        let staged: BTreeMap<&str, &str> = self.plan.iter()
+            .map(|step| (step.package.as_str(), step.version.as_str())).collect();
+        for (new_name, new_version) in &staged {
+            let new_pkg = self.catalog.get(*new_name)
+                .context("staged package missing repository metadata")?;
+            for (installed_name, installed_version) in self.installed {
+                if installed_name == *new_name { continue; }
+                let effective_version = staged.get(installed_name.as_str())
+                    .copied().unwrap_or(installed_version);
+                let (conflicts, breaks, provider) =
+                    if let Some(pkg) = self.catalog.get(installed_name)
+                        .filter(|_| staged.contains_key(installed_name.as_str())) {
+                        (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
+                    } else if let Some(status) = self.installed_relations.get(installed_name) {
+                        if status.version != *installed_version {
+                            bail!("inconsistent dpkg installed metadata for {installed_name}");
+                        }
+                        (status.conflicts.as_str(), status.breaks.as_str(), status.provides.as_str())
+                    } else {
+                        // Tests and legacy callers may lack installed relation
+                        // metadata. Never infer unknown reverse relationships.
+                        ("", "", "")
+                    };
+                if relations_hit(&new_pkg.conflicts, installed_name, effective_version, provider)?
+                    || relations_hit(&new_pkg.breaks, installed_name, effective_version, provider)?
+                    || relations_hit(conflicts, new_name, new_version, &new_pkg.provides)?
+                    || relations_hit(breaks, new_name, new_version, &new_pkg.provides)? {
+                    bail!("Conflicts/Breaks between planned {new_name} and installed {installed_name}");
+                }
+            }
+            for (peer_name, peer_version) in &staged {
+                if peer_name == new_name { continue; }
+                let peer = self.catalog.get(*peer_name)
+                    .context("staged peer missing repository metadata")?;
+                if relations_hit(&new_pkg.conflicts, peer_name, peer_version, &peer.provides)?
+                    || relations_hit(&new_pkg.breaks, peer_name, peer_version, &peer.provides)?
+                    || relations_hit(&peer.conflicts, new_name, new_version, &new_pkg.provides)?
+                    || relations_hit(&peer.breaks, new_name, new_version, &new_pkg.provides)? {
+                    bail!("Conflicts/Breaks between planned {new_name} and {peer_name}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_concrete(&mut self, requested: &Requirement) -> Result<()> {
         if self.done.contains(&requested.name) {
             let current = self.catalog.get(&requested.name)
@@ -200,10 +315,10 @@ impl Solver<'_> {
         if !satisfies(&current.version, requested)? {
             bail!("repository version {} does not satisfy dependency {}", current.version, requested.name);
         }
-        // Conflicts/Breaks can require removals and complex solver choices.
-        if !current.conflicts.trim().is_empty() || !current.breaks.trim().is_empty() {
-            bail!("{} has Conflicts/Breaks; full resolver required", current.name);
-        }
+        // Fail closed on unsupported Conflicts/Breaks syntax even if the
+        // named conflicting package is not presently installed.
+        negative_relations(&current.conflicts)?;
+        negative_relations(&current.breaks)?;
         if self.plan.len() + self.visiting.len() >= self.limit {
             bail!("dependency plan exceeded maximum package count");
         }
@@ -224,6 +339,7 @@ impl Solver<'_> {
             self.plan.push(PlanStep {
                 package: requested.name.clone(), version: current.version.clone(), installed,
             });
+            self.check_negative_relations()?;
         }
         Ok(())
     }
@@ -235,8 +351,10 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
     let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
     let installed = cache_query::installed_catalog(status, architecture)?;
+    let installed_relations = read_installed_relations(status, architecture)?;
     let mut solver = Solver {
-        catalog: &catalog, installed: &installed, visiting: BTreeSet::new(),
+        catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
+        visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         branch_budget: Rc::new(Cell::new(4096)),
     };
@@ -257,7 +375,8 @@ mod tests {
     }
     fn solve(catalog: &BTreeMap<String, PackageSummary>, installed: &BTreeMap<String,String>, name: &str) -> Result<Vec<PlanStep>> {
         let mut s = Solver {
-            catalog, installed, visiting: BTreeSet::new(), done: BTreeSet::new(),
+            catalog, installed, installed_relations: &BTreeMap::new(),
+            visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(4096)),
         };
         s.resolve(&parse_atom(name)?)?;
@@ -373,13 +492,77 @@ mod tests {
             ("app".into(), item("app", "1", "service-api")),
             ("first".into(), first),
         ]);
+        assert!(solve(&catalog, &BTreeMap::from([("old".into(), "1".into())]), "app").is_err());
+    }
+    #[test]
+    fn allows_debian_epoch_in_versions_not_architecture_suffixes() {
+        let requirement = parse_atom("old-lib (<< 2:3.0)").unwrap();
+        assert!(satisfies("1:9.0", &requirement).unwrap());
+        assert!(!satisfies("2:3.0", &requirement).unwrap());
+        assert!(parse_atom("old-lib:any").is_err());
+    }
+    #[test]
+    fn versioned_conflicts_and_breaks_match_only_existing_versions() {
+        let mut app = item("app", "1", "");
+        app.conflicts = "old-lib (<< 2.0)".into();
+        let catalog = BTreeMap::from([("app".into(), app.clone())]);
+        assert!(solve(&catalog, &BTreeMap::from([("old-lib".into(), "1.9".into())]), "app").is_err());
+        assert!(solve(&catalog, &BTreeMap::from([("old-lib".into(), "2.1".into())]), "app").is_ok());
+        app.breaks = "other (>= 3.0)".into();
+        let catalog = BTreeMap::from([("app".into(), app)]);
+        assert!(solve(&catalog, &BTreeMap::from([("other".into(), "3.0".into())]), "app").is_err());
+    }
+    #[test]
+    fn conflict_with_previous_planned_dependency_is_rejected() {
+        let mut app = item("app", "1", "lib");
+        app.breaks = "lib".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), app), ("lib".into(), item("lib", "1", "")),
+        ]);
         assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
+    fn backtracking_skips_conflicting_alternative() {
+        let mut bad = item("bad", "1", "");
+        bad.conflicts = "already".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "bad | good")),
+            ("bad".into(), bad), ("good".into(), item("good", "1", "")),
+        ]);
+        let installed = BTreeMap::from([("already".into(), "1".into())]);
+        let plan = solve(&catalog, &installed, "app").unwrap();
+        assert_eq!(plan.iter().map(|p|p.package.as_str()).collect::<Vec<_>>(), ["good", "app"]);
+    }
+    #[test]
+    fn reverse_installed_breaks_and_conflicts_use_status_metadata() {
+        let raw = "Package: legacy\nStatus: install ok installed\nArchitecture: amd64\nVersion: 3\nBreaks: app (>= 2)\n\n";
+        let path = std::env::temp_dir().join(format!("rpt-conflicts-{}.status", std::process::id()));
+        std::fs::write(&path, raw).unwrap();
+        let installed_relations = read_installed_relations(&path, "amd64").unwrap();
+        std::fs::remove_file(path).unwrap();
+        let catalog = BTreeMap::from([("app".into(), item("app", "2", ""))]);
+        let installed = BTreeMap::from([("legacy".into(), "3".into())]);
+        let mut solver = Solver {
+            catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
+            visiting: BTreeSet::new(), done: BTreeSet::new(),
+            plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(100)),
+        };
+        assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
+    }
+    #[test]
+    fn invalid_conflict_syntax_is_not_ignored() {
+        let mut app = item("app", "1", "");
+        app.conflicts = "other:any".into();
+        assert!(solve(&BTreeMap::from([("app".into(), app)]), &BTreeMap::new(), "app").is_err());
     }
     #[test]
     fn conflict_and_downgrade_fail_closed() {
         let mut p = item("pkg", "1", "");
         p.conflicts = "other".into();
-        assert!(solve(&BTreeMap::from([("pkg".into(), p)]), &BTreeMap::new(), "pkg").is_err());
+        // A simple absent conflict does not need a package removal.
+        assert!(solve(&BTreeMap::from([("pkg".into(), p.clone())]), &BTreeMap::new(), "pkg").is_ok());
+        assert!(solve(&BTreeMap::from([("pkg".into(), p)]),
+            &BTreeMap::from([("other".into(), "1".into())]), "pkg").is_err());
         let p = item("pkg", "1", "");
         assert!(solve(&BTreeMap::from([("pkg".into(), p)]),
             &BTreeMap::from([("pkg".into(), "2".into())]), "pkg").is_err());
