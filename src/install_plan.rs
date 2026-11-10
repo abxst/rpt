@@ -670,6 +670,33 @@ mod tests {
     }
 
     #[test]
+    fn backtracking_rejects_held_alternative_and_selects_viable_option() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "held-dep (>= 2) | other")),
+            ("held-dep".into(), item("held-dep", "2", "")),
+            ("other".into(), item("other", "1", "")),
+        ]);
+        let installed = BTreeMap::from([("held-dep".into(), "1".into())]);
+        let relations = BTreeMap::from([("held-dep".into(), InstalledRelations {
+            version: "1".into(), held: true, ..Default::default()
+        })]);
+        let plan = solve_catalog(&catalog, &installed, &relations, "app", 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["other", "app"]);
+    }
+
+    #[test]
+    fn critical_flag_blocks_upgrade_in_full_plan() {
+        let catalog = BTreeMap::from([("core".into(), item("core", "2", ""))]);
+        let installed = BTreeMap::from([("core".into(), "1".into())]);
+        for name in ["essential", "protected"] {
+            let mut state = InstalledRelations { version: "1".into(), ..Default::default() };
+            if name == "essential" { state.essential = true; }
+            else { state.protected = true; }
+            let relations = BTreeMap::from([("core".into(), state)]);
+            assert!(solve_catalog(&catalog, &installed, &relations, "core", 20, "amd64").is_err());
+        }
+    }
+    #[test]
     fn held_package_cannot_be_upgraded_in_dependency_plan() {
         let mut installed_relations = BTreeMap::new();
         installed_relations.insert("lib".to_owned(), InstalledRelations {
