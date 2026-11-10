@@ -1,5 +1,6 @@
 //! RPT engine building blocks. This is an experimental transport MVP, not an APT replacement.
 pub mod download;
+pub mod drivers;
 pub mod cache_query;
 pub mod metadata_query;
 pub mod install_plan;
