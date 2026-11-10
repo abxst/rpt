@@ -43,10 +43,34 @@ fn parse_atom(text: &str) -> Result<Requirement> {
     Ok(Requirement { name: name.to_owned(), constraint })
 }
 
-fn parse_groups(raw: &str) -> Result<Vec<Vec<Requirement>>> {
+/// Support only native-architecture dependency qualifiers. Foreign-arch
+/// package co-installation, :any and architecture restrictions require true
+/// Multi-Arch metadata and are deliberately refused.
+fn parse_atom_for_arch(text: &str, arch: &str) -> Result<Requirement> {
+    let atom = text.trim();
+    let (head, tail) = atom.split_once('(').map_or((atom, None), |(h, t)| (h, Some(t)));
+    let head = head.trim();
+    let normalized = if let Some((name, qualifier)) = head.split_once(':') {
+        if qualifier != "native" && qualifier != arch {
+            bail!("unsupported foreign or ambiguous architecture qualifier: {qualifier}");
+        }
+        if name.is_empty() || qualifier.contains(':') {
+            bail!("invalid architecture-qualified dependency");
+        }
+        name
+    } else { head };
+    let rebuilt = match tail {
+        Some(rest) => format!("{normalized} ({rest}"),
+        None => normalized.to_owned(),
+    };
+    parse_atom(&rebuilt)
+}
+
+fn parse_groups_for_arch(raw: &str, arch: &str) -> Result<Vec<Vec<Requirement>>> {
     if raw.trim().is_empty() { return Ok(Vec::new()); }
     raw.split(',').map(|group| {
-        group.split('|').map(parse_atom).collect::<Result<Vec<_>>>()
+        group.split('|').map(|atom| parse_atom_for_arch(atom, arch))
+            .collect::<Result<Vec<_>>>()
     }).collect()
 }
 
@@ -160,6 +184,7 @@ struct Solver<'a> {
     done: BTreeSet<String>,
     plan: Vec<PlanStep>,
     limit: usize,
+    architecture: String,
     branch_budget: Rc<Cell<usize>>,
 }
 
@@ -323,8 +348,8 @@ impl Solver<'_> {
             bail!("dependency plan exceeded maximum package count");
         }
         self.visiting.insert(requested.name.clone());
-        let groups = parse_groups(&current.pre_depends)?.into_iter()
-            .chain(parse_groups(&current.depends)?).collect::<Vec<_>>();
+        let groups = parse_groups_for_arch(&current.pre_depends, &self.architecture)?.into_iter()
+            .chain(parse_groups_for_arch(&current.depends, &self.architecture)?).collect::<Vec<_>>();
         self.resolve_groups(&groups, 0)?;
         self.visiting.remove(&requested.name);
         self.done.insert(requested.name.clone());
@@ -352,7 +377,7 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
-    solve_catalog(&catalog, &installed, &installed_relations, package, max_packages)
+    solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)
 }
 
 /// Shared read-only solver used both for ordinary previews and candidate
@@ -361,14 +386,15 @@ fn solve_catalog(
     catalog: &BTreeMap<String, PackageSummary>,
     installed: &BTreeMap<String, String>,
     installed_relations: &BTreeMap<String, InstalledRelations>,
-    package: &str, max_packages: usize,
+    package: &str, max_packages: usize, architecture: &str,
 ) -> Result<Vec<PlanStep>> {
     let mut solver = Solver {
         catalog, installed, installed_relations, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
+        architecture: architecture.to_owned(),
         branch_budget: Rc::new(Cell::new(4096)),
     };
-    solver.resolve(&parse_atom(package)?)?;
+    solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
     Ok(solver.plan)
 }
 
@@ -423,8 +449,8 @@ pub fn preview_with_policy(
         for name in &roots {
             if !validated.contains(name) { continue; }
             let summary = catalog.get(name).context("validated candidate missing catalog metadata")?;
-            for group in parse_groups(&summary.pre_depends)?.into_iter()
-                .chain(parse_groups(&summary.depends)?) {
+            for group in parse_groups_for_arch(&summary.pre_depends, architecture)?.into_iter()
+                .chain(parse_groups_for_arch(&summary.depends, architecture)?) {
                 if group.len() == 1 && catalog.contains_key(&group[0].name) {
                     mandatory.insert(group[0].name.clone());
                 }
@@ -435,7 +461,7 @@ pub fn preview_with_policy(
             if roots.insert(name) { discovered = true; }
         }
         if discovered { continue; }
-        let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages)?;
+        let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
         for step in &plan {
             if roots.insert(step.package.clone()) {
                 discovered = true;
@@ -487,9 +513,9 @@ mod tests {
         let mut s = Solver {
             catalog, installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
-            plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(4096)),
+            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)),
         };
-        s.resolve(&parse_atom(name)?)?;
+        s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
     }
     #[test]
@@ -504,7 +530,7 @@ mod tests {
         // different dependency graph from the latest published version.
         latest.insert("app".into(), item("app", "1", "lib (>= 1)"));
         latest.insert("lib".into(), item("lib", "1", ""));
-        let plan = solve_catalog(&latest, &installed, &relations, "app", 20).unwrap();
+        let plan = solve_catalog(&latest, &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|x| (x.package.as_str(), x.version.as_str()))
             .collect::<Vec<_>>(), [("lib", "1"), ("app", "1")]);
     }
@@ -549,6 +575,17 @@ mod tests {
                 name, &origins, &pins, installed, None, None,
             )?.candidate)
         }).is_err());
+    }
+    #[test]
+    fn native_qualifiers_accept_current_arch_and_reject_foreign_or_any() {
+        for arch in ["amd64", "arm64"] {
+            assert_eq!(parse_atom_for_arch("lib:native (>= 1:2.0)", arch).unwrap().name, "lib");
+            assert_eq!(parse_atom_for_arch(&format!("lib:{arch}"), arch).unwrap().name, "lib");
+            assert!(parse_atom_for_arch("lib:any", arch).is_err());
+            let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
+            assert!(parse_atom_for_arch(&format!("lib:{foreign}"), arch).is_err());
+            assert!(parse_groups_for_arch("a:native | b:native, c (>= 2)", arch).is_ok());
+        }
     }
     #[test]
     fn dependency_order_and_installed_satisfaction() {
@@ -713,7 +750,7 @@ mod tests {
         let mut solver = Solver {
             catalog: &catalog, installed: &installed, installed_relations: &installed_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
-            plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(100)),
+            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }

@@ -118,6 +118,16 @@ pub struct Repo {
     pub keyring: PathBuf,
 }
 
+/// Native Debian architecture of this build. Foreign architecture index
+/// downloads remain unsupported until complete Multi-Arch policy parity.
+pub fn native_architecture() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("amd64"),
+        "aarch64" => Ok("arm64"),
+        other => bail!("unsupported native architecture: {other}"),
+    }
+}
+
 fn words(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_owned).collect()
 }
@@ -148,7 +158,7 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
         bail!("Trusted: yes would bypass repository verification");
     }
     if let Some(arches) = fields.get("Architectures") {
-        if !words(arches).iter().any(|arch| arch == "amd64") { return Ok(Vec::new()); }
+        if !words(arches).iter().any(|arch| arch == native_architecture().unwrap_or("")) { return Ok(Vec::new()); }
     }
     let key = fields.get("Signed-By").context("Signed-By keyring required")?;
     if key.split_whitespace().count() != 1 || !key.starts_with('/') {
@@ -326,13 +336,14 @@ fn release_hashes(signed: &str) -> Result<BTreeMap<String, (u64, String)>> {
 
 fn indexes(repo: &Repo, hashes: &BTreeMap<String, (u64, String)>, by_hash: bool) -> Result<Vec<Index>> {
     let mut result = Vec::new();
+    let arch = native_architecture()?;
     for component in &repo.components {
-        let base = format!("{component}/binary-amd64/Packages");
+        let base = format!("{component}/binary-{arch}/Packages");
         let choices = [format!("{base}.xz"), format!("{base}.gz"), base];
         let selected = choices.iter().find_map(|p| hashes.get(p).map(|(size, digest)| Index {
             path: p.clone(), size: *size, digest: digest.clone(), by_hash,
         }));
-        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-amd64/Packages"))?;
+        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-{arch}/Packages"))?;
         if index.size == 0 || index.size > 256 * 1024 * 1024 {
             bail!("repository index size outside supported bounds");
         }
@@ -588,8 +599,8 @@ mod tests {
     }
     #[test]
     fn checks_release_checksum_metadata() {
-        let text = "-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Ubuntu\nSHA256:\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-amd64/Packages.xz\n-----BEGIN PGP SIGNATURE-----";
-        let hashes = release_hashes(text).unwrap();
+        let text = format!("-----BEGIN PGP SIGNED MESSAGE-----\\nHash: SHA256\\n\\nOrigin: Ubuntu\\nSHA256:\\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-{}/Packages.xz\\n-----BEGIN PGP SIGNATURE-----", native_architecture().unwrap()).replace("\\n","\n");
+        let hashes = release_hashes(&text).unwrap();
         let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into() };
         assert_eq!(indexes(&repo, &hashes, false).unwrap().len(), 1);
     }

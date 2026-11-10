@@ -400,3 +400,53 @@ jobs:
           fi
           grep -q '"code":"DOWNLOAD_SIGNATURE"' "$RUNNER_TEMP/rpt-bad.stderr"
           test "$(find "$target" -name InRelease -type f | wc -l)" -eq 0
+
+  arm64-native:
+    name: Native ARM64 Ubuntu package differential
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert native ARM64 architecture (no QEMU)
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          test "$(dpkg --print-architecture)" = "arm64"
+          test "$(rustc -vV | awk '/^host:/{print $2}')" = "aarch64-unknown-linux-gnu"
+      - name: Rust checks on ARM64 hardware
+        run: |
+          cargo generate-lockfile
+          cargo fmt --all
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --all-targets --locked
+          cargo build --locked
+      - name: Download native signed arm64 Ubuntu package indexes
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          root="$RUNNER_TEMP/rpt-arm64-sources"
+          cache="$RUNNER_TEMP/rpt-arm64-cache"
+          mkdir -p "$root/sources.list.d"
+          cat > "$root/sources.list.d/ubuntu.sources" <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates
+          Components: main
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          timeout 240 ./target/debug/rpt update --root "$root" --output "$cache" --workers 8 --no-progress > "$RUNNER_TEMP/rpt-arm64-update.log"
+          test "$(find "$cache" -name InRelease -type f | wc -l)" -eq 2
+          test "$(find "$cache" -name 'index-*' -type f | wc -l)" -eq 2
+          ./target/debug/rpt cache-versions --cache "$cache" --package bash --architecture arm64 | sort -u > "$RUNNER_TEMP/rpt-arm64-versions"
+          apt-cache madison bash | awk -F'|' 'NF>=2 {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' | sort -u > "$RUNNER_TEMP/apt-arm64-versions"
+          test -s "$RUNNER_TEMP/rpt-arm64-versions"
+          diff -u "$RUNNER_TEMP/apt-arm64-versions" "$RUNNER_TEMP/rpt-arm64-versions"
+          dpkg-query -W -f='${Version}\n' bash > "$RUNNER_TEMP/dpkg-arm64-version"
+          ./target/debug/rpt installed-version --architecture arm64 --package bash > "$RUNNER_TEMP/rpt-arm64-installed"
+          diff -u "$RUNNER_TEMP/dpkg-arm64-version" "$RUNNER_TEMP/rpt-arm64-installed"
+          ./target/debug/rpt verified-origins --cache "$cache" --architecture arm64 --package bash > "$RUNNER_TEMP/rpt-arm64-origins"
+          test -s "$RUNNER_TEMP/rpt-arm64-origins"

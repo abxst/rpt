@@ -351,3 +351,9 @@ This is a **guard**, not a full candidate-aware resolver: it does not yet load d
 ### Candidate-version-aware dependency closure (read-only)
 
 The Debian `plan-install` diagnostic now chooses the repository-verified policy candidate for each discovered concrete package and loads its **exact version** of `Depends`, `Pre-Depends`, `Provides`, `Conflicts` and `Breaks`, rather than assuming the highest published version is selected. Metadata disagreement across repository indexes for the same package/version, an installed-only candidate lacking signed source metadata, and phased updates without an explicit machine ID fail closed. The dependency closure is recomputed for at most 16 rounds; cycles, unsupported alternatives, Multi-Arch and removals are still rejected. This plan remains **informational only**, not a transactional plan or full apt resolver.
+
+### Native ARM64 CI and restricted architecture qualifiers
+
+RPT now selects the native Packages index during `rpt update`: `binary-amd64` on x86_64 and `binary-arm64` on aarch64. The dependency planner recognizes `pkg:native` and `pkg:<selected-architecture>` (for `amd64` or `arm64` when the qualifier exactly matches the selected architecture). Qualifiers `:any`, foreign architecture requests and build-profile/architecture restriction expressions remain **fail-closed**. **This is not full Debian Multi-Arch co-installation support.** On native ARM64 use `--architecture arm64` for read-only package queries and `plan-install`; CLI defaults still target amd64 until the command defaults are generalized.
+
+CI includes a separate `ubuntu-24.04-arm` GitHub-hosted runner (aarch64, **no QEMU**) to run Rust checks, signed Ubuntu Ports index updates, amd64/arm64 architecture guards, and compare ARM64 package versions against native `apt-cache`/`dpkg`. All installation operations remain disabled.
