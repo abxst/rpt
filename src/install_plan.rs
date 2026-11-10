@@ -20,11 +20,11 @@ struct Requirement {
 
 fn parse_atom(text: &str) -> Result<Requirement> {
     let atom = text.trim();
-    if atom.is_empty() || atom.contains(['[', ']', '<', '>']) && !atom.contains('(') {
+    if atom.is_empty() {
         bail!("unsupported dependency syntax: {atom}");
     }
     // Explicitly reject architecture qualifiers and build profile syntax.
-    if atom.contains(['[', ']', '<', '>', '!', ':']) && !atom.contains('(') {
+    if atom.contains(['[', ']', '!', ':']) || (atom.contains(['<', '>']) && !atom.contains('(')) {
         bail!("unsupported architecture/profile dependency: {atom}");
     }
     let (name, constraint) = if let Some((name, remainder)) = atom.split_once('(') {
