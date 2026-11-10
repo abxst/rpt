@@ -54,6 +54,15 @@ jobs:
           Components: main
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-          timeout 240 ./target/debug/rpt update --root "$sources" --output "$target" --workers 8
+          timeout 240 ./target/debug/rpt update --root "$sources" --output "$target" --workers 8 -q -o Acquire::Retries=2 --no-progress > "$RUNNER_TEMP/rpt-update.log"
+          grep -q 'Update summary: 2/2 repositories' "$RUNNER_TEMP/rpt-update.log"
+          grep -q '0 retries' "$RUNNER_TEMP/rpt-update.log"
           test "$(find "$target" -name InRelease -type f | wc -l)" -eq 2
           test "$(find "$target" -name 'index-*' -type f | wc -l)" -eq 2
+          cat "$RUNNER_TEMP/rpt-update.log"
+      - name: Reject unsupported APT update flags
+        run: |
+          if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
+            echo 'Unsupported APT settings were accepted' >&2
+            exit 1
+          fi
