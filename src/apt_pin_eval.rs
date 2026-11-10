@@ -1,5 +1,5 @@
 //! Read-only, deliberately restricted APT preference evaluator.
-//! Supports exact package selectors and exact version/release identifiers only.
+//! Supports exact package selectors and Package: * Release general pins.
 //! This is a diagnostic, not APT candidate selection or authorization to install.
 use crate::{apt_preferences::PinRecord, package_provenance::VerifiedVersionOrigin};
 use anyhow::{bail, Result};
@@ -52,8 +52,8 @@ fn release_matches(value: &str, origin: &VerifiedVersionOrigin) -> bool {
 /// for unrelated packages: otherwise a caller could mistake partial policy for
 /// a complete and authoritative result.
 fn validate_record(record: &PinRecord) -> Result<()> {
-    if record.package == "*" || record.package.contains(char::is_whitespace)
-        || !record.package.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b)) {
+    if record.package.contains(char::is_whitespace)
+        || (record.package != "*" && !record.package.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))) {
         bail!("unsupported pin Package selector: {}", record.package);
     }
     let (kind, value) = record.pin.split_once(' ').ok_or_else(|| anyhow::anyhow!("invalid Pin"))?;
@@ -65,6 +65,9 @@ fn validate_record(record: &PinRecord) -> Result<()> {
         _ => false,
     };
     if !valid { bail!("unsupported pin selector: {}", record.pin); }
+    if record.package == "*" && kind != "release" {
+        bail!("general Package: * currently supports only Release pins");
+    }
     if record.priority == 0 {
         bail!("APT pin priority zero has undefined behavior and is unsupported");
     }
@@ -72,7 +75,7 @@ fn validate_record(record: &PinRecord) -> Result<()> {
 }
 
 fn matches(record: &PinRecord, name: &str, origin: &VerifiedVersionOrigin) -> bool {
-    if record.package != name { return false; }
+    if record.package != name && record.package != "*" { return false; }
     let Some((kind, value)) = record.pin.split_once(' ') else { return false };
     let value = value.trim();
     match kind {
@@ -83,17 +86,19 @@ fn matches(record: &PinRecord, name: &str, origin: &VerifiedVersionOrigin) -> bo
 }
 
 /// Report priority per *verified occurrence*, without collapsing two origins
-/// that advertise identical versions. For this restricted diagnostic first
-/// matching explicit package rule wins; default repository priority is 500.
-/// It deliberately refuses wildcard/general pins rather than approximating APT.
+/// advertising identical versions. Explicit package records have precedence
+/// over general Package: * Release records, regardless of file order.
+/// First matching record within each class wins; fallback is priority 500.
+/// This diagnostic does not implement wildcard package patterns.
 pub fn evaluate(
     package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
 ) -> Result<Vec<EvaluatedPin>> {
     if package.is_empty() { bail!("empty package name"); }
     for record in records { validate_record(record)?; }
     Ok(origins.iter().map(|origin| {
-        let priority = records.iter().find(|r| matches(r, package, origin))
-            .map_or(500, |r| r.priority);
+        let specific = records.iter().find(|r| r.package == package && matches(r, package, origin));
+        let general = records.iter().find(|r| r.package == "*" && matches(r, package, origin));
+        let priority = specific.or(general).map_or(500, |r| r.priority);
         EvaluatedPin {
             version: origin.version.clone(),
             repository_uri: origin.repository_uri.clone(),
@@ -188,7 +193,7 @@ mod tests {
     }
     #[test]
     fn refuses_unsupported_or_ambiguous_pins() {
-        for package in ["*", "bash:amd64", "bash curl"] {
+        for package in ["ba*", "bash:amd64", "bash curl"] {
             assert!(evaluate("bash", &[origin("1.0", "stable")], &[PinRecord {
                 package: package.into(), pin: "version 1.0".into(), priority: 500,
             }]).is_err());
@@ -230,6 +235,33 @@ mod tests {
             let records = [PinRecord { package: "bash".into(), pin: pin.into(), priority: 723 }];
             assert_eq!(evaluate("bash", &[item.clone()], &records).unwrap()[0].priority, 723, "{pin}");
         }
+    }
+    #[test]
+    fn specific_precedes_general_independent_of_file_order() {
+        let origins = [origin("1.0", "stable"), origin("2.0", "testing")];
+        let general = PinRecord { package: "*".into(), pin: "release a=stable".into(), priority: 800 };
+        let specific = PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 650 };
+        let records = [general.clone(), specific.clone()];
+        let result = evaluate("bash", &origins, &records).unwrap();
+        assert_eq!(result.iter().map(|r| r.priority).collect::<Vec<_>>(), [650, 500]);
+        let reversed = [specific, general];
+        assert_eq!(evaluate("bash", &origins, &reversed).unwrap(), result);
+        let another = evaluate("curl", &origins, &records).unwrap();
+        assert_eq!(another.iter().map(|r| r.priority).collect::<Vec<_>>(), [800, 500]);
+    }
+    #[test]
+    fn first_general_match_wins_not_highest_pin() {
+        let items = [origin("1.0", "stable")];
+        let records = [
+            PinRecord { package: "*".into(), pin: "release a=stable".into(), priority: 400 },
+            PinRecord { package: "*".into(), pin: "release n=stable".into(), priority: 950 },
+        ];
+        assert_eq!(evaluate("bash", &items, &records).unwrap()[0].priority, 400);
+    }
+    #[test]
+    fn rejects_unsupported_general_version_pinning() {
+        let records = [PinRecord { package: "*".into(), pin: "version 1.0".into(), priority: 700 }];
+        assert!(evaluate("bash", &[], &records).is_err());
     }
     #[test]
     fn candidate_priorities_no_downgrade_and_explicit_downgrade() {
