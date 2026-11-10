@@ -429,6 +429,20 @@ async fn update_repo(
         let by_hash = by_hash_enabled(signed_text)?;
         let entries = indexes(&repo, &hashes, by_hash)
             .context(ErrorCode::DownloadIndex)?;
+        let provenance = crate::package_provenance::RepositoryProvenance {
+            uri: repo.uri.clone(),
+            suite: repo.suite.clone(),
+            keyring: repo.keyring.to_string_lossy().into_owned(),
+            indexes: entries.iter().enumerate().map(|(i, item)| {
+                let extension = if item.path.ends_with(".xz") { "xz" }
+                    else if item.path.ends_with(".gz") { "gz" } else { "raw" };
+                crate::package_provenance::IndexProvenance {
+                    release_path: item.path.clone(),
+                    local_file: format!("index-{i}.{extension}"),
+                    sha256: item.digest.clone(), size: item.size,
+                }
+            }).collect(),
+        };
         let total = entries.len();
 
         // Index jobs are dispatched to a bounded FIFO channel; N workers
@@ -470,6 +484,10 @@ async fn update_repo(
             joined.context("index scheduler worker panicked")?;
         }
         if let Some(error) = failure { return Err(error); }
+        // Publish provenance only after all authenticated Release-index hashes
+        // have been verified, within the same staged directory swap.
+        fs::write(stage.join("provenance.json"),
+            serde_json::to_vec_pretty(&provenance)?).await?;
 
         // Preserve existing verified cache until all new index files are checked.
         let final_dir = dest.join(&name);
