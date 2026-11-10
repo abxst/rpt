@@ -85,3 +85,18 @@ It downloads/verifies the release into `/opt/rpt/rpt`, saves an unchanged
 changes `/usr/bin/apt`. `activate` always refuses until a real compatible
 APT engine and comprehensive safe integration tests exist. A symlink from
 `/usr/bin/apt` to the current RPT would break package management.
+
+### Independent Debian metadata core (alpha.10)
+
+`rpt version-compare 1.0~rc1 1.0` prints `-1` (strict Debian version
+ordering including epoch, upstream, revision, tilde, and numeric runs).
+CI runs a differential matrix of 625 pairs against read-only
+`dpkg --compare-versions`.
+
+`rpt inspect-index --path ./Packages --package bash` parses local,
+**uncompressed and not yet authenticated** Debian Packages control stanzas,
+including multiline fields. It does not choose a package candidate,
+resolve dependencies, verify a Release signature, or install anything.
+
+**Important:** This milestone is not APT compatibility. The original APT
+executable must stay in place. Stage only with `scripts/stage-apt.sh`.

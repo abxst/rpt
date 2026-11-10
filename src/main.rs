@@ -18,6 +18,13 @@ enum Command {
         #[arg(long, default_value = "/etc/apt")]
         root: PathBuf,
     },
+    /// Compare Debian package versions (negative / zero / positive output).
+    VersionCompare { left: String, right: String },
+    /// Inspect a local, uncompressed Packages index (NOT signature verification).
+    InspectIndex {
+        #[arg(long)] path: PathBuf,
+        #[arg(long)] package: Option<String>,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -46,6 +53,24 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli) -> Result<()> {
     let format = cli.log_format;
     match cli.command {
+        Command::VersionCompare { left, right } => {
+            let ordering = rpt::version::compare(&left, &right)
+                .context(ErrorCategory::System)?;
+            println!("{}", match ordering {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            });
+        }
+        Command::InspectIndex { path, package } => {
+            let text = tokio::fs::read_to_string(&path).await
+                .context("reading Packages index").context(ErrorCategory::System)?;
+            let entries = rpt::package_index::entries(&text)
+                .context("parsing Packages index").context(ErrorCategory::System)?;
+            for entry in entries.into_iter().filter(|entry| package.as_ref().is_none_or(|p| *p == entry.name)) {
+                println!("{} {} {} {}", entry.name, entry.version, entry.architecture, entry.filename);
+            }
+        }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
