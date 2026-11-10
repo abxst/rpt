@@ -153,6 +153,137 @@ jobs:
           test -s "$RUNNER_TEMP/rpt-origins"
           grep -Fq 'archive.ubuntu.com/ubuntu' "$RUNNER_TEMP/rpt-origins"
           grep -Eq ' noble(-updates)? ' "$RUNNER_TEMP/rpt-origins"
+          # Origin/Label/Archive/Codename/Component are now taken from
+          # authenticated InRelease plus the signed Packages index path.
+          grep -Eq ' main Ubuntu Ubuntu noble(-updates)? noble
+          bad="$RUNNER_TEMP/rpt-corrupt-origins"
+          cp -a "$cache" "$bad"
+          index="$(find "$bad" -name 'index-*.xz' -print -quit)"
+          test -n "$index"
+          printf corruption >> "$index"
+          if ./target/debug/rpt verified-origins --cache "$bad" --package bash >/dev/null 2>&1; then
+            echo 'Tampered repository index accepted for version origins' >&2
+            exit 1
+          fi
+          echo 'PASS signed version origins and tamper rejection'
+      - name: Read-only metadata show search list on Ubuntu
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/rpt-metadata"
+          ./target/debug/rpt show --cache "$target" bash > "$RUNNER_TEMP/rpt-show-bash"
+          grep -Fq 'Package: bash' "$RUNNER_TEMP/rpt-show-bash"
+          ver="$(./target/debug/rpt cache-versions --cache "$target" --package bash | head -n 1)"
+          grep -Fq "Version: $ver" "$RUNNER_TEMP/rpt-show-bash"
+          ./target/debug/rpt search --cache "$target" --limit 20 bash > "$RUNNER_TEMP/rpt-search-bash"
+          grep -Fq 'bash - ' "$RUNNER_TEMP/rpt-search-bash"
+          ./target/debug/rpt list --cache "$target" --prefix bash --limit 20 > "$RUNNER_TEMP/rpt-list-bash"
+          grep -Fq "bash/cache $ver amd64" "$RUNNER_TEMP/rpt-list-bash"
+          if ./target/debug/rpt search --cache "$target" --limit 0 bash >/dev/null 2>&1; then
+            echo "Invalid result limit accepted" >&2
+            exit 1
+          fi
+          ./target/debug/rpt depends --cache "$target" bash > "$RUNNER_TEMP/rpt-depends"
+          grep -Fq 'Depends:' "$RUNNER_TEMP/rpt-depends"
+          ./target/debug/rpt rdepends --cache "$target" --limit 10 libc6 > "$RUNNER_TEMP/rpt-rdepends"
+          test -s "$RUNNER_TEMP/rpt-rdepends"
+          echo "PASS cached show/search/list/depends/rdepends"
+      - name: Fail-closed dependency install-plan fixture (read only)
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/rpt-plan-fixture"
+          mkdir -p "$fixture/cache/abcdefabcdefabcdefabcdef" "$fixture/apt"
+          printf 'test fixture only\n' > "$fixture/cache/abcdefabcdefabcdefabcdef/InRelease"
+          cat > "$fixture/cache/abcdefabcdefabcdefabcdef/index-0.raw" <<'EOF'
+          Package: app
+          Version: 2.0
+          Architecture: amd64
+          Depends: libdemo (>= 1.0)
+
+          Package: libdemo
+          Version: 1.1
+          Architecture: amd64
+
+          EOF
+          touch "$fixture/status"
+          ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app > "$fixture/plan"
+          grep -Fq 'libdemo 1.1' "$fixture/plan"
+          grep -Fq 'app 2.0' "$fixture/plan"
+          grep -Fq 'NO CHANGES MADE' "$fixture/plan"
+          cat > "$fixture/apt/preferences" <<'EOF'
+          Package: *
+          Pin: release a=noble
+          Pin-Priority: 900
+          EOF
+          if ./target/debug/rpt plan-install --cache "$fixture/cache" --status "$fixture/status" --apt-root "$fixture/apt" app > /dev/null 2>&1; then
+            echo "Plan incorrectly accepted unhandled APT pinning" >&2
+            exit 1
+          fi
+          echo "PASS dry-run dependency plan and pinning refusal"
+      - name: Signed package acquisition manifest and tamper detection
+        run: |
+          set -euo pipefail
+          cache="$RUNNER_TEMP/rpt-metadata"
+          manifest="$RUNNER_TEMP/rpt-download-manifest.json"
+          ./target/debug/rpt prepare-download --cache "$cache" --manifest "$manifest" bash
+          python3 - "$manifest" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1]))
+          assert len(manifest['packages']) == 1
+          pkg = manifest['packages'][0]
+          assert pkg['name'] == 'bash'
+          assert pkg['filename'].startswith('pool/')
+          assert pkg['size'] > 0
+          assert len(pkg['sha256']) == 64
+          print('PASS signed source-index-package SHA256 chain')
+          PY
+          timeout 180 ./target/debug/rpt fetch --manifest "$manifest" \
+            --output "$RUNNER_TEMP/rpt-downloaded-debs" --workers 2 --segments 2
+          filename="$(python3 - "$manifest" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))['packages'][0]['filename'])
+          PY
+          )"
+          test -s "$RUNNER_TEMP/rpt-downloaded-debs/$filename"
+          test "$(dpkg-deb -f "$RUNNER_TEMP/rpt-downloaded-debs/$filename" Package)" = bash
+          # A local modification must invalidate the verified cache.
+          bad="$RUNNER_TEMP/rpt-tampered-cache"
+          cp -a "$cache" "$bad"
+          index="$(find "$bad" -name 'index-*.xz' -print -quit)"
+          test -n "$index"
+          printf 'corrupt' >> "$index"
+          if ./target/debug/rpt prepare-download --cache "$bad" \
+              --manifest "$RUNNER_TEMP/should-not-exist.json" bash >/dev/null 2>&1; then
+            echo 'Tampered authenticated cache was accepted' >&2
+            exit 1
+          fi
+          test ! -f "$RUNNER_TEMP/should-not-exist.json"
+          echo "PASS downloaded .deb integrity and cache tampering rejection"
+      - name: Reject unsupported APT update flags
+        run: |
+          if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
+            echo 'Unsupported APT settings were accepted' >&2
+            exit 1
+          fi
+      - name: Fail closed for bad repository signing key
+        run: |
+          sources="$RUNNER_TEMP/rpt-bad-signature"
+          target="$RUNNER_TEMP/rpt-bad-signature-cache"
+          mkdir -p "$sources/sources.list.d"
+          cat > "$sources/sources.list.d/ubuntu.sources" <<'EOF'
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu
+          Suites: noble
+          Components: main
+          Signed-By: /nonexistent/rpt-test-keyring.gpg
+          EOF
+          if timeout 120 ./target/debug/rpt --log-format json update --root "$sources" --output "$target" --workers 2 --no-progress 1>"$RUNNER_TEMP/rpt-bad.stdout" 2>"$RUNNER_TEMP/rpt-bad.stderr"; then
+            echo 'Unsigned metadata was accepted' >&2
+            exit 1
+          fi
+          grep -q '"code":"DOWNLOAD_SIGNATURE"' "$RUNNER_TEMP/rpt-bad.stderr"
+          test "$(find "$target" -name InRelease -type f | wc -l)" -eq 0
+ "$RUNNER_TEMP/rpt-origins"
+
           bad="$RUNNER_TEMP/rpt-corrupt-origins"
           cp -a "$cache" "$bad"
           index="$(find "$bad" -name 'index-*.xz' -print -quit)"
