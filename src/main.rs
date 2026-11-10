@@ -102,6 +102,17 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Read-only restricted pin diagnostic; never selects or installs a candidate.
+    PinInspect {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long, default_value = "/etc/apt")]
+        apt_root: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
     PolicyPreview {
         #[arg(long, default_value = "auto")]
@@ -263,6 +274,15 @@ async fn execute(cli: Cli) -> Result<()> {
                     entry.release.label.as_deref().unwrap_or("-"),
                     entry.release.archive.as_deref().unwrap_or("-"),
                     entry.release.codename.as_deref().unwrap_or("-"));
+            }
+        }
+        Command::PinInspect { cache, apt_root, package, architecture } => {
+            // This independent diagnostic never changes existing policy-preview behaviour.
+            rpt::policy::ensure_supported_apt_configuration(&apt_root)?;
+            let records = rpt::apt_preferences::load(&apt_root)?;
+            let origins = rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)?;
+            for item in rpt::apt_pin_eval::evaluate(&package, &origins, &records)? {
+                println!("{} {} {} {}", item.version, item.priority, item.repository_uri, item.suite);
             }
         }
         Command::PreferencesInspect { apt_root } => {
