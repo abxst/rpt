@@ -13,7 +13,7 @@ pub struct PolicyPreview {
 
 /// Reject conventional preference files and target-release settings instead of
 /// knowingly giving an inaccurate result for a customized APT policy.
-fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
+pub fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
     let prefs = apt_root.join("preferences");
     if prefs.exists() && prefs.is_file() && active_lines(&prefs)? {
         bail!("APT pinning detected in {}; candidate preview is unsupported", prefs.display());
