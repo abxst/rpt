@@ -70,6 +70,13 @@ versioning, installed-state semantics, transaction adapter and isolated VM tests
 4. Optimize network and cache layers only after correctness is demonstrated.
 
 The current code routes `version-compare`, `installed-version`,
-`plan-install` and `prepare-download` through the driver boundary.
-Other Debian-only commands retain their existing behavior and have not yet been
-migrated; further migrations must be explicit and tested.
+`plan-install`, `prepare-download`, `update`, `cache-versions`,
+`policy-preview`, `show`, `search`, `list`, `depends` and `rdepends`
+through the selected driver. Their default driver is `deb` for backwards
+compatibility on the Ubuntu CI runner. Non-Debian drivers explicitly reject
+these operations until implemented.
+
+Low-level Debian inspection helpers (`sources`, `inspect-index` and
+`index-versions`) remain format-specific tools; `fetch` stays the
+distro-independent HTTP artifact transport. Nothing here enables native
+package transactions or full APT replacement.
