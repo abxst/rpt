@@ -174,25 +174,63 @@ fn scan_cache(
     Ok(())
 }
 
-/// Build an in-memory catalog of the latest published versions from verified-update
-/// cache. This is an exploratory catalog, not APT policy (pins, phased updates,
-/// multiarch and virtual providers are not applied).
-pub fn catalog(cache: &Path, architecture: &str, max_packages: usize) -> Result<BTreeMap<String, PackageSummary>> {
-    if max_packages == 0 || max_packages > 1_000_000 { bail!("max_packages must be 1..=1000000"); }
-    let mut result = BTreeMap::<String, PackageSummary>::new();
+/// Architecture is part of a Debian binary package's identity. Keeping
+/// native and Architecture: all metadata separate prevents an arbitrary
+/// overwrite before the dependency solver chooses its safe native view.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PackageKey {
+    pub name: String,
+    pub architecture: String,
+}
+
+/// Exploratory repository index keyed by (name, architecture). This function
+/// scans only the requested native architecture and Architecture: all; it does
+/// not authorize foreign-architecture resolution or package transactions.
+pub fn catalog_by_arch(
+    cache: &Path, architecture: &str, max_packages: usize,
+) -> Result<BTreeMap<PackageKey, PackageSummary>> {
+    if max_packages == 0 || max_packages > 1_000_000 {
+        bail!("max_packages must be 1..=1000000");
+    }
+    let mut result = BTreeMap::<PackageKey, PackageSummary>::new();
     scan_cache(cache, architecture, |item| {
-        if let Some(old) = result.get(&item.name) {
+        let key = PackageKey { name: item.name.clone(), architecture: item.architecture.clone() };
+        if let Some(old) = result.get(&key) {
             if is_better(&item.version, &old.version)? {
-                result.insert(item.name.clone(), item);
+                result.insert(key, item);
+            } else if old.version == item.version && old != &item {
+                bail!("divergent repository metadata for {}:{} {}", key.name, key.architecture, item.version);
             }
         } else {
             if result.len() >= max_packages { bail!("package catalog exceeds max_packages"); }
             version::compare(&item.version, &item.version)?;
-            result.insert(item.name.clone(), item);
+            result.insert(key, item);
         }
         Ok(())
     })?;
     Ok(result)
+}
+
+/// Convert a keyed metadata index to the old native-only solver view.
+/// The solver does not yet distinguish same-name native and all candidates:
+/// reject that ambiguity rather than overwrite one with the other.
+fn native_catalog_projection(
+    keyed: BTreeMap<PackageKey, PackageSummary>,
+) -> Result<BTreeMap<String, PackageSummary>> {
+    let mut result = BTreeMap::new();
+    for (key, item) in keyed {
+        if result.insert(key.name.clone(), item).is_some() {
+            bail!("ambiguous native/all repository metadata for {}; architecture-aware solver required", key.name);
+        }
+    }
+    Ok(result)
+}
+
+/// Build an in-memory catalog of the latest published versions from verified-update
+/// cache. This is an exploratory catalog, not APT policy (pins, phased updates,
+/// multiarch and virtual providers are not applied).
+pub fn catalog(cache: &Path, architecture: &str, max_packages: usize) -> Result<BTreeMap<String, PackageSummary>> {
+    native_catalog_projection(catalog_by_arch(cache, architecture, max_packages)?)
 }
 
 /// Return exact-version metadata from the cache. The caller MUST first verify
@@ -406,6 +444,39 @@ mod tests {
         fs::write(two.join("index-0.raw"),
             "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: conflicting-api\n\n").unwrap();
         assert!(exact_version(&root, "amd64", "lib", "1").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn package_catalog_preserves_architecture_identity_and_rejects_native_all_collision() {
+        let root = std::env::temp_dir().join(format!("rpt-arch-catalog-{}", std::process::id()));
+        let dir = root.join("0123456789abcdef01234567");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("InRelease"), "fixture").unwrap();
+        fs::write(dir.join("index-0.raw"),
+            "Package: lib\nVersion: 2\nArchitecture: amd64\nMulti-Arch: same\n\n\
+Package: lib\nVersion: 1\nArchitecture: amd64\nMulti-Arch: same\n\n\
+Package: lib\nVersion: 3\nArchitecture: all\n\n\
+Package: foreign\nVersion: 10\nArchitecture: arm64\n\n").unwrap();
+        let keyed = catalog_by_arch(&root, "amd64", 20).unwrap();
+        assert_eq!(keyed.len(), 2);
+        assert_eq!(keyed[&PackageKey { name: "lib".into(), architecture: "amd64".into() }].version, "2");
+        assert_eq!(keyed[&PackageKey { name: "lib".into(), architecture: "all".into() }].version, "3");
+        assert!(catalog(&root, "amd64", 20).is_err());
+        let arm = catalog_by_arch(&root, "arm64", 20).unwrap();
+        assert!(arm.contains_key(&PackageKey { name: "foreign".into(), architecture: "arm64".into() }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_catalog_rejects_divergent_same_version_metadata() {
+        let root = std::env::temp_dir().join(format!("rpt-divergent-arch-catalog-{}", std::process::id()));
+        let dir = root.join("0123456789abcdef01234567");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("InRelease"), "fixture").unwrap();
+        fs::write(dir.join("index-0.raw"),
+            "Package: lib\nVersion: 2\nArchitecture: amd64\nDepends: a\n\n\
+Package: lib\nVersion: 2\nArchitecture: amd64\nDepends: b\n\n").unwrap();
+        assert!(catalog_by_arch(&root, "amd64", 20).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
