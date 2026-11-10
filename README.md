@@ -115,3 +115,20 @@ compares version sets of five packages with `apt-cache madison`. Compressed
 local indexes are copied/decompressed into a disposable directory for RPT.
 The script never changes system package transactions. RPT is still not
 compatible with `apt` commands/options and system APT must not be replaced.
+
+### Parallel signed repository update (alpha.12)
+
+`rpt update --root /etc/apt --output ./rpt-lists --workers 8` fetches signed
+InRelease files and repository indexes concurrently. The initial supported
+source subset is Deb822/legacy binary sources with an explicit absolute
+`Signed-By` keyring. All other forms **fail closed**. `gpgv` must exist.
+Downloaded index files are matched against SHA256 and byte sizes in a
+signature-verified InRelease; unsuccessful updates do not replace the
+previous isolated cache directory. This command does **not** update
+`/var/lib/apt/lists`, and the cache is not consumed by APT or yet by RPT's
+package selection engine. APT is not replaced or called to perform the update.
+
+The current implementation supports Packages.xz, Packages.gz, and uncompressed
+Packages on the wire, but stores them without decompression. Repository
+metadata date/Valid-Until policy, By-Hash acquisition, apt.conf source options,
+all APT transports and key management still require further compatibility work.
