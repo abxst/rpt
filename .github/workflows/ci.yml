@@ -165,6 +165,13 @@ jobs:
             exit 1
           fi
           echo 'PASS signed version origins and tamper rejection'
+      - name: Inspect signed phased rollout metadata without making policy decisions
+        run: |
+          set -euo pipefail
+          ./target/debug/rpt phased-inspect --cache "$RUNNER_TEMP/rpt-metadata" --package bash > "$RUNNER_TEMP/rpt-phased-bash"
+          test -s "$RUNNER_TEMP/rpt-phased-bash"
+          grep -Fq 'archive.ubuntu.com/ubuntu' "$RUNNER_TEMP/rpt-phased-bash"
+          echo 'PASS signed rollout metadata inspection'
       - name: Read-only APT pin priority diagnostic
         run: |
           set -euo pipefail
