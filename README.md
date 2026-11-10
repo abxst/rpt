@@ -289,7 +289,7 @@ detection for support. Query the intended family with:
     rpt driver-info --driver rpm
     rpt version-compare --driver deb '1.0~rc1' '1.0'
 
-Most package-related commands accept `--driver deb` (default) and refuse
+Most package-related commands accept `--driver auto|deb|rpm|apk|pacman` (default: `auto` from `/etc/os-release`) and refuse
 non-Debian drivers until implemented. Read
 [Package driver architecture](docs/package-drivers.md) for the backend API,
 supported operations and future native-package conformance gates. Full
