@@ -256,8 +256,13 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::VerifiedOrigins { cache, package, architecture } => {
             for entry in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {
-                println!("{} {} {} {} {}",
-                    entry.version, entry.architecture, entry.repository_uri, entry.suite, entry.index_path);
+                println!("{} {} {} {} {} {} {} {} {} {}",
+                    entry.version, entry.architecture, entry.repository_uri, entry.suite,
+                    entry.index_path, entry.component,
+                    entry.release.origin.as_deref().unwrap_or("-"),
+                    entry.release.label.as_deref().unwrap_or("-"),
+                    entry.release.archive.as_deref().unwrap_or("-"),
+                    entry.release.codename.as_deref().unwrap_or("-"));
             }
         }
         Command::PreferencesInspect { apt_root } => {
