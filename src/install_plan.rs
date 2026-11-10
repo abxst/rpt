@@ -253,7 +253,14 @@ impl Solver<'_> {
         }
         let mut candidates = Vec::new();
         for (key, item) in self.catalog {
-            if provides(item)?.iter().any(|cap| capability_satisfies(cap, required).unwrap_or(false)) {
+            let mut matches = false;
+            for cap in provides(item)? {
+                if capability_satisfies(&cap, required)? {
+                    matches = true;
+                    break;
+                }
+            }
+            if matches {
                 candidates.push(key.clone());
                 if candidates.len() > 1 { break; }
             }
@@ -656,6 +663,35 @@ mod tests {
         ]);
         assert!(metadata_query::native_catalog_projection(keyed).is_err());
     }
+    #[test]
+    fn keyed_solver_tracks_architecture_all_in_dependency_plan() {
+        let mut docs = item("docs", "1", "");
+        docs.architecture = "all".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "docs (>= 1)")),
+            ("docs".into(), docs),
+        ]);
+        let plan = solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+            &BTreeMap::new(), "app", 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|p| (p.package.as_str(), p.architecture.as_str()))
+            .collect::<Vec<_>>(), [("docs", "all"), ("app", "amd64")]);
+    }
+
+    #[test]
+    fn keyed_solver_rejects_ambiguous_native_and_all_dependency() {
+        let app = item("app", "1", "lib");
+        let lib = item("lib", "2", "");
+        let mut common = item("lib", "1", "");
+        common.architecture = "all".into();
+        let keyed = BTreeMap::from([
+            (PackageKey { name: "app".into(), architecture: "amd64".into() }, app),
+            (PackageKey { name: "lib".into(), architecture: "amd64".into() }, lib),
+            (PackageKey { name: "lib".into(), architecture: "all".into() }, common),
+        ]);
+        assert!(solve_catalog(&keyed, &BTreeMap::new(),
+            &BTreeMap::new(), "app", 20, "amd64").is_err());
+    }
+
     #[test]
     fn candidate_catalog_can_resolve_older_pinned_dependency_metadata() {
         let mut latest = BTreeMap::from([
