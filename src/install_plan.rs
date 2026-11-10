@@ -2,7 +2,7 @@
 //! This is not APT's full dependency resolver: only uniquely resolvable
 //! alternatives and virtual Provides, plus bounded alternative backtracking;
 //! no architecture qualifiers, pinning, package holds, triggers or removals.
-use crate::{cache_query, metadata_query::{self, PackageSummary}, version};
+use crate::{cache_query, metadata_query::{self, PackageKey, PackageSummary}, version};
 use anyhow::{bail, Context, Result};
 use std::{cell::Cell, cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path, rc::Rc};
 
@@ -211,11 +211,11 @@ fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
 
 #[derive(Clone)]
 struct Solver<'a> {
-    catalog: &'a BTreeMap<String, PackageSummary>,
+    catalog: &'a BTreeMap<PackageKey, PackageSummary>,
     installed: &'a BTreeMap<String, String>,
     installed_relations: &'a BTreeMap<String, InstalledRelations>,
-    visiting: BTreeSet<String>,
-    done: BTreeSet<String>,
+    visiting: BTreeSet<PackageKey>,
+    done: BTreeSet<PackageKey>,
     plan: Vec<PlanStep>,
     limit: usize,
     architecture: String,
@@ -226,33 +226,34 @@ impl Solver<'_> {
     /// Return the concrete package to install only when there is exactly one
     /// verified catalog candidate. No automatic preference between multiple
     /// virtual providers or mutually satisfiable alternatives.
-    fn concrete(&self, required: &Requirement) -> Result<Option<String>> {
-        if required.any_arch && !self.catalog.contains_key(&required.name) {
-            bail!("virtual Provides with :any require a full Multi-Arch resolver");
+    /// Resolve a concrete binary identity in the selected native scope.
+    /// Foreign-architecture and same-name native/all ambiguity fail closed.
+    fn key_for(&self, name: &str) -> Result<Option<PackageKey>> {
+        let native = PackageKey { name: name.into(), architecture: self.architecture.clone() };
+        let all = PackageKey { name: name.into(), architecture: "all".into() };
+        match (self.catalog.contains_key(&native), self.catalog.contains_key(&all)) {
+            (true, true) => bail!("ambiguous native/all binary identity for {name}"),
+            (true, false) => Ok(Some(native)),
+            (false, true) => Ok(Some(all)),
+            (false, false) => Ok(None),
         }
-        if let Some(real) = self.catalog.get(&required.name) {
-            // Debian policy permits :any only for a target explicitly marked
-            // Multi-Arch: allowed. The native architecture is the sole candidate
-            // in this experimental planner; foreign installations are disabled.
+    }
+
+    fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
+        if let Some(key) = self.key_for(&required.name)? {
+            let real = &self.catalog[&key];
             if required.any_arch && real.multi_arch != "allowed" {
                 return Ok(None);
             }
-            return Ok(if satisfies(&real.version, required)? {
-                Some(required.name.clone())
-            } else { None });
+            return Ok(if satisfies(&real.version, required)? { Some(key) } else { None });
+        }
+        if required.any_arch {
+            bail!("virtual Provides with :any require a full Multi-Arch resolver");
         }
         let mut candidates = Vec::new();
-        for (name, item) in self.catalog {
-            let caps = provides(item)?;
-            let mut is_provider = false;
-            for cap in &caps {
-                if capability_satisfies(cap, required)? {
-                    is_provider = true;
-                    break;
-                }
-            }
-            if is_provider {
-                candidates.push(name.clone());
+        for (key, item) in self.catalog {
+            if provides(item)?.iter().any(|cap| capability_satisfies(cap, required).unwrap_or(false)) {
+                candidates.push(key.clone());
                 if candidates.len() > 1 { break; }
             }
         }
@@ -265,8 +266,9 @@ impl Solver<'_> {
     fn resolve(&mut self, requested: &Requirement) -> Result<()> {
         let concrete = self.concrete(requested)?
             .with_context(|| format!("unresolved dependency {} (no matching real package or provider)", requested.name))?;
-        let selected = Requirement { name: concrete.clone(), constraint: None, any_arch: false };
-        self.resolve_concrete(&selected)
+        self.resolve_concrete(&concrete, &Requirement {
+            name: concrete.name.clone(), constraint: None, any_arch: false,
+        })
     }
 
     /// Explore a branch with a copy of the entire partial plan. Commit only
@@ -280,8 +282,8 @@ impl Solver<'_> {
         for alternative in group {
             if let Some(installed) = self.installed.get(&alternative.name) {
                 let allowed_installed = !alternative.any_arch
-                    || self.catalog.get(&alternative.name).is_some_and(|item|
-                        item.multi_arch == "allowed" && item.version == *installed);
+                    || self.key_for(&alternative.name)?.and_then(|key| self.catalog.get(&key))
+                        .is_some_and(|item| item.multi_arch == "allowed" && item.version == *installed);
                 if allowed_installed && satisfies(installed, alternative)? {
                     return self.resolve_groups(groups, index + 1);
                 }
@@ -302,9 +304,9 @@ impl Solver<'_> {
             if remaining == 0 { bail!("dependency branch budget exhausted"); }
             self.branch_budget.set(remaining - 1);
             let mut branch = self.clone();
-            let requirement = Requirement { name: option, constraint: None, any_arch: false };
+            let requirement = Requirement { name: option.name.clone(), constraint: None, any_arch: false };
             // Only branch-local resolution errors are candidates for retry.
-            if branch.resolve_concrete(&requirement).is_ok()
+            if branch.resolve_concrete(&option, &requirement).is_ok()
                 && branch.resolve_groups(groups, index + 1).is_ok() {
                 if winner.is_some() {
                     bail!("multiple viable dependency alternatives; full APT solver required");
@@ -368,20 +370,20 @@ impl Solver<'_> {
         Ok(())
     }
 
-    fn resolve_concrete(&mut self, requested: &Requirement) -> Result<()> {
-        if self.done.contains(&requested.name) {
-            let current = self.catalog.get(&requested.name)
+    fn resolve_concrete(&mut self, key: &PackageKey, requested: &Requirement) -> Result<()> {
+        if self.done.contains(key) {
+            let current = self.catalog.get(key)
                 .context("already resolved package missing from catalog")?;
             if !satisfies(&current.version, requested)? {
                 bail!("conflicting version requirements for {}", requested.name);
             }
             return Ok(());
         }
-        if self.visiting.contains(&requested.name) {
+        if self.visiting.contains(key) {
             // APT can resolve cycles, but this preview refuses them.
             bail!("dependency cycle involving {}", requested.name);
         }
-        let current = self.catalog.get(&requested.name)
+        let current = self.catalog.get(key)
             .with_context(|| format!("unresolved dependency {} (virtual packages unsupported)", requested.name))?;
         if !satisfies(&current.version, requested)? {
             bail!("repository version {} does not satisfy dependency {}", current.version, requested.name);
@@ -393,12 +395,12 @@ impl Solver<'_> {
         if self.plan.len() + self.visiting.len() >= self.limit {
             bail!("dependency plan exceeded maximum package count");
         }
-        self.visiting.insert(requested.name.clone());
+        self.visiting.insert(key.clone());
         let groups = parse_groups_for_arch(&current.pre_depends, &self.architecture)?.into_iter()
             .chain(parse_groups_for_arch(&current.depends, &self.architecture)?).collect::<Vec<_>>();
         self.resolve_groups(&groups, 0)?;
-        self.visiting.remove(&requested.name);
-        self.done.insert(requested.name.clone());
+        self.visiting.remove(key);
+        self.done.insert(key.clone());
         let installed = self.installed.get(&requested.name).cloned();
         if installed.as_deref() != Some(current.version.as_str()) {
             if let Some(existing) = &installed {
