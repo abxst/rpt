@@ -229,3 +229,24 @@ stanzas one at a time. Results are **not** APT Candidate selections and not
 fully equivalent to `apt show/search/list`; package origin, installed state,
 pinning, holds and multiarch policy are not shown. Repository cache is not
 reverified at query time and must be protected from local tampering.
+
+### Conservative dependency plan preview (alpha.18)
+
+`rpt plan-install --cache ./rpt-lists --package app` is **not** supported;
+the correct syntax is `rpt plan-install --cache ./rpt-lists app`. It
+constructs an in-memory metadata catalog from RPT's isolated update cache,
+reads dpkg installed state once, and creates a read-only tentative dependency
+order. No install, remove, upgrade, dpkg execution or disk mutation occurs.
+
+The preview only handles direct named Depends/Pre-Depends and simple Debian
+version constraints (<<, <=, =, >=, >>). It refuses unresolved alternatives,
+dependency cycles, virtual packages, architecture qualifiers, build profiles,
+Conflicts/Breaks, downgrades, and APT preference/target-release configurations.
+Recommends/Suggests are shown as metadata but are not solved. This is **not**
+a full APT-compatible solver, does not provide package acquisition URLs from
+signed provenance, and MUST NOT be used to execute actual package
+transactions. The `install`, `upgrade`, `remove` and `purge` commands
+continue to fail closed.
+
+Use `rpt plan-install --cache ./rpt-lists --status /var/lib/dpkg/status
+--apt-root /etc/apt --max-packages 200 PACKAGE` for a limited preview.
