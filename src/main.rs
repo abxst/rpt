@@ -69,6 +69,19 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Preview default-priority candidate from RPT cache (NOT apt-cache policy parity).
+    PolicyPreview {
+        #[arg(long, default_value = "./rpt-lists")]
+        cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")]
+        status: PathBuf,
+        #[arg(long, default_value = "/etc/apt")]
+        apt_root: PathBuf,
+        #[arg(long)]
+        package: String,
+        #[arg(long, default_value = "amd64")]
+        architecture: String,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -146,6 +159,16 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::InstalledVersion { status, package, architecture } => {
             if let Some(installed) = rpt::cache_query::installed_version(&status, &package, &architecture)
                 .context(ErrorCategory::System)? { println!("{}", installed.version); }
+        }
+        Command::PolicyPreview { cache, status, apt_root, package, architecture } => {
+            let summary = rpt::policy::preview(&cache, &status, &apt_root, &package, &architecture)
+                .context(ErrorCategory::System)?;
+            println!("{package}:");
+            println!("  Installed: {}", summary.installed.as_deref().unwrap_or("(none)"));
+            println!("  Candidate (default-priority preview): {}", summary.candidate.as_deref().unwrap_or("(none)"));
+            println!("  Available versions:");
+            for v in summary.versions { println!("    {v}"); }
+            eprintln!("rpt: note: policy-preview does not apply APT pinning, release origin or all configuration");
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
