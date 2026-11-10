@@ -116,6 +116,33 @@ struct InstalledRelations {
     conflicts: String,
     breaks: String,
     provides: String,
+    held: bool,
+    essential: bool,
+    protected: bool,
+}
+
+/// Reject malformed critical flags instead of treating them as false.
+fn parse_critical_flag(field: Option<&str>, key: &str) -> Result<bool> {
+    match field {
+        None | Some("no") => Ok(false),
+        Some("yes") => Ok(true),
+        Some(_) => bail!("invalid {key} flag in installed dpkg status"),
+    }
+}
+
+/// An experimental plan does not support force-hold/force-essential overrides.
+fn ensure_unchanged_protected(
+    name: &str, current: &str, proposed: &str, relation: &InstalledRelations,
+) -> Result<()> {
+    if relation.version != current {
+        bail!("inconsistent installed version metadata for {name}");
+    }
+    if current != proposed {
+        if relation.held { bail!("refusing to change held package {name}"); }
+        if relation.essential { bail!("refusing to change Essential package {name}"); }
+        if relation.protected { bail!("refusing to change Protected package {name}"); }
+    }
+    Ok(())
 }
 
 /// Read conflict metadata from the *installed* dpkg status, never infer it
@@ -126,7 +153,8 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
     let text = std::str::from_utf8(&data)?;
     let mut result = BTreeMap::new();
     for record in crate::package_index::parse(text)? {
-        if record.field("Status") != Some("install ok installed") { continue; }
+        let state = record.field("Status").context("dpkg stanza missing Status")?;
+        if !crate::cache_query::is_installed_status(state) { continue; }
         if !matches!(record.field("Architecture"), Some(a) if a == arch || a == "all") { continue; }
         let name = record.field("Package").context("installed status missing Package")?;
         let version = record.field("Version").context("installed status missing Version")?;
@@ -137,6 +165,9 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
             conflicts: record.field("Conflicts").unwrap_or("").into(),
             breaks: record.field("Breaks").unwrap_or("").into(),
             provides: record.field("Provides").unwrap_or("").into(),
+            held: state == "hold ok installed",
+            essential: parse_critical_flag(record.field("Essential"), "Essential")?,
+            protected: parse_critical_flag(record.field("Protected"), "Protected")?,
         };
         if result.insert(name.to_owned(), entry).is_some() {
             bail!("duplicate installed package in dpkg status: {name}");
@@ -355,6 +386,13 @@ impl Solver<'_> {
         self.done.insert(requested.name.clone());
         let installed = self.installed.get(&requested.name).cloned();
         if installed.as_deref() != Some(current.version.as_str()) {
+            if let Some(existing) = &installed {
+                if let Some(relation) = self.installed_relations.get(&requested.name) {
+                    ensure_unchanged_protected(
+                        &requested.name, existing, &current.version, relation,
+                    )?;
+                }
+            }
             // Default priorities do not permit a downgrade.
             if let Some(existing) = &installed {
                 if version::compare(existing, &current.version)? == Ordering::Greater {
@@ -377,6 +415,15 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
+    // Missing installed relationship metadata would silently bypass critical
+    // flags. Require the installed catalog and parsed dpkg records to agree.
+    for (name, version) in &installed {
+        let entry = installed_relations.get(name)
+            .with_context(|| format!("missing installed safety metadata for {name}"))?;
+        if entry.version != *version {
+            bail!("inconsistent installed version metadata for {name}");
+        }
+    }
     solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)
 }
 
@@ -417,6 +464,15 @@ pub fn preview_with_policy(
     )?;
     let installed = cache_query::installed_catalog(status, architecture)?;
     let installed_relations = read_installed_relations(status, architecture)?;
+    // Missing installed relationship metadata would silently bypass critical
+    // flags. Require the installed catalog and parsed dpkg records to agree.
+    for (name, version) in &installed {
+        let entry = installed_relations.get(name)
+            .with_context(|| format!("missing installed safety metadata for {name}"))?;
+        if entry.version != *version {
+            bail!("inconsistent installed version metadata for {name}");
+        }
+    }
     let mut catalog = metadata_query::catalog(cache, architecture, 1_000_000)?;
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
@@ -586,6 +642,78 @@ mod tests {
             assert!(parse_atom_for_arch(&format!("lib:{foreign}"), arch).is_err());
             assert!(parse_groups_for_arch("a:native | b:native, c (>= 2)", arch).is_ok());
         }
+    }
+    #[test]
+    fn installed_status_guards_held_essential_and_protected() {
+        for (status, flag, error_fragment) in [
+            ("hold ok installed", "", "held"),
+            ("install ok installed", "Essential: yes\n", "Essential"),
+            ("install ok installed", "Protected: yes\n", "Protected"),
+        ] {
+            let raw = format!(
+                "Package: protected-pkg\nVersion: 1\nArchitecture: amd64\nStatus: {status}\n{flag}\n"
+            );
+            let file = std::env::temp_dir().join(format!(
+                "rpt-installed-safety-{}-{}", std::process::id(), error_fragment,
+            ));
+            std::fs::write(&file, raw).unwrap();
+            let relations = read_installed_relations(&file, "amd64").unwrap();
+            std::fs::remove_file(file).unwrap();
+            let pkg = &relations["protected-pkg"];
+            assert!(ensure_unchanged_protected("protected-pkg", "1", "2", pkg)
+                .unwrap_err().to_string().contains(error_fragment));
+            assert!(ensure_unchanged_protected("protected-pkg", "1", "1", pkg).is_ok());
+            assert!(ensure_unchanged_protected("protected-pkg", "9", "9", pkg).is_err());
+        }
+        assert!(parse_critical_flag(Some("maybe"), "Essential").is_err());
+        assert!(!parse_critical_flag(None, "Protected").unwrap());
+    }
+
+    #[test]
+    fn backtracking_rejects_held_alternative_and_selects_viable_option() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "held-dep (>= 2) | other")),
+            ("held-dep".into(), item("held-dep", "2", "")),
+            ("other".into(), item("other", "1", "")),
+        ]);
+        let installed = BTreeMap::from([("held-dep".into(), "1".into())]);
+        let relations = BTreeMap::from([("held-dep".into(), InstalledRelations {
+            version: "1".into(), held: true, ..Default::default()
+        })]);
+        let plan = solve_catalog(&catalog, &installed, &relations, "app", 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["other", "app"]);
+    }
+
+    #[test]
+    fn critical_flag_blocks_upgrade_in_full_plan() {
+        let catalog = BTreeMap::from([("core".into(), item("core", "2", ""))]);
+        let installed = BTreeMap::from([("core".into(), "1".into())]);
+        for name in ["essential", "protected"] {
+            let mut state = InstalledRelations { version: "1".into(), ..Default::default() };
+            if name == "essential" { state.essential = true; }
+            else { state.protected = true; }
+            let relations = BTreeMap::from([("core".into(), state)]);
+            assert!(solve_catalog(&catalog, &installed, &relations, "core", 20, "amd64").is_err());
+        }
+    }
+    #[test]
+    fn held_package_cannot_be_upgraded_in_dependency_plan() {
+        let mut installed_relations = BTreeMap::new();
+        installed_relations.insert("lib".to_owned(), InstalledRelations {
+            version: "1".into(), held: true, ..Default::default()
+        });
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "lib (>= 2)")),
+            ("lib".into(), item("lib", "2", "")),
+        ]);
+        let installed = BTreeMap::from([("lib".into(), "1".into())]);
+        assert!(solve_catalog(
+            &catalog, &installed, &installed_relations, "app", 20, "amd64",
+        ).is_err());
+        installed_relations.get_mut("lib").unwrap().held = false;
+        assert!(solve_catalog(
+            &catalog, &installed, &installed_relations, "app", 20, "amd64",
+        ).is_ok());
     }
     #[test]
     fn dependency_order_and_installed_satisfaction() {

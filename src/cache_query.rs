@@ -60,6 +60,13 @@ fn scan<R: Read>(reader: R, mut found: impl FnMut(&str, &str, &str, &str)) -> Re
     Ok(())
 }
 
+/// dpkg status embeds the desired selection in its first word. A held
+/// package remains fully installed and must not disappear from the installed
+/// catalog simply because its selection differs from "install".
+pub fn is_installed_status(status: &str) -> bool {
+    matches!(status, "install ok installed" | "hold ok installed")
+}
+
 /// Versions available in a previously downloaded RPT cache, newest-first.
 /// Does not access /var/lib/apt/lists or infer repository pinning.
 pub fn cache_versions(cache: &Path, package: &str, architecture: &str) -> Result<Vec<String>> {
@@ -102,7 +109,7 @@ pub fn installed_version(status_file: &Path, package: &str, architecture: &str) 
         .with_context(|| format!("opening {}", status_file.display()))?;
     scan(input, |name, version, arch, status| {
         if name == package && (arch == architecture || arch == "all")
-            && status == "install ok installed" && !version.is_empty() {
+            && is_installed_status(status) && !version.is_empty() {
             found = Some(Installed {
                 version: version.to_owned(),
                 architecture: arch.to_owned(),
@@ -120,7 +127,7 @@ pub fn installed_catalog(status_file: &Path, architecture: &str) -> Result<BTree
     let mut result = BTreeMap::new();
     scan(input, |name, version, arch, status| {
         if (arch == architecture || arch == "all") &&
-            status == "install ok installed" && !version.is_empty() {
+            is_installed_status(status) && !version.is_empty() {
             result.insert(name.to_owned(), version.to_owned());
         }
     })?;
@@ -140,6 +147,19 @@ mod tests {
         assert_eq!(matches[1].3, "deinstall ok config-files");
     }
 
+    #[test]
+    fn held_dpkg_selection_is_still_installed() {
+        assert!(is_installed_status("install ok installed"));
+        assert!(is_installed_status("hold ok installed"));
+        assert!(!is_installed_status("deinstall ok config-files"));
+        assert!(!is_installed_status("hold reinstreq half-installed"));
+        let dir = std::env::temp_dir().join(format!("rpt-held-status-{}", std::process::id()));
+        fs::write(&dir, "Package: core\nVersion: 1\nArchitecture: amd64\nStatus: hold ok installed\n\n").unwrap();
+        let got = installed_catalog(&dir, "amd64").unwrap();
+        assert_eq!(got.get("core").map(String::as_str), Some("1"));
+        assert_eq!(installed_version(&dir, "core", "amd64").unwrap().unwrap().status, "hold ok installed");
+        fs::remove_file(dir).unwrap();
+    }
     #[test]
     fn scans_xz_indexes() {
         use std::io::Read;
