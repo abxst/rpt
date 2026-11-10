@@ -167,8 +167,9 @@ impl Downloader {
             let url = package.url.clone();
             let path = temp.to_path_buf();
             let bar = bar.clone();
+            let package_size = package.size;
             let counters = self.counters.clone();
-            tasks.spawn(async move { fetch_range(client, url, path, start, end, bar, counters).await });
+            tasks.spawn(async move { fetch_range(client, url, path, (start, end, package_size), bar, counters).await });
         }
         while let Some(joined) = tasks.join_next().await {
             if let Err(e) = joined.context("segment task panicked")? {
@@ -180,11 +181,26 @@ impl Downloader {
     }
 
     async fn accepts_ranges(&self, url: &str, expected_size: u64) -> bool {
+        // Probe using a real range request: some mirrors support 206 even when
+        // HEAD does not expose trustworthy Content-Length / Accept-Ranges.
         self.counters.requests.fetch_add(1, Ordering::Relaxed);
-        let Ok(resp) = self.client.head(url).send().await else { return false };
-        if !resp.status().is_success() { return false; }
-        resp.headers().get(header::ACCEPT_RANGES).and_then(|x| x.to_str().ok()) == Some("bytes")
-            && resp.content_length() == Some(expected_size)
+        let Ok(response) = self.client.get(url)
+            .header(header::RANGE, "bytes=0-0")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .send().await else { return false };
+        if response.status() != StatusCode::PARTIAL_CONTENT { return false; }
+        if response.headers().get(header::CONTENT_ENCODING).is_some() { return false; }
+        let matches = response.headers().get(header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| valid_content_range(value, 0, 0, expected_size));
+        if !matches { return false; }
+        match response.bytes().await {
+            Ok(bytes) if bytes.len() == 1 => {
+                self.counters.bytes.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            _ => false
+        }
     }
 
     async fn download_single(&self, package: &Package, temp: &Path, bar: &ProgressBar) -> Result<()> {
@@ -210,7 +226,13 @@ impl Downloader {
     }
 }
 
-async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end: u64, bar: ProgressBar, counters: Arc<Counters>) -> Result<()> {
+/// Confirm exact byte offsets and representation size; never trust a prefix match.
+fn valid_content_range(value: &str, start: u64, end: u64, total: u64) -> bool {
+    value.trim() == format!("bytes {start}-{end}/{total}")
+}
+
+async fn fetch_range(client: Client, url: String, path: PathBuf, range: (u64, u64, u64), bar: ProgressBar, counters: Arc<Counters>) -> Result<()> {
+    let (start, end, total_size) = range;
     counters.requests.fetch_add(1, Ordering::Relaxed);
     counters.range_parts.fetch_add(1, Ordering::Relaxed);
     let response = client.get(&url)
@@ -220,12 +242,14 @@ async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end
     if response.status() != StatusCode::PARTIAL_CONTENT {
         bail!("server did not honor byte range {start}-{end}");
     }
-    let expected_prefix = format!("bytes {start}-{end}/");
+    if response.headers().get(header::CONTENT_ENCODING).is_some() {
+        bail!("range response uses content encoding");
+    }
     let content_range = response.headers()
         .get(header::CONTENT_RANGE)
         .context("missing Content-Range")?
         .to_str()?;
-    if !content_range.starts_with(&expected_prefix) {
+    if !valid_content_range(content_range, start, end, total_size) {
         bail!("incorrect Content-Range: {content_range}");
     }
     let mut file = OpenOptions::new().write(true).open(&path).await?;
@@ -313,6 +337,15 @@ mod tests {
         let _ = missing;
         assert!(!is_transient(&anyhow::anyhow!("SHA-256 mismatch")));
         assert!(!is_transient(&anyhow::anyhow!("unexpected Content-Length")));
+    }
+
+    #[test]
+    fn validates_exact_content_ranges() {
+        assert!(valid_content_range("bytes 0-0/3680654", 0, 0, 3680654));
+        assert!(valid_content_range("bytes 1024-2047/3680654", 1024, 2047, 3680654));
+        assert!(!valid_content_range("bytes 0-0/999", 0, 0, 3680654));
+        assert!(!valid_content_range("bytes 0-1023/3680654", 0, 0, 3680654));
+        assert!(!valid_content_range("bytes */3680654", 0, 0, 3680654));
     }
 
 }
