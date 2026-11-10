@@ -362,6 +362,49 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     Ok(solver.plan)
 }
 
+/// Read-only policy gate for dependency plans. The current solver still
+/// resolves using latest-version metadata; if APT policy chooses anything
+/// else, refuse the plan rather than pairing a policy version with the wrong
+/// Depends/Provides/Conflicts metadata. No dpkg transaction is authorized.
+pub fn preview_with_policy(
+    cache: &Path, status: &Path, apt_root: &Path, package: &str,
+    architecture: &str, max_packages: usize,
+) -> Result<Vec<PlanStep>> {
+    let target_release = crate::policy::read_default_release(apt_root)?;
+    let preferences = crate::apt_preferences::load(apt_root)?;
+    // Validate pin syntax even when the plan contains zero changes.
+    crate::apt_pin_eval::evaluate_with_phasing(
+        package, &[], &preferences, target_release.as_deref(), None,
+    )?;
+    let steps = preview(cache, status, package, architecture, max_packages)?;
+    check_plan_candidates(&steps, |name, installed| {
+        let origins = crate::package_provenance::verified_version_origins(cache, name, architecture)?;
+        let result = crate::apt_pin_eval::preview_candidate_with_phasing(
+            name, &origins, &preferences, installed,
+            target_release.as_deref(), None,
+        )?;
+        Ok(result.candidate)
+    })?;
+    Ok(steps)
+}
+
+/// Separate the candidate comparison so mismatch and candidate absence are
+/// exercised independently of GPG test fixtures.
+fn check_plan_candidates(
+    steps: &[PlanStep],
+    mut candidate_for: impl FnMut(&str, Option<&str>) -> Result<Option<String>>,
+) -> Result<()> {
+    for step in steps {
+        let candidate = candidate_for(&step.package, step.installed.as_deref())?
+            .with_context(|| format!("APT policy has no candidate for {}", step.package))?;
+        if candidate != step.version {
+            bail!("dependency plan selected {} {} but APT policy candidate is {}; refusing latest-version metadata mismatch",
+                step.package, step.version, candidate);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +424,26 @@ mod tests {
         };
         s.resolve(&parse_atom(name)?)?;
         Ok(s.plan)
+    }
+    #[test]
+    fn plan_candidate_gate_rejects_pinned_or_held_back_versions() {
+        let steps = vec![PlanStep { package: "lib".into(), version: "2.0".into(), installed: None }];
+        assert!(check_plan_candidates(&steps, |_, _| Ok(Some("1.0".into()))).is_err());
+        assert!(check_plan_candidates(&steps, |_, _| Ok(None)).is_err());
+        assert!(check_plan_candidates(&steps, |_, _| Ok(Some("2.0".into()))).is_ok());
+    }
+    #[test]
+    fn gate_validates_each_dependency_not_only_requested_package() {
+        let steps = vec![
+            PlanStep { package: "lib".into(), version: "2".into(), installed: Some("1".into()) },
+            PlanStep { package: "app".into(), version: "1".into(), installed: None },
+        ];
+        let mut seen = Vec::new();
+        assert!(check_plan_candidates(&steps, |name, installed| {
+            seen.push((name.to_owned(), installed.map(str::to_owned)));
+            Ok(Some(if name == "lib" { "2" } else { "0" }.into()))
+        }).is_err());
+        assert_eq!(seen, vec![("lib".into(), Some("1".into())), ("app".into(), None)]);
     }
     #[test]
     fn dependency_order_and_installed_satisfaction() {
