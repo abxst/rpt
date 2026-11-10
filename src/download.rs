@@ -1,5 +1,5 @@
 //! Concurrent, checksummed download engine with optional HTTP byte-range splitting.
-use crate::{error::{classify, describe, ErrorCategory}, validate_package, Package};
+use crate::{error::{classify, code, describe, emit, ErrorCategory, LogFormat}, validate_package, Package};
 use anyhow::{bail, Context, Result};
 use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -38,6 +38,7 @@ pub struct Downloader {
     pub package_workers: usize,
     pub segments: usize,
     counters: Arc<Counters>,
+    log_format: LogFormat,
 }
 
 impl Downloader {
@@ -49,7 +50,12 @@ impl Downloader {
             .timeout(std::time::Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()?;
-        Ok(Self { client, package_workers, segments, counters: Arc::new(Counters::default()) })
+        Ok(Self { client, package_workers, segments, counters: Arc::new(Counters::default()), log_format: LogFormat::Text })
+    }
+
+    pub fn with_log_format(mut self, format: LogFormat) -> Self {
+        self.log_format = format;
+        self
     }
 
     pub async fn download_all(&self, packages: Vec<Package>, dest: &Path) -> Result<()> {
@@ -59,6 +65,7 @@ impl Downloader {
             package_workers: self.package_workers,
             segments: self.segments,
             counters: Arc::new(Counters::default()),
+            log_format: self.log_format,
         };
         let count = packages.len();
         let multi = MultiProgress::new();
@@ -103,7 +110,8 @@ impl Downloader {
             if let Err(error) = result {
                 let category = classify(&error, ErrorCategory::Download);
                 has_system_error |= category == ErrorCategory::System;
-                eprintln!("rpt: error [{category}] package {name}: {}", describe(&error));
+                emit(runner.log_format, "error", category,
+                    code(&error, ErrorCategory::Download), Some(&name), &describe(&error));
             }
         }
         if failed > 0 {
@@ -148,7 +156,10 @@ impl Downloader {
                         return Err(error);
                     }
                     self.counters.retries.fetch_add(1, Ordering::Relaxed);
-                    eprintln!("rpt: retry [download] {attempt}/3 package {}: {}", package.name, describe(&error));
+                    let message = format!("attempt {attempt}/3: {}", describe(&error));
+                    let category = classify(&error, ErrorCategory::Download);
+                    emit(self.log_format, "retry", category,
+                        code(&error, ErrorCategory::Download), Some(&package.name), &message);
                     tokio::time::sleep(std::time::Duration::from_millis(
                         250u64 * (1u64 << (attempt - 1)),
                     )).await;
