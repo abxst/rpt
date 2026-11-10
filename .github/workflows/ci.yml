@@ -42,3 +42,9 @@ jobs:
           cargo build --locked
       - name: Compare against apt-cache madison
         run: bash tests/ci_apt_metadata.sh
+      - name: RPT parallel signed update smoke test
+        run: |
+          target="$RUNNER_TEMP/rpt-metadata"
+          timeout 240 ./target/debug/rpt update --root /etc/apt --output "$target" --workers 8
+          test "$(find "$target" -name InRelease -type f | wc -l)" -gt 0
+          test "$(find "$target" -name 'index-*' -type f | wc -l)" -gt 0
