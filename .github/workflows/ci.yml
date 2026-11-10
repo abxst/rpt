@@ -60,6 +60,18 @@ jobs:
           test "$(find "$target" -name InRelease -type f | wc -l)" -eq 2
           test "$(find "$target" -name 'index-*' -type f | wc -l)" -eq 2
           cat "$RUNNER_TEMP/rpt-update.log"
+      - name: Query downloaded xz Packages cache and dpkg installed status
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/rpt-metadata"
+          ./target/debug/rpt cache-versions --cache "$target" --package bash --architecture amd64 > "$RUNNER_TEMP/rpt-bash-versions"
+          test -s "$RUNNER_TEMP/rpt-bash-versions"
+          apt-cache madison bash | awk -F'|' 'NF>=2 {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' | sort -u > "$RUNNER_TEMP/apt-bash-versions"
+          sort -u "$RUNNER_TEMP/rpt-bash-versions" > "$RUNNER_TEMP/rpt-bash-sorted"
+          diff -u "$RUNNER_TEMP/apt-bash-versions" "$RUNNER_TEMP/rpt-bash-sorted"
+          dpkg-query -W -f='${Version}\\n' bash > "$RUNNER_TEMP/dpkg-bash-version"
+          ./target/debug/rpt installed-version --package bash > "$RUNNER_TEMP/rpt-installed-bash"
+          diff -u "$RUNNER_TEMP/dpkg-bash-version" "$RUNNER_TEMP/rpt-installed-bash"
       - name: Reject unsupported APT update flags
         run: |
           if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
