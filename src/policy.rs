@@ -34,14 +34,14 @@ pub fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
     }
     let conf = apt_root.join("apt.conf");
     if conf.is_file() && declares_unsupported_policy_config(&conf)? {
-        bail!("APT target release configured in {}; candidate preview is unsupported", conf.display());
+        bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", conf.display());
     }
     let conf_dir = apt_root.join("apt.conf.d");
     if conf_dir.exists() {
         for ent in fs::read_dir(&conf_dir).with_context(|| format!("reading {}", conf_dir.display()))? {
             let path = ent?.path();
             if path.is_file() && declares_unsupported_policy_config(&path)? {
-                bail!("APT target release configured in {}; candidate preview is unsupported", path.display());
+                bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", path.display());
             }
         }
     }
@@ -173,7 +173,7 @@ mod tests {
             assert!(ensure_no_custom_policy(&root).is_err(), "must reject: {config}");
         }
         // Comments alone must not block an otherwise default-policy preview.
-        fs::write(root.join("apt.conf.d/99custom"), "/* APT::Default-Release \"noble\"; */\\n// #include \"/tmp/custom\"\\n").unwrap();
+        fs::write(root.join("apt.conf.d/99custom"), "/* APT::Default-Release \"noble\"; */\n// #include \"/tmp/custom\"\n").unwrap();
         assert!(ensure_no_custom_policy(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
