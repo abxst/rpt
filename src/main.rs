@@ -102,6 +102,15 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Reproduce the APT machine-specific 0..99 rollout draw (read-only).
+    PhasedDraw {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        machine_id: String,
+    },
     /// Inspect authenticated rollout percentages; no machine eligibility decision.
     PhasedInspect {
         #[arg(long, default_value = "./rpt-lists")]
@@ -306,6 +315,9 @@ async fn execute(cli: Cli) -> Result<()> {
                     entry.release.archive.as_deref().unwrap_or("-"),
                     entry.release.codename.as_deref().unwrap_or("-"));
             }
+        }
+        Command::PhasedDraw { source, version, machine_id } => {
+            println!("{}", rpt::apt_phasing::rollout_draw(&source, &version, &machine_id)?);
         }
         Command::PhasedInspect { cache, package, architecture, machine_id } => {
             for item in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {
