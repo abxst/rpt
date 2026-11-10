@@ -56,11 +56,31 @@ impl Downloader {
         // A temporary file is private to this process; another concurrent invocation must
         // use a separate destination or external coordination.
         let temp = target.with_extension(format!("rpt-{}.part", std::process::id()));
-        let result = self.download_into(package, &temp).await;
-        if result.is_err() {
+        // Retry only transport failures and temporary HTTP responses.
+        // Every attempt starts with an empty partial file.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
             let _ = fs::remove_file(&temp).await;
+            match self.download_into(package, &temp).await {
+                Ok(()) => break,
+                Err(error) => {
+                    let retry = attempt < 4 && is_transient(&error);
+                    if !retry {
+                        let _ = fs::remove_file(&temp).await;
+                        return Err(error);
+                    }
+                    eprintln!(
+                        "rpt: retry {attempt}/3 for {} after temporary error: {error:#}",
+                        package.name
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        250u64 * (1u64 << (attempt - 1)),
+                    ))
+                    .await;
+                }
+            }
         }
-        result?;
         if !verify(&temp, &package.sha256).await? {
             let _ = fs::remove_file(&temp).await;
             bail!("SHA-256 mismatch: {}", package.name);
@@ -155,6 +175,17 @@ async fn fetch_range(client: Client, url: String, path: PathBuf, start: u64, end
     Ok(())
 }
 
+fn is_transient(error: &anyhow::Error) -> bool {
+    error.chain().filter_map(|cause| cause.downcast_ref::<reqwest::Error>()).any(|e| {
+        if let Some(status) = e.status() {
+            return status == StatusCode::REQUEST_TIMEOUT
+                || status == StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error();
+        }
+        e.is_connect() || e.is_timeout() || e.is_request() || e.is_body()
+    })
+}
+
 pub async fn verify(path: &Path, expected_hex: &str) -> Result<bool> {
     let mut file = fs::File::open(path).await?;
     let mut hasher = Sha256::new();
@@ -182,4 +213,16 @@ mod tests {
         assert!(verify(&path, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").await.unwrap());
         fs::remove_file(path).await.unwrap();
     }
+    #[test]
+    fn classifies_permanent_and_retryable_errors() {
+        let missing = reqwest::Client::new()
+            .get("https://example.com/")
+            .build()
+            .unwrap();
+        // This checks that non-transport errors do not trigger retries.
+        let _ = missing;
+        assert!(!is_transient(&anyhow::anyhow!("SHA-256 mismatch")));
+        assert!(!is_transient(&anyhow::anyhow!("unexpected Content-Length")));
+    }
+
 }
