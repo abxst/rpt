@@ -39,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=v0.1.0-alpha.18
+          TAG=v0.1.0-alpha.19
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release already exists, skipping."
             exit 0
@@ -55,4 +55,4 @@ jobs:
           git push origin "$TAG"
           gh release create "$TAG" dist/rpt-linux-amd64.tar.gz dist/SHA256SUMS \
             --title "RPT $TAG — experimental transport MVP" --prerelease \
-            --notes "Experimental concurrent downloader only. Does not install packages or replace APT."
+            --notes "Experimental signed metadata to package manifest and verified download pipeline. Does not install packages or replace APT."
