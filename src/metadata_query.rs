@@ -14,6 +14,12 @@ pub struct PackageSummary {
     pub description: String,
     pub section: String,
     pub depends: String,
+    pub pre_depends: String,
+    pub recommends: String,
+    pub suggests: String,
+    pub provides: String,
+    pub conflicts: String,
+    pub breaks: String,
 }
 
 #[derive(Default)]
@@ -24,6 +30,12 @@ struct Stanza {
     description: String,
     section: String,
     depends: String,
+    pre_depends: String,
+    recommends: String,
+    suggests: String,
+    provides: String,
+    conflicts: String,
+    breaks: String,
     last_key: String,
 }
 
@@ -36,6 +48,12 @@ impl Stanza {
             "Description" => self.description = value.to_owned(),
             "Section" => self.section = value.to_owned(),
             "Depends" => self.depends = value.to_owned(),
+            "Pre-Depends" => self.pre_depends = value.to_owned(),
+            "Recommends" => self.recommends = value.to_owned(),
+            "Suggests" => self.suggests = value.to_owned(),
+            "Provides" => self.provides = value.to_owned(),
+            "Conflicts" => self.conflicts = value.to_owned(),
+            "Breaks" => self.breaks = value.to_owned(),
             _ => {}
         }
         self.last_key = key.to_owned();
@@ -44,6 +62,12 @@ impl Stanza {
         match self.last_key.as_str() {
             "Description" => { self.description.push('\n'); self.description.push_str(value); }
             "Depends" => { self.depends.push(' '); self.depends.push_str(value.trim()); }
+            "Pre-Depends" => { self.pre_depends.push(' '); self.pre_depends.push_str(value.trim()); }
+            "Recommends" => { self.recommends.push(' '); self.recommends.push_str(value.trim()); }
+            "Suggests" => { self.suggests.push(' '); self.suggests.push_str(value.trim()); }
+            "Provides" => { self.provides.push(' '); self.provides.push_str(value.trim()); }
+            "Conflicts" => { self.conflicts.push(' '); self.conflicts.push_str(value.trim()); }
+            "Breaks" => { self.breaks.push(' '); self.breaks.push_str(value.trim()); }
             _ => {}
         }
     }
@@ -52,6 +76,9 @@ impl Stanza {
         Some(PackageSummary {
             name: self.name, version: self.version, architecture: self.arch,
             description: self.description, section: self.section, depends: self.depends,
+            pre_depends: self.pre_depends, recommends: self.recommends,
+            suggests: self.suggests, provides: self.provides,
+            conflicts: self.conflicts, breaks: self.breaks,
         })
     }
 }
@@ -177,6 +204,37 @@ pub fn list(cache: &Path, architecture: &str, prefix: &str, limit: usize) -> Res
         if !entry.name.starts_with(prefix) { return Ok(()); }
         if let Some(old) = selected.get(&entry.name) {
             if is_better(&entry.version, &old.version)? { selected.insert(entry.name.clone(), entry); }
+        } else if selected.len() < limit {
+            selected.insert(entry.name.clone(), entry);
+        }
+        Ok(())
+    })?;
+    Ok(selected.into_values().collect())
+}
+
+
+/// Enumerate all packages whose package-name token appears among their
+/// dependency alternatives. This is a read-only metadata search, not
+/// a transitive solver and does not resolve virtual Provides.
+pub fn rdepends(
+    cache: &Path, architecture: &str, package: &str, limit: usize,
+) -> Result<Vec<PackageSummary>> {
+    if package.trim().is_empty() || !(1..=1000).contains(&limit) {
+        bail!("package required and limit must be 1..=1000");
+    }
+    let mut selected = BTreeMap::<String, PackageSummary>::new();
+    scan_cache(cache, architecture, |entry| {
+        let matches = [&entry.depends, &entry.pre_depends].iter().any(|field| {
+            field.split(&[',', '|'][..]).any(|clause| {
+                let atom = clause.trim().split_whitespace().next().unwrap_or("");
+                atom.split(':').next().unwrap_or("") == package
+            })
+        });
+        if !matches { return Ok(()); }
+        if let Some(old) = selected.get(&entry.name) {
+            if is_better(&entry.version, &old.version)? {
+                selected.insert(entry.name.clone(), entry);
+            }
         } else if selected.len() < limit {
             selected.insert(entry.name.clone(), entry);
         }
