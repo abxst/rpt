@@ -184,6 +184,82 @@ pub fn catalog(cache: &Path, architecture: &str, max_packages: usize) -> Result<
     Ok(result)
 }
 
+/// Return exact-version metadata from the cache. The caller MUST first verify
+/// signed origin/index provenance for this package/version. Reject divergent
+/// dependency-bearing metadata across repositories instead of choosing one.
+pub fn exact_version(
+    cache: &Path, architecture: &str, package: &str, wanted: &str,
+) -> Result<PackageSummary> {
+    let mut selected: Option<PackageSummary> = None;
+    scan_cache(cache, architecture, |item| {
+        if item.name != package || item.version != wanted { return Ok(()); }
+        if let Some(previous) = &selected {
+            if previous != &item {
+                bail!("divergent metadata for {package} {wanted} across cached indexes");
+            }
+        } else {
+            selected = Some(item);
+        }
+        Ok(())
+    })?;
+    selected.with_context(|| format!("no exact metadata for candidate {package} {wanted}"))
+}
+
+/// Scan only local index paths linked to previously verified signed origins.
+/// The caller obtains origins from verified_version_origins; metadata from
+/// unlisted index files in cache must never enter the dependency solver.
+pub fn verified_exact_version(
+    cache: &Path, architecture: &str, package: &str, wanted: &str,
+    origins: &[crate::package_provenance::VerifiedVersionOrigin],
+) -> Result<PackageSummary> {
+    use crate::package_provenance::RepositoryProvenance;
+    let relevant = origins.iter().filter(|o| o.version == wanted)
+        .collect::<Vec<_>>();
+    if relevant.is_empty() {
+        bail!("candidate {package} {wanted} has no verified repository occurrence");
+    }
+    let mut selected: Option<PackageSummary> = None;
+    for origin in relevant {
+        let mut matches = 0usize;
+        for entry in fs::read_dir(cache)? {
+            let path = entry?.path();
+            let dir_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+            if dir_name.len() != 24 || !dir_name.bytes().all(|c| c.is_ascii_hexdigit())
+                || !path.is_dir() { continue; }
+            let meta_path = path.join("provenance.json");
+            if !meta_path.is_file() { continue; }
+            let meta: RepositoryProvenance = serde_json::from_slice(&fs::read(meta_path)?)?;
+            if meta.uri != origin.repository_uri || meta.suite != origin.suite {
+                continue;
+            }
+            for index in &meta.indexes {
+                if index.release_path != origin.index_path { continue; }
+                matches += 1;
+                // Provenance validation checked this local path and its hash
+                // and GPG signature before supplying the origin.
+                stream_stanzas(open_index(&path.join(&index.local_file))?, |item| {
+                    if item.name != package || item.version != wanted
+                        || !(item.architecture == architecture || item.architecture == "all") {
+                        return Ok(());
+                    }
+                    if let Some(previous) = &selected {
+                        if previous != &item {
+                            bail!("divergent metadata for {package} {wanted} across verified indexes");
+                        }
+                    } else {
+                        selected = Some(item);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        if matches != 1 {
+            bail!("verified index origin for {package} {wanted} maps to {matches} cache paths");
+        }
+    }
+    selected.with_context(|| format!("signed index lacks exact metadata for candidate {package} {wanted}"))
+}
+
 /// Returns the highest published version in the isolated cache, not the APT Candidate.
 pub fn show(cache: &Path, architecture: &str, package: &str) -> Result<Option<PackageSummary>> {
     let mut found: Option<PackageSummary> = None;
@@ -267,6 +343,60 @@ pub fn rdepends(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn verified_exact_version_ignores_unlisted_cached_index() {
+        use crate::package_provenance::{
+            IndexProvenance, ReleaseIdentity, RepositoryProvenance, VerifiedVersionOrigin,
+        };
+        let root = std::env::temp_dir().join(format!("rpt-verified-meta-{}", std::process::id()));
+        let dir = root.join("cccccccccccccccccccccccc");
+        fs::create_dir_all(&dir).unwrap();
+        let trusted = "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: safe-api\n\n";
+        fs::write(dir.join("index-0.raw"), trusted).unwrap();
+        fs::write(dir.join("index-rogue.raw"),
+            "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: malicious-api\n\n").unwrap();
+        let meta = RepositoryProvenance {
+            uri: "https://example.org".into(), suite: "stable".into(),
+            keyring: "/ignored/test-only".into(),
+            indexes: vec![IndexProvenance {
+                release_path: "main/binary-amd64/Packages".into(),
+                local_file: "index-0.raw".into(),
+                sha256: "a".repeat(64), size: trusted.len() as u64,
+            }],
+        };
+        fs::write(dir.join("provenance.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let origin = VerifiedVersionOrigin {
+            version: "1".into(), architecture: "amd64".into(),
+            repository_uri: meta.uri, suite: meta.suite,
+            index_path: "main/binary-amd64/Packages".into(),
+            component: "main".into(), phased_update_percentage: None,
+            source_package: "lib".into(), source_version: "1".into(),
+            release: ReleaseIdentity::default(),
+        };
+        assert_eq!(verified_exact_version(&root, "amd64", "lib", "1", &[origin])
+            .unwrap().depends, "safe-api");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn exact_version_returns_candidate_stanza_and_rejects_divergent_duplicates() {
+        let root = std::env::temp_dir().join(format!("rpt-exact-candidate-{}", std::process::id()));
+        let one = root.join("aaaaaaaaaaaaaaaaaaaaaaaa");
+        let two = root.join("bbbbbbbbbbbbbbbbbbbbbbbb");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        fs::write(one.join("InRelease"), "fixture").unwrap();
+        fs::write(two.join("InRelease"), "fixture").unwrap();
+        fs::write(one.join("index-0.raw"),
+            "Package: lib\nVersion: 2\nArchitecture: amd64\nDepends: missing\n\nPackage: lib\nVersion: 1\nArchitecture: amd64\nDepends: old-api\n\n").unwrap();
+        let old = exact_version(&root, "amd64", "lib", "1").unwrap();
+        assert_eq!(old.depends, "old-api");
+        assert_eq!(old.version, "1");
+        assert!(exact_version(&root, "amd64", "lib", "3").is_err());
+        fs::write(two.join("index-0.raw"),
+            "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: conflicting-api\n\n").unwrap();
+        assert!(exact_version(&root, "amd64", "lib", "1").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn multiline_and_latest_version() {
         let raw = b"Package: demo\nVersion: 1.0\nArchitecture: amd64\nDescription: old\n\nPackage: demo\nVersion: 2.0\nArchitecture: amd64\nDescription: New text\n next line\nDepends: libc6 (>= 2.39)\n\nPackage: other\nVersion: 9.0\nArchitecture: arm64\n\n";
