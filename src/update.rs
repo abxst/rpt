@@ -241,7 +241,15 @@ fn release_payload(signed: &str) -> Result<&str> {
 }
 
 fn parse_release_time(value: &str) -> Result<DateTime<Utc>> {
-    let normalized = value.trim().replace(" UTC", " +0000").replace(" GMT", " +0000");
+    // Debian Release dates can pad a one-digit hour with an extra space:
+    // "Tue, 10 Nov 2026  3:55:52 UTC". Normalize for strict RFC2822 parsing.
+    let mut tokens = value.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() != 6 { bail!("invalid Release timestamp: {value}"); }
+    let time = tokens[4];
+    let (hour, rest) = time.split_once(':').context("invalid Release clock")?;
+    let padded_time = if hour.len() == 1 { format!("0{hour}:{rest}") } else { time.to_owned() };
+    tokens[4] = &padded_time;
+    let normalized = tokens.join(" ").replace(" UTC", " +0000").replace(" GMT", " +0000");
     Ok(DateTime::parse_from_rfc2822(&normalized)
         .with_context(|| format!("invalid Release timestamp: {value}"))?
         .with_timezone(&Utc))
@@ -567,6 +575,12 @@ mod tests {
         let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into() };
         assert_eq!(indexes(&repo, &hashes, false).unwrap().len(), 1);
     }
+    #[test]
+    fn accepts_debian_single_digit_utc_hour() {
+        let parsed = parse_release_time("Tue, 10 Nov 2026  3:55:52 UTC").unwrap();
+        assert_eq!(parsed.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-11-10 03:55:52");
+    }
+
     #[test]
     fn rejects_expired_or_future_release() {
         let now = Utc::now();
