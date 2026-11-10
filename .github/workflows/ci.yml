@@ -80,7 +80,7 @@ jobs:
             --apt-root /etc/apt --package bash > "$RUNNER_TEMP/rpt-policy"
           apt-cache policy bash > "$RUNNER_TEMP/apt-policy"
           expected="$(awk '/^[[:space:]]*Candidate:/{print $2;exit}' "$RUNNER_TEMP/apt-policy")"
-          actual="$(awk '/Candidate \\(default-priority preview\\):/{print $NF;exit}' "$RUNNER_TEMP/rpt-policy")"
+          actual="$(awk '/Candidate /{print $NF;exit}' "$RUNNER_TEMP/rpt-policy")"
           test -n "$expected"
           test "$expected" = "$actual"
           echo "PASS baseline candidate bash: $actual"
