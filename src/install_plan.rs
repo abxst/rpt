@@ -108,7 +108,14 @@ impl Solver<'_> {
         let mut candidates = Vec::new();
         for (name, item) in self.catalog {
             let caps = provides(item)?;
-            if caps.iter().any(|cap| capability_satisfies(cap, required).unwrap_or(false)) {
+            let mut is_provider = false;
+            for cap in &caps {
+                if capability_satisfies(cap, required)? {
+                    is_provider = true;
+                    break;
+                }
+            }
+            if is_provider {
                 candidates.push(name.clone());
                 if candidates.len() > 1 { break; }
             }
