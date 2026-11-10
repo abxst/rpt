@@ -226,7 +226,7 @@ pub fn rdepends(
     scan_cache(cache, architecture, |entry| {
         let matches = [&entry.depends, &entry.pre_depends].iter().any(|field| {
             field.split(&[',', '|'][..]).any(|clause| {
-                let atom = clause.trim().split_whitespace().next().unwrap_or("");
+                let atom = clause.split_whitespace().next().unwrap_or("");
                 atom.split(':').next().unwrap_or("") == package
             })
         });
