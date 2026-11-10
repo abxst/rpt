@@ -61,6 +61,20 @@ pub trait PackageDriver: Send + Sync {
     fn installed_packages(&self, _status: &Path, _architecture: &str) -> Result<BTreeMap<String, InstalledPackage>> {
         bail!("{} installed state backend is not implemented", self.kind().as_str())
     }
+    /// Read-only install planning is available only when a backend can
+    /// interpret its own source metadata and installed package database.
+    fn plan_install_preview(
+        &self, _cache: &Path, _status: &Path, _configuration: &Path,
+        _name: &str, _architecture: &str, _max_packages: usize,
+    ) -> Result<Vec<crate::install_plan::PlanStep>> {
+        bail!("{} driver has no dependency planner", self.kind().as_str())
+    }
+    /// Repository-native package acquisition, still only planning/download.
+    fn prepare_download(
+        &self, _cache: &Path, _names: &[String], _architecture: &str,
+    ) -> Result<crate::Manifest> {
+        bail!("{} driver has no signed package acquisition", self.kind().as_str())
+    }
     fn operation_supported(&self, _operation: Operation) -> bool { false }
     fn require_operation(&self, operation: Operation) -> Result<()> {
         if !self.operation_supported(operation) {
