@@ -1,6 +1,7 @@
 //! RPT engine building blocks. This is an experimental transport MVP, not an APT replacement.
 pub mod download;
 pub mod sources;
+pub mod transaction;
 
 use anyhow::{bail, Result};
 use serde::Deserialize;
