@@ -275,3 +275,23 @@ This remains a read-only/download-only experimental subsystem. It does not
 provide full APT pinning, alternatives, virtual Provides, multiarch, phased
 updates, system dpkg locks, transaction journaling, recovery or install/remove/
 upgrade compatibility. Do not replace /usr/bin/apt.
+
+### Modular native package drivers
+
+The distro/package engine now has a `PackageDriver` interface under
+`src/drivers/` and a driver registry. The `deb` driver currently routes
+existing Debian versioning, dpkg installed-state parsing, signed metadata
+update/query, policy preview and read-only planning. `rpm`, `apk`, and
+`pacman` drivers are **placeholders that fail closed** — do not mistake
+detection for support. Query the intended family with:
+
+    rpt driver-info
+    rpt driver-info --driver rpm
+    rpt version-compare --driver deb '1.0~rc1' '1.0'
+
+Most package-related commands accept `--driver auto|deb|rpm|apk|pacman` (default: `auto` from `/etc/os-release`) and refuse
+non-Debian drivers until implemented. Read
+[Package driver architecture](docs/package-drivers.md) for the backend API,
+supported operations and future native-package conformance gates. Full
+APT behavioral parity remains the **first release prerequisite**, before
+native support for RPM, apk-tools or pacman is advertised.
