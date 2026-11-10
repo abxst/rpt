@@ -100,3 +100,18 @@ resolve dependencies, verify a Release signature, or install anything.
 
 **Important:** This milestone is not APT compatibility. The original APT
 executable must stay in place. Stage only with `scripts/stage-apt.sh`.
+
+### Aggregated index versions and Ubuntu CI oracle (alpha.11)
+
+`rpt index-versions --lists-dir /var/lib/apt/lists --package bash --architecture amd64`
+lists unique Debian versions from **uncompressed** binary-amd64 Packages indexes,
+newest first. It performs streaming reads rather than parsing every package into RAM.
+It is a read-only metadata exploration tool, **not** APT candidate selection: it
+has no signature verification, installed state, repository pinning, resolver or
+package mutation support.
+
+CI runs `tests/ci_apt_metadata.sh` after refreshing real Ubuntu indexes and
+compares version sets of five packages with `apt-cache madison`. Compressed
+local indexes are copied/decompressed into a disposable directory for RPT.
+The script never changes system package transactions. RPT is still not
+compatible with `apt` commands/options and system APT must not be replaced.
