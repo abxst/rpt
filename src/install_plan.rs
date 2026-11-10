@@ -423,6 +423,27 @@ impl Solver<'_> {
     }
 }
 
+/// The current solver plans only one native architecture. A staged binary
+/// with a same-name foreign installed counterpart could require Multi-Arch:
+/// same version synchronization, file overlap checks or removals. The planner
+/// cannot safely assume any such action, so it refuses these cases.
+fn reject_foreign_identity_overlap(
+    entries: &BTreeMap<cache_query::InstalledKey, cache_query::Installed>,
+    steps: &[PlanStep], architecture: &str,
+) -> Result<()> {
+    for step in steps {
+        for key in entries.keys() {
+            if key.name == step.package
+                && key.architecture != architecture
+                && key.architecture != "all" {
+                bail!("planned {} overlaps installed foreign architecture {}; full Multi-Arch solver required",
+                    step.package, key.architecture);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read installed packages in bulk; this deliberately does not trust the
 /// resolver for actual package transactions.
 pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, max_packages: usize) -> Result<Vec<PlanStep>> {
@@ -439,7 +460,10 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
             bail!("inconsistent installed version metadata for {name}");
         }
     }
-    solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)
+    let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
+    let full_installed = cache_query::installed_catalog_by_arch(status)?;
+    reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+    Ok(plan)
 }
 
 /// Shared read-only solver used both for ordinary previews and candidate
@@ -546,6 +570,8 @@ pub fn preview_with_policy(
                     target_release.as_deref(), None,
                 )?.candidate)
             })?;
+            let full_installed = cache_query::installed_catalog_by_arch(status)?;
+            reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
             return Ok(plan);
         }
     }
@@ -589,6 +615,20 @@ mod tests {
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
     }
+    #[test]
+    fn planned_foreign_coinstalled_identity_fails_closed() {
+        let entries = BTreeMap::from([
+            (cache_query::InstalledKey { name: "lib".into(), architecture: "amd64".into() },
+                cache_query::Installed { version: "1".into(), architecture: "amd64".into(), status: "install ok installed".into() }),
+            (cache_query::InstalledKey { name: "lib".into(), architecture: "i386".into() },
+                cache_query::Installed { version: "1".into(), architecture: "i386".into(), status: "install ok installed".into() }),
+        ]);
+        let plan = [PlanStep { package: "lib".into(), version: "2".into(), installed: Some("1".into()) }];
+        assert!(reject_foreign_identity_overlap(&entries, &plan, "amd64").is_err());
+        let unrelated = [PlanStep { package: "app".into(), version: "1".into(), installed: None }];
+        assert!(reject_foreign_identity_overlap(&entries, &unrelated, "amd64").is_ok());
+    }
+
     #[test]
     fn candidate_catalog_can_resolve_older_pinned_dependency_metadata() {
         let mut latest = BTreeMap::from([
