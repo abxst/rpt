@@ -170,7 +170,7 @@ fn parse_release_identity(signed: &str) -> Result<ReleaseIdentity> {
     }
     let (_, body) = signed.split_once("\n\n").context("invalid clearsigned InRelease header")?;
     let (body, _) = body.split_once("-----BEGIN PGP SIGNATURE-----")
-        .context("unsigned InRelease");
+        .context("unsigned InRelease")?;
     let mut result = ReleaseIdentity::default();
     let mut seen = BTreeSet::new();
     for line in body.lines() {
