@@ -409,7 +409,7 @@ pub fn preview_with_policy(
             if !origins.iter().any(|origin| origin.version == chosen) {
                 bail!("candidate {name} {chosen} is not present in verified repository metadata");
             }
-            let summary = metadata_query::exact_version(cache, architecture, name, &chosen)?;
+            let summary = metadata_query::verified_exact_version(cache, architecture, name, &chosen, &origins)?;
             if catalog.get(name) != Some(&summary) {
                 catalog.insert(name.clone(), summary);
                 changed = true;
