@@ -1,10 +1,10 @@
 //! Fail-closed dependency planning preview. NEVER executes dpkg or mutates packages.
 //! This is not APT's full dependency resolver: only uniquely resolvable
-//! alternatives and virtual Provides; no architecture qualifiers, pinning,
-//! package holds, triggers, removals or general backtracking.
+//! alternatives and virtual Provides, plus bounded alternative backtracking;
+//! no architecture qualifiers, pinning, package holds, triggers or removals.
 use crate::{cache_query, metadata_query::{self, PackageSummary}, version};
 use anyhow::{bail, Context, Result};
-use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path};
+use std::{cell::Cell, cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path, rc::Rc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanStep {
@@ -86,6 +86,7 @@ fn capability_satisfies(cap: &Requirement, required: &Requirement) -> Result<boo
     satisfies(version, required)
 }
 
+#[derive(Clone)]
 struct Solver<'a> {
     catalog: &'a BTreeMap<String, PackageSummary>,
     installed: &'a BTreeMap<String, String>,
@@ -93,6 +94,7 @@ struct Solver<'a> {
     done: BTreeSet<String>,
     plan: Vec<PlanStep>,
     limit: usize,
+    branch_budget: Rc<Cell<usize>>,
 }
 
 impl Solver<'_> {
@@ -133,6 +135,53 @@ impl Solver<'_> {
         self.resolve_concrete(&selected)
     }
 
+    /// Explore a branch with a copy of the entire partial plan. Commit only
+    /// if exactly one fully successful continuation remains. A failing branch
+    /// must never leak its already-added dependencies into the winning branch.
+    fn resolve_groups(&mut self, groups: &[Vec<Requirement>], index: usize) -> Result<()> {
+        if index == groups.len() { return Ok(()); }
+        let group = &groups[index];
+        // Preserve the established behavior: an already installed direct
+        // alternative satisfies a dependency without changing package state.
+        for alternative in group {
+            if let Some(installed) = self.installed.get(&alternative.name) {
+                if satisfies(installed, alternative)? {
+                    return self.resolve_groups(groups, index + 1);
+                }
+            }
+        }
+        let mut options = BTreeSet::new();
+        for alternative in group {
+            if let Some(concrete) = self.concrete(alternative)? {
+                options.insert(concrete);
+            }
+        }
+        if options.is_empty() {
+            bail!("no resolvable alternatives for dependency group");
+        }
+        let mut winner: Option<Self> = None;
+        for option in options {
+            let remaining = self.branch_budget.get();
+            if remaining == 0 { bail!("dependency branch budget exhausted"); }
+            self.branch_budget.set(remaining - 1);
+            let mut branch = self.clone();
+            let requirement = Requirement { name: option, constraint: None };
+            // Only branch-local resolution errors are candidates for retry.
+            if branch.resolve_concrete(&requirement).is_ok()
+                && branch.resolve_groups(groups, index + 1).is_ok() {
+                if winner.is_some() {
+                    bail!("multiple viable dependency alternatives; full APT solver required");
+                }
+                winner = Some(branch);
+            }
+        }
+        let selected = winner.context("no viable dependency alternative after backtracking")?;
+        self.visiting = selected.visiting;
+        self.done = selected.done;
+        self.plan = selected.plan;
+        Ok(())
+    }
+
     fn resolve_concrete(&mut self, requested: &Requirement) -> Result<()> {
         if self.done.contains(&requested.name) {
             let current = self.catalog.get(&requested.name)
@@ -159,31 +208,9 @@ impl Solver<'_> {
             bail!("dependency plan exceeded maximum package count");
         }
         self.visiting.insert(requested.name.clone());
-        for group in parse_groups(&current.pre_depends)?.into_iter().chain(parse_groups(&current.depends)?) {
-            let mut fulfilled = false;
-            for alternative in &group {
-                if let Some(installed) = self.installed.get(&alternative.name) {
-                    if satisfies(installed, alternative)? {
-                        fulfilled = true;
-                        break;
-                    }
-                }
-            }
-            if fulfilled { continue; }
-            // Resolve only a single concrete viable option. If more than one
-            // alternative is possible, do not emulate APT's preference rules.
-            let mut options = BTreeSet::new();
-            for alternative in &group {
-                if let Some(concrete) = self.concrete(alternative)? {
-                    options.insert(concrete);
-                }
-            }
-            if options.len() != 1 {
-                bail!("unresolved or ambiguous alternatives for {}: full APT resolver required", current.name);
-            }
-            let selected = options.into_iter().next().expect("exactly one option");
-            self.resolve_concrete(&Requirement { name: selected, constraint: None })?;
-        }
+        let groups = parse_groups(&current.pre_depends)?.into_iter()
+            .chain(parse_groups(&current.depends)?).collect::<Vec<_>>();
+        self.resolve_groups(&groups, 0)?;
         self.visiting.remove(&requested.name);
         self.done.insert(requested.name.clone());
         let installed = self.installed.get(&requested.name).cloned();
@@ -211,6 +238,7 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let mut solver = Solver {
         catalog: &catalog, installed: &installed, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
+        branch_budget: Rc::new(Cell::new(4096)),
     };
     solver.resolve(&parse_atom(package)?)?;
     Ok(solver.plan)
@@ -230,7 +258,7 @@ mod tests {
     fn solve(catalog: &BTreeMap<String, PackageSummary>, installed: &BTreeMap<String,String>, name: &str) -> Result<Vec<PlanStep>> {
         let mut s = Solver {
             catalog, installed, visiting: BTreeSet::new(), done: BTreeSet::new(),
-            plan: Vec::new(), limit: 20,
+            plan: Vec::new(), limit: 20, branch_budget: Rc::new(Cell::new(4096)),
         };
         s.resolve(&parse_atom(name)?)?;
         Ok(s.plan)
@@ -273,6 +301,38 @@ mod tests {
             ("other".into(), item("other", "1", "")),
         ]);
         assert!(solve(&ambiguous, &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
+    fn backtracks_failed_branch_and_restores_full_partial_plan() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "bad | good")),
+            ("bad".into(), item("bad", "1", "helper, missing")),
+            ("helper".into(), item("helper", "1", "")),
+            ("good".into(), item("good", "1", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["good", "app"]);
+    }
+    #[test]
+    fn rejects_two_fully_viable_branches_even_after_lookahead() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "a | b")),
+            ("a".into(), item("a", "1", "helper")),
+            ("helper".into(), item("helper", "1", "")),
+            ("b".into(), item("b", "1", "")),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+    }
+    #[test]
+    fn backtracking_considers_remaining_dependency_groups() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "bad | good, helper")),
+            ("bad".into(), item("bad", "1", "missing")),
+            ("good".into(), item("good", "1", "")),
+            ("helper".into(), item("helper", "1", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["good", "helper", "app"]);
     }
     #[test]
     fn single_virtual_provider_with_explicit_version() {
