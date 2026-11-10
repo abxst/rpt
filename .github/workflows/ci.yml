@@ -193,12 +193,31 @@ jobs:
           printf 'Package: bash\nPin: release a=noble\nPin-Priority: 1001\n' > "$root/preferences.d/50rpt"
           ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-candidate-pinned"
           grep -Fq 'Priority: 1001' "$RUNNER_TEMP/rpt-candidate-pinned"
-          printf 'Package: *\nPin: release a=noble\nPin-Priority: 1001\n' > "$root/preferences.d/50rpt"
+          printf 'Package: *\nPin: version 1.0\nPin-Priority: 1001\n' > "$root/preferences.d/50rpt"
           if ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash >/dev/null 2>&1; then
-            echo 'unsupported wildcard pin was accepted' >&2
+            echo 'unsupported general version pin was accepted' >&2
             exit 1
           fi
           echo 'PASS read-only candidate diagnostic and conservative pin rejection'
+      - name: Differential APT general and specific pin precedence
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rpt-general-policy"
+          mkdir -p "$root/preferences.d"
+          printf 'Package: *\nPin: release a=noble\nPin-Priority: 730\n\nPackage: bash\nPin: release a=noble\nPin-Priority: 810\n' > "$root/preferences"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-general-bash"
+          grep -Fq 'Priority: 810' "$RUNNER_TEMP/rpt-general-bash"
+          apt-cache -o Dir::Etc::preferences="$root/preferences" -o Dir::Etc::preferencesparts="$root/preferences.d" policy bash > "$RUNNER_TEMP/apt-general-bash"
+          grep -Eq '[[:space:]]810$' "$RUNNER_TEMP/apt-general-bash"
+          expected="$(awk '/^[[:space:]]*Candidate:/{print $2;exit}' "$RUNNER_TEMP/apt-general-bash")"
+          actual="$(awk '/^Candidate:/{print $2;exit}' "$RUNNER_TEMP/rpt-general-bash")"
+          test "$actual" = "$expected"
+          printf 'Package: *\nPin: release a=noble\nPin-Priority: 730\n' > "$root/preferences"
+          ./target/debug/rpt candidate-inspect --cache "$RUNNER_TEMP/rpt-metadata" --apt-root "$root" --package bash > "$RUNNER_TEMP/rpt-general-only"
+          grep -Fq 'Priority: 730' "$RUNNER_TEMP/rpt-general-only"
+          apt-cache -o Dir::Etc::preferences="$root/preferences" -o Dir::Etc::preferencesparts="$root/preferences.d" policy bash > "$RUNNER_TEMP/apt-general-only"
+          grep -Eq '[[:space:]]730$' "$RUNNER_TEMP/apt-general-only"
+          echo 'PASS APT general and specific pin priority fixtures'
       - name: Differential APT Release conjunctive pin fixture
         run: |
           set -euo pipefail
