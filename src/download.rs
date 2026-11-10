@@ -1,5 +1,5 @@
 //! Concurrent, checksummed download engine with optional HTTP byte-range splitting.
-use crate::{error::{classify, ErrorCategory}, validate_package, Package};
+use crate::{error::{classify, describe, ErrorCategory}, validate_package, Package};
 use anyhow::{bail, Context, Result};
 use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -103,7 +103,7 @@ impl Downloader {
             if let Err(error) = result {
                 let category = classify(&error, ErrorCategory::Download);
                 has_system_error |= category == ErrorCategory::System;
-                eprintln!("rpt: error [{category}] package {name}: {error:#}");
+                eprintln!("rpt: error [{category}] package {name}: {}", describe(&error));
             }
         }
         if failed > 0 {
@@ -148,7 +148,7 @@ impl Downloader {
                         return Err(error);
                     }
                     self.counters.retries.fetch_add(1, Ordering::Relaxed);
-                    bar.println(format!("rpt: retry {attempt}/3 for {}: {error:#}", package.name));
+                    eprintln!("rpt: retry [download] {attempt}/3 package {}: {}", package.name, describe(&error));
                     tokio::time::sleep(std::time::Duration::from_millis(
                         250u64 * (1u64 << (attempt - 1)),
                     )).await;
