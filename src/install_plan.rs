@@ -492,7 +492,7 @@ mod tests {
             ("app".into(), item("app", "1", "service-api")),
             ("first".into(), first),
         ]);
-        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+        assert!(solve(&catalog, &BTreeMap::from([("old".into(), "1".into())]), "app").is_err());
     }
     #[test]
     fn versioned_conflicts_and_breaks_match_only_existing_versions() {
