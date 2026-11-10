@@ -11,6 +11,8 @@ pub struct PackageSummary {
     pub name: String,
     pub version: String,
     pub architecture: String,
+    /// Validated Debian Multi-Arch value (default `no`).
+    pub multi_arch: String,
     pub description: String,
     pub section: String,
     pub depends: String,
@@ -27,6 +29,7 @@ struct Stanza {
     name: String,
     version: String,
     arch: String,
+    multi_arch: String,
     description: String,
     section: String,
     depends: String,
@@ -45,6 +48,7 @@ impl Stanza {
             "Package" => self.name = value.to_owned(),
             "Version" => self.version = value.to_owned(),
             "Architecture" => self.arch = value.to_owned(),
+            "Multi-Arch" => self.multi_arch = value.to_owned(),
             "Description" => self.description = value.to_owned(),
             "Section" => self.section = value.to_owned(),
             "Depends" => self.depends = value.to_owned(),
@@ -71,15 +75,22 @@ impl Stanza {
             _ => {}
         }
     }
-    fn into_summary(self) -> Option<PackageSummary> {
-        if self.name.is_empty() || self.version.is_empty() || self.arch.is_empty() { return None; }
-        Some(PackageSummary {
+    fn into_summary(self) -> Result<Option<PackageSummary>> {
+        if self.name.is_empty() || self.version.is_empty() || self.arch.is_empty() { return Ok(None); }
+        let multi_arch = match self.multi_arch.as_str() {
+            "" | "no" => "no",
+            "same" => "same",
+            "foreign" => "foreign",
+            "allowed" => "allowed",
+            other => bail!("invalid Multi-Arch value: {other}"),
+        };
+        Ok(Some(PackageSummary {
             name: self.name, version: self.version, architecture: self.arch,
-            description: self.description, section: self.section, depends: self.depends,
+            multi_arch: multi_arch.to_owned(), description: self.description, section: self.section, depends: self.depends,
             pre_depends: self.pre_depends, recommends: self.recommends,
             suggests: self.suggests, provides: self.provides,
             conflicts: self.conflicts, breaks: self.breaks,
-        })
+        }))
     }
 }
 
@@ -122,7 +133,7 @@ fn stream_stanzas(reader: impl Read, mut callback: impl FnMut(PackageSummary) ->
         line.clear();
         let size = reader.read_line(&mut line)?;
         if size == 0 || line.trim().is_empty() {
-            if let Some(entry) = std::mem::take(&mut stanza).into_summary() {
+            if let Some(entry) = std::mem::take(&mut stanza).into_summary()? {
                 callback(entry)?;
             }
             stanza_len = 0;
@@ -396,6 +407,21 @@ mod tests {
             "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: conflicting-api\n\n").unwrap();
         assert!(exact_version(&root, "amd64", "lib", "1").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reads_and_validates_multi_arch_control_field() {
+        for value in ["no", "same", "foreign", "allowed"] {
+            let raw = format!("Package: lib\nVersion: 1\nArchitecture: amd64\nMulti-Arch: {value}\n\n");
+            let mut result = Vec::new();
+            stream_stanzas(raw.as_bytes(), |item| { result.push(item); Ok(()) }).unwrap();
+            assert_eq!(result[0].multi_arch, value);
+        }
+        let raw = "Package: bad\nVersion: 1\nArchitecture: amd64\nMulti-Arch: arbitrary\n\n";
+        assert!(stream_stanzas(raw.as_bytes(), |_| Ok(())).is_err());
+        let raw = "Package: default\nVersion: 1\nArchitecture: amd64\n\n";
+        let mut result = Vec::new();
+        stream_stanzas(raw.as_bytes(), |item| { result.push(item); Ok(()) }).unwrap();
+        assert_eq!(result[0].multi_arch, "no");
     }
     #[test]
     fn multiline_and_latest_version() {
