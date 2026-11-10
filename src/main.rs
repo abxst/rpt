@@ -326,7 +326,8 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::Depends { driver, cache, package, architecture } => {
-            let item = rpt::metadata_query::show(&cache, &architecture, &package)
+            let kind = DriverKind::from_str(&driver)?;
+            let item = drivers::driver(kind).show_package(&cache, &architecture, &package)
                 .context(ErrorCategory::System)?
                 .ok_or_else(|| anyhow::anyhow!("package not found in RPT cache: {package}"))?;
             println!("{} {}", item.name, item.version);
