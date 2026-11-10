@@ -344,6 +344,40 @@ pub fn rdepends(
 mod tests {
     use super::*;
     #[test]
+    fn verified_exact_version_ignores_unlisted_cached_index() {
+        use crate::package_provenance::{
+            IndexProvenance, ReleaseIdentity, RepositoryProvenance, VerifiedVersionOrigin,
+        };
+        let root = std::env::temp_dir().join(format!("rpt-verified-meta-{}", std::process::id()));
+        let dir = root.join("cccccccccccccccccccccccc");
+        fs::create_dir_all(&dir).unwrap();
+        let trusted = "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: safe-api\n\n";
+        fs::write(dir.join("index-0.raw"), trusted).unwrap();
+        fs::write(dir.join("index-rogue.raw"),
+            "Package: lib\nVersion: 1\nArchitecture: amd64\nDepends: malicious-api\n\n").unwrap();
+        let meta = RepositoryProvenance {
+            uri: "https://example.org".into(), suite: "stable".into(),
+            keyring: "/ignored/test-only".into(),
+            indexes: vec![IndexProvenance {
+                release_path: "main/binary-amd64/Packages".into(),
+                local_file: "index-0.raw".into(),
+                sha256: "a".repeat(64), size: trusted.len() as u64,
+            }],
+        };
+        fs::write(dir.join("provenance.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let origin = VerifiedVersionOrigin {
+            version: "1".into(), architecture: "amd64".into(),
+            repository_uri: meta.uri, suite: meta.suite,
+            index_path: "main/binary-amd64/Packages".into(),
+            component: "main".into(), phased_update_percentage: None,
+            source_package: "lib".into(), source_version: "1".into(),
+            release: ReleaseIdentity::default(),
+        };
+        assert_eq!(verified_exact_version(&root, "amd64", "lib", "1", &[origin])
+            .unwrap().depends, "safe-api");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn exact_version_returns_candidate_stanza_and_rejects_divergent_duplicates() {
         let root = std::env::temp_dir().join(format!("rpt-exact-candidate-{}", std::process::id()));
         let one = root.join("aaaaaaaaaaaaaaaaaaaaaaaa");
