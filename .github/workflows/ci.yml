@@ -73,6 +73,18 @@ jobs:
           printf '%s\n' "$(dpkg-query -W -f='${Version}' bash)" > "$RUNNER_TEMP/dpkg-bash-version"
           ./target/debug/rpt installed-version --package bash > "$RUNNER_TEMP/rpt-installed-bash"
           diff -u "$RUNNER_TEMP/dpkg-bash-version" "$RUNNER_TEMP/rpt-installed-bash"
+      - name: Preview default-priority policy against apt-cache policy
+        run: |
+          set -euo pipefail
+          ./target/debug/rpt policy-preview --cache "$RUNNER_TEMP/rpt-metadata" \
+            --apt-root /etc/apt --package bash > "$RUNNER_TEMP/rpt-policy"
+          apt-cache policy bash > "$RUNNER_TEMP/apt-policy"
+          expected="$(awk '/^[[:space:]]*Candidate:/{print $2;exit}' "$RUNNER_TEMP/apt-policy")"
+          actual="$(awk '/Candidate \\(default-priority preview\\):/{print $NF;exit}' "$RUNNER_TEMP/rpt-policy")"
+          test -n "$expected"
+          test "$expected" = "$actual"
+          echo "PASS baseline candidate bash: $actual"
+          cat "$RUNNER_TEMP/rpt-policy"
       - name: Reject unsupported APT update flags
         run: |
           if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
