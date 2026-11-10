@@ -22,7 +22,7 @@ pub struct Manifest {
 }
 
 pub fn validate_package(p: &Package) -> Result<()> {
-    if p.name.is_empty() || p.name.contains(['\n', '\r']) {
+    if p.name.is_empty() || (p.name.contains('\n') || p.name.contains('\r')) {
         bail!("invalid package name");
     }
     let url = reqwest::Url::parse(&p.url)?;
