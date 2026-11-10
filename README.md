@@ -44,3 +44,15 @@ APT repository metadata. Output paths must be relative to the chosen cache direc
 
 The release workflow is intentionally prerelease-only until compatibility and
 system-mutation testing are complete.
+
+### Error logging
+
+RPT reports failures to stderr as `rpt: error [download]` (network/HTTP/integrity) or `rpt: error [system]` (manifest/configuration, filesystem I/O, task execution). Each failed package gets its own stderr diagnostic; the final failure count and transfer statistics stay on stdout. Exit status is nonzero when any package fails.
+
+Capture logs separately:
+
+```sh
+rpt fetch --manifest manifest.json --output ./rpt-cache 1>rpt.stdout.log 2>rpt.stderr.log
+```
+
+The system category currently covers pre-install processing only; this transport MVP does not execute dpkg transactions.
