@@ -93,6 +93,47 @@ jobs:
           test "$expected" = "$actual"
           echo "PASS baseline candidate bash: $actual"
           cat "$RUNNER_TEMP/rpt-policy"
+      - name: Read-only show search list against Ubuntu metadata
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/rpt-metadata"
+          ./target/debug/rpt show --cache "$target" bash > "$RUNNER_TEMP/rpt-show-bash"
+          grep -q '^Package: bash
+        run: |
+          if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
+            echo 'Unsupported APT settings were accepted' >&2
+            exit 1
+          fi
+      - name: Fail closed for bad repository signing key
+        run: |
+          sources="$RUNNER_TEMP/rpt-bad-signature"
+          target="$RUNNER_TEMP/rpt-bad-signature-cache"
+          mkdir -p "$sources/sources.list.d"
+          cat > "$sources/sources.list.d/ubuntu.sources" <<'EOF'
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu
+          Suites: noble
+          Components: main
+          Signed-By: /nonexistent/rpt-test-keyring.gpg
+          EOF
+          if timeout 120 ./target/debug/rpt --log-format json update --root "$sources" --output "$target" --workers 2 --no-progress 1>"$RUNNER_TEMP/rpt-bad.stdout" 2>"$RUNNER_TEMP/rpt-bad.stderr"; then
+            echo 'Unsigned metadata was accepted' >&2
+            exit 1
+          fi
+          grep -q '"code":"DOWNLOAD_SIGNATURE"' "$RUNNER_TEMP/rpt-bad.stderr"
+          test "$(find "$target" -name InRelease -type f | wc -l)" -eq 0
+ "$RUNNER_TEMP/rpt-show-bash"
+          ver="$(./target/debug/rpt cache-versions --cache "$target" --package bash | head -n 1)"
+          grep -Fqx "Version: $ver" "$RUNNER_TEMP/rpt-show-bash"
+          ./target/debug/rpt search --cache "$target" --limit 20 bash > "$RUNNER_TEMP/rpt-search-bash"
+          grep -q '^bash - ' "$RUNNER_TEMP/rpt-search-bash"
+          ./target/debug/rpt list --cache "$target" --prefix bash --limit 20 > "$RUNNER_TEMP/rpt-list-bash"
+          grep -Fq "bash/cache $ver amd64" "$RUNNER_TEMP/rpt-list-bash"
+          if ./target/debug/rpt search --cache "$target" --limit 0 bash >/dev/null 2>&1; then
+            echo "Invalid result limit accepted" >&2
+            exit 1
+          fi
+          echo "PASS cached show/search/list for bash"
       - name: Reject unsupported APT update flags
         run: |
           if ./target/debug/rpt update -o APT::Get::Assume-Yes=true >/dev/null 2>&1; then
