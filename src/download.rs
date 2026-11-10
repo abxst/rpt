@@ -191,7 +191,7 @@ impl Downloader {
             tasks.spawn(async move { fetch_range(client, url, path, (start, end, package_size), bar, counters).await });
         }
         while let Some(joined) = tasks.join_next().await {
-            if let Err(e) = joined.context("segment task panicked")? {
+            if let Err(e) = joined.context("segment task panicked").context(ErrorCategory::System)? {
                 tasks.abort_all();
                 return Err(e);
             }
