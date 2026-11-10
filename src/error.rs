@@ -24,6 +24,16 @@ impl ErrorCategory {
     }
 }
 
+/// Format the causal chain without duplicating internal category markers.
+/// The category is already displayed by the CLI as `[download]` or `[system]`.
+pub fn describe(error: &anyhow::Error) -> String {
+    error.chain()
+        .filter(|cause| cause.downcast_ref::<ErrorCategory>().is_none())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 /// Explicit category markers in an error chain take precedence; download is
 /// the default for errors originating in the transport layer.
 pub fn classify(error: &anyhow::Error, fallback: ErrorCategory) -> ErrorCategory {
@@ -41,6 +51,21 @@ mod tests {
             .context(ErrorCategory::System)
             .unwrap_err();
         assert_eq!(classify(&error, ErrorCategory::Download), ErrorCategory::System);
+    }
+
+    #[test]
+    fn skips_category_markers_without_losing_context() {
+        let error = anyhow::anyhow!("file not found")
+            .context("reading manifest")
+            .context(ErrorCategory::System);
+        assert_eq!(describe(&error), "reading manifest: file not found");
+        assert_eq!(classify(&error, ErrorCategory::Download), ErrorCategory::System);
+    }
+
+    #[test]
+    fn preserves_regular_error_chains() {
+        let error = anyhow::anyhow!("404 Not Found").context("HTTP request");
+        assert_eq!(describe(&error), "HTTP request: 404 Not Found");
     }
 
     #[test]
