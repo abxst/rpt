@@ -9,6 +9,7 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 
 - Read-only inventory of traditional `.list` and Deb822 `.sources` APT source files.
 - Multi-package concurrent HTTP(S) downloads, optional byte-range segmentation.
+- Docker-pull-style animated package progress on interactive terminals, aggregate transfer stats (requests, range segments, retries, cache hits, throughput); plain summary for redirected logs.
 - Bounded worker counts, expected-size and SHA-256 verification before publishing files.
 - Rust unit tests, CI and automated **pre-release** workflow for Linux amd64.
 - In-process bounded FIFO single-worker transaction queue primitive with serialization tests (not connected to dpkg).
