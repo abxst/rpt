@@ -397,3 +397,7 @@ Read-only planning checks staged native candidates against actual foreign-archit
 ### Keyed installed-state and relationship evaluation
 
 The read-only native dependency solver now uses exact `(name, architecture)` keys for installed versions, holds, Essential/Protected and staged-vs-installed `Conflicts/Breaks`. It validates complete dpkg installed identities against relationship metadata, prevents native/all candidate mismatches even at the same version, and retains the separate foreign-architecture negative-relations check. This does not enable cross-architecture package transactions or co-installation.
+
+### Read-only `Replaces` ownership safety
+
+RPT now preserves the Debian `Replaces` control field from repository metadata and installed dpkg status. When a planned binary declares a matching versioned or unversioned `Replaces` relationship with another installed (including foreign-architecture) or simultaneously staged binary, or a reverse installed relationship exists, dependency planning refuses that unsafe file-ownership transfer. Unsupported `Replaces` syntax also fails closed. Full dpkg file ownership checks (`/var/lib/dpkg/info/*.list`), `Conflicts` + `Replaces` transitions, overwrite rules and actual package transactions are **not implemented**; this guard prevents claiming an unsafe plan is installable.
