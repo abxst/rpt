@@ -56,7 +56,9 @@ fn parse_atom_for_arch(text: &str, arch: &str) -> Result<Requirement> {
     let head = head.trim();
     let normalized = if let Some((name, qualifier)) = head.split_once(':') {
         if qualifier != "native" && qualifier != "any"
-            && (qualifier.is_empty() || !qualifier.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')) {
+            && (qualifier.is_empty()
+                || !qualifier.as_bytes()[0].is_ascii_lowercase() && !qualifier.as_bytes()[0].is_ascii_digit()
+                || !qualifier.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')) {
             bail!("invalid architecture qualifier: {qualifier}");
         }
         if name.is_empty() || qualifier.contains(':') {
@@ -2102,6 +2104,17 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
             "app", 20, "amd64").is_err());
         assert!(solve_catalog(&catalog, &BTreeMap::new(), &BTreeMap::new(),
             "libdemo:armhf", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn architecture_qualifiers_reject_invalid_debian_architecture_names() {
+        for valid in ["pkg:amd64", "pkg:arm64", "pkg:i386", "pkg:hurd-i386", "pkg:native", "pkg:any"] {
+            assert!(parse_atom_for_arch(valid, "amd64").is_ok(), "expected valid: {valid}");
+        }
+        for invalid in ["pkg:", "pkg:-amd64", "pkg:AMD64", "pkg:_amd64", "pkg:arm_64",
+                        "pkg:arm.64", "pkg:arm/64", "pkg:arm64:amd64"] {
+            assert!(parse_atom_for_arch(invalid, "amd64").is_err(), "expected invalid: {invalid}");
+        }
     }
 
     #[test]
