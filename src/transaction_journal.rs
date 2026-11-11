@@ -35,6 +35,26 @@ impl Journal {
         let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
             .open(dir.join(".rpt-transaction.lock"))?;
         lock.try_lock_exclusive().context("another RPT transaction owns the journal lock")?;
+        Self::inspect_locked(dir, lock)
+    }
+
+    /// Wait for another process to finish instead of failing on contention.
+    /// Advisory OS locks provide mutual exclusion, NOT strict FIFO fairness.
+    /// Call from a blocking thread; use `wait_async` in Tokio applications.
+    pub fn wait(dir: &Path) -> Result<Self> {
+        fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
+        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
+            .open(dir.join(".rpt-transaction.lock"))?;
+        lock.lock_exclusive().context("waiting for RPT transaction lock")?;
+        Self::inspect_locked(dir, lock)
+    }
+
+    /// Wait without blocking a Tokio runtime worker.
+    pub async fn wait_async(dir: PathBuf) -> Result<Self> {
+        tokio::task::spawn_blocking(move || Self::wait(&dir)).await?
+    }
+
+    fn inspect_locked(dir: &Path, lock: File) -> Result<Self> {
         let journal = Self { _lock: lock, dir: dir.to_path_buf() };
         // An unfinished record is not safe to retry automatically: dpkg and
         // maintainer scripts may have made changes before the process died.
@@ -110,6 +130,26 @@ mod tests {
         journal.write(&JournalRecord { id: "tx2".into(), phase: Phase::Succeeded, error: None }).unwrap();
         drop(journal);
         assert!(Journal::open(&dir).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn waiting_writer_runs_after_first_writer_releases_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = temp_dir();
+        let first = Journal::open(&dir).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let second_dir = dir.clone();
+        let handle = std::thread::spawn(move || {
+            let second = Journal::wait(&second_dir).unwrap();
+            tx.send(()).unwrap();
+            drop(second);
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(first);
+        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        handle.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 
