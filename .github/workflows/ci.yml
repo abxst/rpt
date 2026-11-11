@@ -86,8 +86,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Refresh APT indexes and install decompressor
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq liblz4-tool
+          set -euo pipefail
+          retry_network() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              rc=$?
+              echo "::warning::Network command failed (attempt $attempt/3): $*"
+              getent ahostsv4 archive.ubuntu.com || true
+              getent ahostsv4 ports.ubuntu.com || true
+              if [ "$attempt" -eq 3 ]; then return "$rc"; fi
+              sleep $((attempt * 10))
+            done
+          }
+          retry_network sudo apt-get -o Acquire::Retries=3 update -qq
+          retry_network sudo apt-get -o Acquire::Retries=3 install -y -qq liblz4-tool
       - name: Build RPT
         run: |
           cargo generate-lockfile
@@ -106,7 +119,20 @@ jobs:
           Components: main
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-          timeout 240 ./target/debug/rpt update --root "$sources" --output "$target" --workers 8 -q -o Acquire::Retries=2 --no-progress > "$RUNNER_TEMP/rpt-update.log"
+          set -euo pipefail
+          retry_network() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              rc=$?
+              echo "::warning::Network command failed (attempt $attempt/3): $*"
+              getent ahostsv4 archive.ubuntu.com || true
+              getent ahostsv4 ports.ubuntu.com || true
+              if [ "$attempt" -eq 3 ]; then return "$rc"; fi
+              sleep $((attempt * 10))
+            done
+          }
+          retry_network timeout 240 ./target/debug/rpt update --root "$sources" --output "$target" --workers 8 -q -o Acquire::Retries=3 --no-progress > "$RUNNER_TEMP/rpt-update.log"
           grep -q 'Update summary: 2/2 repositories' "$RUNNER_TEMP/rpt-update.log"
           grep -q 'index attempts' "$RUNNER_TEMP/rpt-update.log"
           test "$(find "$target" -name InRelease -type f | wc -l)" -eq 2
@@ -426,7 +452,19 @@ jobs:
       - name: Download native signed arm64 Ubuntu package indexes
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
+          retry_network() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              rc=$?
+              echo "::warning::Network command failed (attempt $attempt/3): $*"
+              getent ahostsv4 archive.ubuntu.com || true
+              getent ahostsv4 ports.ubuntu.com || true
+              if [ "$attempt" -eq 3 ]; then return "$rc"; fi
+              sleep $((attempt * 10))
+            done
+          }
+          retry_network sudo apt-get -o Acquire::Retries=3 update -qq
           root="$RUNNER_TEMP/rpt-arm64-sources"
           cache="$RUNNER_TEMP/rpt-arm64-cache"
           mkdir -p "$root/sources.list.d"
@@ -438,7 +476,7 @@ jobs:
           Architectures: arm64
           Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-          timeout 240 ./target/debug/rpt update --root "$root" --output "$cache" --workers 8 --no-progress > "$RUNNER_TEMP/rpt-arm64-update.log"
+          retry_network timeout 240 ./target/debug/rpt update --root "$root" --output "$cache" --workers 8 -o Acquire::Retries=3 --no-progress > "$RUNNER_TEMP/rpt-arm64-update.log"
           test "$(find "$cache" -name InRelease -type f | wc -l)" -eq 2
           test "$(find "$cache" -name 'index-*' -type f | wc -l)" -eq 2
           ./target/debug/rpt cache-versions --cache "$cache" --package bash --architecture arm64 | sort -u > "$RUNNER_TEMP/rpt-arm64-versions"
