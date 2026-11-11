@@ -32,7 +32,7 @@ pub struct Journal {
 impl Journal {
     pub fn open(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
-        let lock = OpenOptions::new().create(true).read(true).write(true)
+        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
             .open(dir.join(".rpt-transaction.lock"))?;
         lock.try_lock_exclusive().context("another RPT transaction owns the journal lock")?;
         let journal = Self { _lock: lock, dir: dir.to_path_buf() };
