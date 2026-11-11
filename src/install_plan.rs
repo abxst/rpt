@@ -119,6 +119,7 @@ struct InstalledRelations {
     version: String,
     conflicts: String,
     breaks: String,
+    replaces: String,
     provides: String,
     held: bool,
     essential: bool,
@@ -168,6 +169,7 @@ fn read_installed_relations_by_arch(status: &Path) -> Result<BTreeMap<cache_quer
             version: version.into(),
             conflicts: record.field("Conflicts").unwrap_or("").into(),
             breaks: record.field("Breaks").unwrap_or("").into(),
+            replaces: record.field("Replaces").unwrap_or("").into(),
             provides: record.field("Provides").unwrap_or("").into(),
             held: state == "hold ok installed",
             essential: parse_critical_flag(record.field("Essential"), "Essential")?,
@@ -250,10 +252,22 @@ fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
             section: String::new(), depends: String::new(),
             pre_depends: String::new(), recommends: String::new(),
             suggests: String::new(), provides: provided.into(),
-            conflicts: String::new(), breaks: String::new(),
+            conflicts: String::new(), breaks: String::new(), replaces: String::new(),
         };
         for cap in provides(&advertised)? {
             if capability_satisfies(&cap, &requirement)? { return Ok(true); }
+        }
+    }
+    Ok(false)
+}
+
+/// Replaces may legally transfer file ownership. Until the transaction
+/// engine validates dpkg's ownership database, refuse plans that would
+/// overlap an installed or simultaneously staged different binary package.
+fn replaces_hit(raw: &str, name: &str, version: &str) -> Result<bool> {
+    for requirement in negative_relations(raw)? {
+        if requirement.name == name && satisfies(version, &requirement)? {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -448,26 +462,31 @@ impl Solver<'_> {
                 if installed_key == new_key { continue; }
                 let effective_version = staged.get(installed_key)
                     .map(|item| item.version.as_str()).unwrap_or(installed_version);
-                let (conflicts, breaks, provider) =
+                let (conflicts, breaks, replaces, provider) =
                     if let Some(pkg) = staged.get(installed_key)
                         .and_then(|_| self.catalog.get(installed_key)) {
-                        (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
+                        (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.replaces.as_str(), pkg.provides.as_str())
                     } else if let Some(status) = self.installed_relations.get(installed_key) {
                         if status.version != *installed_version {
                             bail!("inconsistent installed metadata for {}:{}",
                                 installed_key.name, installed_key.architecture);
                         }
-                        (status.conflicts.as_str(), status.breaks.as_str(), status.provides.as_str())
+                        (status.conflicts.as_str(), status.breaks.as_str(), status.replaces.as_str(), status.provides.as_str())
                     } else {
                         // Only test fixtures may omit installed relationship
                         // records; real previews require exact agreement.
-                        ("", "", "")
+                        ("", "", "", "")
                     };
                 if relations_hit(&new_pkg.conflicts, &installed_key.name, effective_version, provider)?
                     || relations_hit(&new_pkg.breaks, &installed_key.name, effective_version, provider)?
                     || relations_hit(conflicts, &new_key.name, &new_step.version, &new_pkg.provides)?
                     || relations_hit(breaks, &new_key.name, &new_step.version, &new_pkg.provides)? {
                     bail!("Conflicts/Breaks between planned {}:{} and installed {}:{}",
+                        new_key.name, new_key.architecture, installed_key.name, installed_key.architecture);
+                }
+                if replaces_hit(&new_pkg.replaces, &installed_key.name, effective_version)?
+                    || replaces_hit(replaces, &new_key.name, &new_step.version)? {
+                    bail!("Replaces between planned {}:{} and installed {}:{} requires file ownership verification",
                         new_key.name, new_key.architecture, installed_key.name, installed_key.architecture);
                 }
             }
@@ -480,6 +499,11 @@ impl Solver<'_> {
                     || relations_hit(&peer.conflicts, &new_key.name, &new_step.version, &new_pkg.provides)?
                     || relations_hit(&peer.breaks, &new_key.name, &new_step.version, &new_pkg.provides)? {
                     bail!("Conflicts/Breaks between planned {}:{} and {}:{}",
+                        new_key.name, new_key.architecture, peer_key.name, peer_key.architecture);
+                }
+                if replaces_hit(&new_pkg.replaces, &peer_key.name, &peer_step.version)?
+                    || replaces_hit(&peer.replaces, &new_key.name, &new_step.version)? {
+                    bail!("Replaces between planned {}:{} and {}:{} requires file ownership verification",
                         new_key.name, new_key.architecture, peer_key.name, peer_key.architecture);
                 }
             }
@@ -509,6 +533,7 @@ impl Solver<'_> {
         // named conflicting package is not presently installed.
         negative_relations(&current.conflicts)?;
         negative_relations(&current.breaks)?;
+        negative_relations(&current.replaces)?;
         if self.plan.len() + self.visiting.len() >= self.limit {
             bail!("dependency plan exceeded maximum package count");
         }
@@ -566,6 +591,7 @@ fn reject_foreign_negative_relations(
         let proposed = catalog.get(&staged_key).with_context(|| format!(
             "planned {}:{} missing repository metadata", step.package, step.architecture,
         ))?;
+        negative_relations(&proposed.replaces)?;
         if proposed.version != step.version {
             bail!("inconsistent planned version for {}:{}", step.package, step.architecture);
         }
@@ -580,6 +606,11 @@ fn reject_foreign_negative_relations(
                 || relations_hit(&foreign.conflicts, &step.package, &step.version, &proposed.provides)?
                 || relations_hit(&foreign.breaks, &step.package, &step.version, &proposed.provides)? {
                 bail!("Conflicts/Breaks between planned {}:{} and foreign installed {}:{}",
+                    step.package, step.architecture, key.name, key.architecture);
+            }
+            if replaces_hit(&proposed.replaces, &key.name, &foreign.version)?
+                || replaces_hit(&foreign.replaces, &step.package, &step.version)? {
+                bail!("Replaces between planned {}:{} and foreign installed {}:{} requires file ownership verification",
                     step.package, step.architecture, key.name, key.architecture);
             }
         }
@@ -761,7 +792,7 @@ mod tests {
             name: name.into(), version: version.into(), architecture: "amd64".into(), multi_arch: "no".into(),
             description: String::new(), section: String::new(), depends: depends.into(),
             pre_depends: String::new(), recommends: String::new(), suggests: String::new(),
-            provides: String::new(), conflicts: String::new(), breaks: String::new(),
+            provides: String::new(), conflicts: String::new(), breaks: String::new(), replaces: String::new(),
         }
     }
     fn test_keyed(catalog: &BTreeMap<String, PackageSummary>) -> BTreeMap<PackageKey, PackageSummary> {
