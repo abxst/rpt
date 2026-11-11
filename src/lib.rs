@@ -16,6 +16,7 @@ pub mod version;
 pub mod error;
 pub mod sources;
 pub mod transaction;
+pub mod transaction_journal;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
