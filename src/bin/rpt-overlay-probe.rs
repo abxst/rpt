@@ -13,7 +13,7 @@ fn main() -> Result<()> {
             if args.next().is_some() { bail!("unexpected argument"); }
             let lower = fs::canonicalize(lower)?;
             let base = fs::canonicalize(base)?;
-            if lower == PathBuf::from("/") { bail!("live root cannot be probed"); }
+            if lower == std::path::Path::new("/") { bail!("live root cannot be probed"); }
             // A new mount namespace prevents propagation of probe mounts into
             // the host namespace. It is NOT sufficient to isolate dpkg scripts.
             let status = Command::new("unshare")
