@@ -41,6 +41,9 @@ impl Journal {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "tmp") {
+                bail!("incomplete journal write {}; manual inspection required", path.display());
+            }
             if path.extension().is_some_and(|ext| ext == "json") {
                 let bytes = fs::read(&path)?;
                 let record: JournalRecord = serde_json::from_slice(&bytes)
