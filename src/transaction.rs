@@ -104,22 +104,21 @@ mod tests {
         started_rx.await.unwrap();
 
         let executed = Arc::new(AtomicUsize::new(0));
-        let cancelled = tokio::spawn({
-            let q = q.clone();
-            let executed = executed.clone();
-            async move {
-                q.submit(move || async move {
-                    executed.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }).await
-            }
-        });
-        // Wait for the queued submission to reach its await point.
-        tokio::task::yield_now().await;
-        cancelled.abort();
-        let _ = cancelled.await;
+        let (abandoned_reply, abandoned_receiver) = oneshot::channel();
+        let counter = executed.clone();
+        // Enqueue deterministically while the first job blocks the worker.
+        q.sender.send(Request {
+            task: Box::new(move || Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })),
+            reply: abandoned_reply,
+        }).await.unwrap();
+        drop(abandoned_receiver);
+
         release_tx.send(()).unwrap();
         active.await.unwrap().unwrap();
+        // FIFO sentinel: all earlier requests have been processed or skipped.
         q.submit(|| async { Ok(()) }).await.unwrap();
         assert_eq!(executed.load(Ordering::SeqCst), 0);
     }
