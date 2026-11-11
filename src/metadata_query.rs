@@ -22,6 +22,7 @@ pub struct PackageSummary {
     pub provides: String,
     pub conflicts: String,
     pub breaks: String,
+    pub replaces: String,
 }
 
 #[derive(Default)]
@@ -39,6 +40,7 @@ struct Stanza {
     provides: String,
     conflicts: String,
     breaks: String,
+    replaces: String,
     last_key: String,
 }
 
@@ -58,6 +60,7 @@ impl Stanza {
             "Provides" => self.provides = value.to_owned(),
             "Conflicts" => self.conflicts = value.to_owned(),
             "Breaks" => self.breaks = value.to_owned(),
+            "Replaces" => self.replaces = value.to_owned(),
             _ => {}
         }
         self.last_key = key.to_owned();
@@ -72,6 +75,7 @@ impl Stanza {
             "Provides" => { self.provides.push(' '); self.provides.push_str(value.trim()); }
             "Conflicts" => { self.conflicts.push(' '); self.conflicts.push_str(value.trim()); }
             "Breaks" => { self.breaks.push(' '); self.breaks.push_str(value.trim()); }
+            "Replaces" => { self.replaces.push(' '); self.replaces.push_str(value.trim()); }
             _ => {}
         }
     }
@@ -89,7 +93,7 @@ impl Stanza {
             multi_arch: multi_arch.to_owned(), description: self.description, section: self.section, depends: self.depends,
             pre_depends: self.pre_depends, recommends: self.recommends,
             suggests: self.suggests, provides: self.provides,
-            conflicts: self.conflicts, breaks: self.breaks,
+            conflicts: self.conflicts, breaks: self.breaks, replaces: self.replaces,
         }))
     }
 }
