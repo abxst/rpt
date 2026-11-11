@@ -151,7 +151,7 @@ fn ensure_unchanged_protected(
 
 /// Read conflict metadata from the *installed* dpkg status, never infer it
 /// from the latest repository version. Dpkg status is local, not signed policy.
-fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+fn read_installed_relations_by_arch(status: &Path) -> Result<BTreeMap<cache_query::InstalledKey, InstalledRelations>> {
     let data = std::fs::read(status)?;
     if data.len() > 64 * 1024 * 1024 { bail!("dpkg status file exceeds safe size"); }
     let text = std::str::from_utf8(&data)?;
@@ -159,7 +159,7 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
     for record in crate::package_index::parse(text)? {
         let state = record.field("Status").context("dpkg stanza missing Status")?;
         if !crate::cache_query::is_installed_status(state) { continue; }
-        if !matches!(record.field("Architecture"), Some(a) if a == arch || a == "all") { continue; }
+        let arch = record.field("Architecture").context("installed status missing Architecture")?;
         let name = record.field("Package").context("installed status missing Package")?;
         let version = record.field("Version").context("installed status missing Version")?;
         parse_atom(name)?;
@@ -173,11 +173,35 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
             essential: parse_critical_flag(record.field("Essential"), "Essential")?,
             protected: parse_critical_flag(record.field("Protected"), "Protected")?,
         };
-        if result.insert(name.to_owned(), entry).is_some() {
-            bail!("duplicate installed package in dpkg status: {name}");
+        if arch.is_empty() || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("invalid dpkg installed architecture for {name}");
+        }
+        let key = cache_query::InstalledKey { name: name.to_owned(), architecture: arch.to_owned() };
+        if result.insert(key, entry).is_some() {
+            bail!("duplicate installed package identity in dpkg status: {name}:{arch}");
         }
     }
     Ok(result)
+}
+
+/// Restrict the architecture-aware installed records to the current solver's
+/// native + 'all' scope. Reject collisions rather than overwrite metadata.
+fn native_installed_relations(
+    keyed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    architecture: &str,
+) -> Result<BTreeMap<String, InstalledRelations>> {
+    let mut projected = BTreeMap::new();
+    for (key, value) in keyed {
+        if key.architecture != architecture && key.architecture != "all" { continue; }
+        if projected.insert(key.name.clone(), value.clone()).is_some() {
+            bail!("ambiguous installed relation identity for {}; native/all collision", key.name);
+        }
+    }
+    Ok(projected)
+}
+
+fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+    native_installed_relations(&read_installed_relations_by_arch(status)?, arch)
 }
 
 /// A negative relationship must be a simple comma-separated set of names
@@ -333,6 +357,15 @@ impl Solver<'_> {
     /// staged upgrades plus all staged additions). Include reverse relations
     /// from installed dpkg status, rather than newest repository metadata.
     fn check_negative_relations(&self) -> Result<()> {
+        // Preserve exact binary identities for staged candidates. The
+        // relationship evaluator is still conservative and native-only.
+        let mut staged_identities = BTreeSet::new();
+        for step in &self.plan {
+            let key = PackageKey { name: step.package.clone(), architecture: step.architecture.clone() };
+            if !self.catalog.contains_key(&key) || !staged_identities.insert(key) {
+                bail!("invalid or duplicate staged binary identity");
+            }
+        }
         let staged: BTreeMap<&str, &str> = self.plan.iter()
             .map(|step| (step.package.as_str(), step.version.as_str())).collect();
         for (new_name, new_version) in &staged {
@@ -638,6 +671,41 @@ mod tests {
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
     }
+    #[test]
+    fn installed_relationships_keep_foreign_and_native_separate() {
+        let path = std::env::temp_dir().join(format!("rpt-relations-identity-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\nConflicts: oldnative\n\n\
+Package: libx\nVersion: 1\nArchitecture: i386\nStatus: hold ok installed\nConflicts: oldforeign\n\n\
+Package: docs\nVersion: 3\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
+        let all = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "amd64".into() }].conflicts, "oldnative");
+        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].conflicts, "oldforeign");
+        assert!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].held);
+        let native = native_installed_relations(&all, "amd64").unwrap();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native["libx"].version, "2");
+        assert_eq!(native["docs"].version, "3");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn installed_relationships_reject_native_all_collision_and_duplicate_identity() {
+        let path = std::env::temp_dir().join(format!("rpt-relations-duplicate-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
+Package: libx\nVersion: 2\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
+        let all = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(native_installed_relations(&all, "amd64").is_err());
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
+Package: libx\nVersion: 3\nArchitecture: amd64\nStatus: install ok installed\n\n").unwrap();
+        assert!(read_installed_relations_by_arch(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn planned_foreign_coinstalled_identity_fails_closed() {
         let entries = BTreeMap::from([
