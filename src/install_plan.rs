@@ -151,9 +151,7 @@ fn ensure_unchanged_protected(
 
 /// Read conflict metadata from the *installed* dpkg status, never infer it
 /// from the latest repository version. Dpkg status is local, not signed policy.
-fn read_installed_relations_by_arch(
-    status: &Path,
-) -> Result<BTreeMap<PackageKey, InstalledRelations>> {
+fn read_installed_relations_by_arch(status: &Path) -> Result<BTreeMap<cache_query::InstalledKey, InstalledRelations>> {
     let data = std::fs::read(status)?;
     if data.len() > 64 * 1024 * 1024 { bail!("dpkg status file exceeds safe size"); }
     let text = std::str::from_utf8(&data)?;
@@ -161,13 +159,10 @@ fn read_installed_relations_by_arch(
     for record in crate::package_index::parse(text)? {
         let state = record.field("Status").context("dpkg stanza missing Status")?;
         if !crate::cache_query::is_installed_status(state) { continue; }
-        let name = record.field("Package").context("installed status missing Package")?;
         let arch = record.field("Architecture").context("installed status missing Architecture")?;
+        let name = record.field("Package").context("installed status missing Package")?;
         let version = record.field("Version").context("installed status missing Version")?;
         parse_atom(name)?;
-        if arch.is_empty() || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-            bail!("invalid installed architecture for {name}");
-        }
         version::compare(version, version)?;
         let entry = InstalledRelations {
             version: version.into(),
@@ -178,25 +173,35 @@ fn read_installed_relations_by_arch(
             essential: parse_critical_flag(record.field("Essential"), "Essential")?,
             protected: parse_critical_flag(record.field("Protected"), "Protected")?,
         };
-        let key = PackageKey { name: name.into(), architecture: arch.into() };
-        if result.insert(key.clone(), entry).is_some() {
-            bail!("duplicate installed package in dpkg status: {}:{}", key.name, key.architecture);
+        if arch.is_empty() || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("invalid dpkg installed architecture for {name}");
+        }
+        let key = cache_query::InstalledKey { name: name.to_owned(), architecture: arch.to_owned() };
+        if result.insert(key, entry).is_some() {
+            bail!("duplicate installed package identity in dpkg status: {name}:{arch}");
         }
     }
     Ok(result)
 }
 
-/// Keep a narrow native name-keyed view for legacy installed version handling.
-/// A keyed view of *all* architectures is retained for conflict validation.
-fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
-    let mut result = BTreeMap::new();
-    for (key, entry) in read_installed_relations_by_arch(status)? {
-        if key.architecture != arch && key.architecture != "all" { continue; }
-        if result.insert(key.name.clone(), entry).is_some() {
-            bail!("ambiguous installed native/all relation identity for {}", key.name);
+/// Restrict the architecture-aware installed records to the current solver's
+/// native + 'all' scope. Reject collisions rather than overwrite metadata.
+fn native_installed_relations(
+    keyed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    architecture: &str,
+) -> Result<BTreeMap<String, InstalledRelations>> {
+    let mut projected = BTreeMap::new();
+    for (key, value) in keyed {
+        if key.architecture != architecture && key.architecture != "all" { continue; }
+        if projected.insert(key.name.clone(), value.clone()).is_some() {
+            bail!("ambiguous installed relation identity for {}; native/all collision", key.name);
         }
     }
-    Ok(result)
+    Ok(projected)
+}
+
+fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+    native_installed_relations(&read_installed_relations_by_arch(status)?, arch)
 }
 
 /// A negative relationship must be a simple comma-separated set of names
@@ -352,6 +357,15 @@ impl Solver<'_> {
     /// staged upgrades plus all staged additions). Include reverse relations
     /// from installed dpkg status, rather than newest repository metadata.
     fn check_negative_relations(&self) -> Result<()> {
+        // Preserve exact binary identities for staged candidates. The
+        // relationship evaluator is still conservative and native-only.
+        let mut staged_identities = BTreeSet::new();
+        for step in &self.plan {
+            let key = PackageKey { name: step.package.clone(), architecture: step.architecture.clone() };
+            if !self.catalog.contains_key(&key) || !staged_identities.insert(key) {
+                bail!("invalid or duplicate staged binary identity");
+            }
+        }
         let staged: BTreeMap<&str, &str> = self.plan.iter()
             .map(|step| (step.package.as_str(), step.version.as_str())).collect();
         for (new_name, new_version) in &staged {
@@ -459,7 +473,7 @@ impl Solver<'_> {
 /// a different name. Never infer that a foreign package will be removed.
 fn reject_foreign_negative_relations(
     catalog: &BTreeMap<PackageKey, PackageSummary>,
-    installed: &BTreeMap<PackageKey, InstalledRelations>,
+    installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
     plan: &[PlanStep],
     architecture: &str,
 ) -> Result<()> {
@@ -700,6 +714,41 @@ mod tests {
         Ok(s.plan)
     }
     #[test]
+    fn installed_relationships_keep_foreign_and_native_separate() {
+        let path = std::env::temp_dir().join(format!("rpt-relations-identity-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\nConflicts: oldnative\n\n\
+Package: libx\nVersion: 1\nArchitecture: i386\nStatus: hold ok installed\nConflicts: oldforeign\n\n\
+Package: docs\nVersion: 3\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
+        let all = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "amd64".into() }].conflicts, "oldnative");
+        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].conflicts, "oldforeign");
+        assert!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].held);
+        let native = native_installed_relations(&all, "amd64").unwrap();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native["libx"].version, "2");
+        assert_eq!(native["docs"].version, "3");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn installed_relationships_reject_native_all_collision_and_duplicate_identity() {
+        let path = std::env::temp_dir().join(format!("rpt-relations-duplicate-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
+Package: libx\nVersion: 2\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
+        let all = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(native_installed_relations(&all, "amd64").is_err());
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
+Package: libx\nVersion: 3\nArchitecture: amd64\nStatus: install ok installed\n\n").unwrap();
+        assert!(read_installed_relations_by_arch(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn foreign_reverse_and_forward_conflicts_breaks_are_checked() {
         let arch = "amd64";
         let app = item("app", "2", "");
@@ -708,17 +757,17 @@ mod tests {
             version: "2".into(), installed: None }];
         let mut catalog = BTreeMap::from([(key, app.clone())]);
         let other = PackageKey { name: "foreign-lib".into(), architecture: "i386".into() };
-        let mut installed = BTreeMap::from([(other.clone(), InstalledRelations {
+        let mut installed = BTreeMap::from([(cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }, InstalledRelations {
             version: "1".into(), ..Default::default()
         })]);
         assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_ok());
         // A foreign package's installed reverse relationship is authoritative.
-        installed.get_mut(&other).unwrap().breaks = "app (>= 2)".into();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks = "app (>= 2)".into();
         assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-        installed.get_mut(&other).unwrap().breaks.clear();
-        installed.get_mut(&other).unwrap().conflicts = "app".into();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks.clear();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts = "app".into();
         assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-        installed.get_mut(&other).unwrap().conflicts.clear();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts.clear();
 
         // The staged native binary can itself conflict with an installed foreign name.
         catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
@@ -733,7 +782,7 @@ mod tests {
             .unwrap().breaks.clear();
 
         // Versioned virtual Provides on the installed foreign binary are checked.
-        installed.get_mut(&other).unwrap().provides = "foreign-virtual (= 2)".into();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().provides = "foreign-virtual (= 2)".into();
         catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
             .unwrap().conflicts = "foreign-virtual (>= 2)".into();
         assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
@@ -748,7 +797,7 @@ Package: libdemo\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nCon
 Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n").unwrap();
         let keyed = read_installed_relations_by_arch(&path).unwrap();
         assert_eq!(keyed.len(), 3);
-        let foreign = &keyed[&PackageKey { name: "libdemo".into(), architecture: "i386".into() }];
+        let foreign = &keyed[&cache_query::InstalledKey { name: "libdemo".into(), architecture: "i386".into() }];
         assert!(foreign.held);
         assert_eq!(foreign.conflicts, "app (>= 3)");
         let native = read_installed_relations(&path, "amd64").unwrap();
