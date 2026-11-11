@@ -33,6 +33,11 @@ fn main() -> Result<()> {
             let init = fs::read_link("/proc/1/ns/mnt")?;
             if ours == init { bail!("refusing to mount in the init mount namespace"); }
             let stage = rpt::overlay_stage::OverlayStage::prepare(&lower, &base.join("probe"))?;
+            for path in [&stage.lower, &stage.upper, &stage.work] {
+                if path.to_string_lossy().chars().any(|c| c == ',' || c == ':' || c == '\\' || c.is_control()) {
+                    bail!("unsupported character in OverlayFS mount path");
+                }
+            }
             let options = format!("lowerdir={},upperdir={},workdir={}",
                 stage.lower.display(), stage.upper.display(), stage.work.display());
             let status = Command::new("mount").args(["-t", "overlay", "overlay", "-o"])
