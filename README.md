@@ -385,3 +385,7 @@ Candidate metadata is now inserted against its exact `(name, architecture)` repo
 ### Keyed read-only dependency solver (native + Architecture: all)
 
 The experimental solver now resolves concrete candidates and tracks visiting/completed dependency nodes by `(package name, binary architecture)` rather than unqualified names. A plan step carries the chosen architecture, including `Architecture: all`. Signed provenance and APT policy candidate selection continue to operate before plan acceptance. The native-only implementation rejects a package name that is ambiguous between native and `all`, and rejects foreign-architecture resolutions/co-installations. Installed status and conflict metadata retain their conservative name projection until full multiarch dpkg-state handling is implemented; this is **not** full APT parity, and no package transactions are enabled.
+
+### Architecture-keyed installed relationship metadata
+
+RPT now reads installed `Conflicts`, `Breaks`, `Provides`, hold, `Essential` and `Protected` fields into a dpkg status map indexed by `(package, architecture)`. This preserves native and foreign copies of a same-name package without overwriting their relationship metadata. Its read-only native solver projects only the selected architecture plus `Architecture: all` and refuses native/all collisions, while validating staged package identities. **It does not yet resolve cross-architecture conflicts/co-installation or execute dpkg transactions**; foreign packages stay excluded from the native dependency solver.
