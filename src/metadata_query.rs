@@ -495,7 +495,7 @@ mod tests {
             multi_arch: "same".into(), description: String::new(), section: String::new(),
             depends: "new-dependency".into(), pre_depends: String::new(),
             recommends: String::new(), suggests: String::new(), provides: String::new(),
-            conflicts: String::new(), breaks: String::new(),
+            conflicts: String::new(), breaks: String::new(), replaces: String::new(),
         };
         let mut candidate = old.clone();
         candidate.version = "1".into();
