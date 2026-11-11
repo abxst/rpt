@@ -186,6 +186,7 @@ fn read_installed_relations_by_arch(status: &Path) -> Result<BTreeMap<cache_quer
 
 /// Restrict the architecture-aware installed records to the current solver's
 /// native + 'all' scope. Reject collisions rather than overwrite metadata.
+#[cfg(test)]
 fn native_installed_relations(
     keyed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
     architecture: &str,
@@ -200,8 +201,32 @@ fn native_installed_relations(
     Ok(projected)
 }
 
+#[cfg(test)]
 fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
     native_installed_relations(&read_installed_relations_by_arch(status)?, arch)
+}
+
+/// Check that all installed binary identities have exactly matching dpkg
+/// safety metadata. Foreign identities are retained, never overwritten.
+fn validate_installed_metadata(
+    installed: &BTreeMap<cache_query::InstalledKey, cache_query::Installed>,
+    relations: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+) -> Result<()> {
+    for (key, item) in installed {
+        let identity = key.clone();
+        let relation = relations.get(&identity).with_context(|| format!(
+            "missing installed safety metadata for {}:{}", key.name, key.architecture
+        ))?;
+        if relation.version != item.version {
+            bail!("inconsistent installed version for {}:{}", key.name, key.architecture);
+        }
+    }
+    for key in relations.keys() {
+        if !installed.contains_key(key) {
+            bail!("installed dpkg safety metadata has unknown binary identity");
+        }
+    }
+    Ok(())
 }
 
 /// A negative relationship must be a simple comma-separated set of names
@@ -234,11 +259,47 @@ fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
     Ok(false)
 }
 
+/// Projection for the current native-only solver. The map remains keyed by
+/// exact binary identity; foreign entries are kept for the outer guard.
+fn scoped_installed(
+    complete: &BTreeMap<cache_query::InstalledKey, cache_query::Installed>,
+    architecture: &str,
+) -> Result<BTreeMap<PackageKey, String>> {
+    let mut scoped = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (identity, item) in complete {
+        if identity.architecture != architecture && identity.architecture != "all" { continue; }
+        if !seen.insert(identity.name.clone()) {
+            bail!("ambiguous native/all installed binary {}", identity.name);
+        }
+        scoped.insert(PackageKey {
+            name: identity.name.clone(), architecture: identity.architecture.clone(),
+        }, item.version.clone());
+    }
+    Ok(scoped)
+}
+
+fn scoped_relations(
+    complete: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    architecture: &str,
+) -> Result<BTreeMap<PackageKey, InstalledRelations>> {
+    let mut scoped = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (key, relation) in complete {
+        if key.architecture != architecture && key.architecture != "all" { continue; }
+        if !seen.insert(key.name.clone()) {
+            bail!("ambiguous native/all installed relation {}", key.name);
+        }
+        scoped.insert(PackageKey { name: key.name.clone(), architecture: key.architecture.clone() }, relation.clone());
+    }
+    Ok(scoped)
+}
+
 #[derive(Clone)]
 struct Solver<'a> {
     catalog: &'a BTreeMap<PackageKey, PackageSummary>,
-    installed: &'a BTreeMap<String, String>,
-    installed_relations: &'a BTreeMap<String, InstalledRelations>,
+    installed: &'a BTreeMap<PackageKey, String>,
+    installed_relations: &'a BTreeMap<PackageKey, InstalledRelations>,
     visiting: BTreeSet<PackageKey>,
     done: BTreeSet<PackageKey>,
     plan: Vec<PlanStep>,
@@ -262,6 +323,20 @@ impl Solver<'_> {
             (false, true) => Ok(Some(all)),
             (false, false) => Ok(None),
         }
+    }
+
+    /// Resolve installed binary identity independently of repository candidate
+    /// metadata. This avoids conflating the installed native and all states.
+    fn installed_for_name(&self, name: &str) -> Result<Option<(&PackageKey, &String)>> {
+        let mut found = None;
+        for (key, version) in self.installed {
+            if key.name != name { continue; }
+            if found.is_some() {
+                bail!("ambiguous installed architectures for {name}");
+            }
+            found = Some((key, version));
+        }
+        Ok(found)
     }
 
     fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
@@ -312,7 +387,11 @@ impl Solver<'_> {
         // Preserve the established behavior: an already installed direct
         // alternative satisfies a dependency without changing package state.
         for alternative in group {
-            if let Some(installed) = self.installed.get(&alternative.name) {
+            if let Some((installed_key, installed)) = self.installed_for_name(&alternative.name)? {
+                let candidate_key = self.key_for(&alternative.name)?;
+                if candidate_key.as_ref().is_some_and(|key| key != installed_key) {
+                    bail!("installed and repository binary identities disagree for {}", alternative.name);
+                }
                 let allowed_installed = !alternative.any_arch
                     || self.key_for(&alternative.name)?.and_then(|key| self.catalog.get(&key))
                         .is_some_and(|item| item.multi_arch == "allowed" && item.version == *installed);
@@ -357,54 +436,51 @@ impl Solver<'_> {
     /// staged upgrades plus all staged additions). Include reverse relations
     /// from installed dpkg status, rather than newest repository metadata.
     fn check_negative_relations(&self) -> Result<()> {
-        // Preserve exact binary identities for staged candidates. The
-        // relationship evaluator is still conservative and native-only.
-        let mut staged_identities = BTreeSet::new();
-        for step in &self.plan {
-            let key = PackageKey { name: step.package.clone(), architecture: step.architecture.clone() };
-            if !self.catalog.contains_key(&key) || !staged_identities.insert(key) {
-                bail!("invalid or duplicate staged binary identity");
-            }
-        }
-        let staged: BTreeMap<&str, &str> = self.plan.iter()
-            .map(|step| (step.package.as_str(), step.version.as_str())).collect();
-        for (new_name, new_version) in &staged {
-            let new_pkg = self.key_for(new_name)?.and_then(|key| self.catalog.get(&key))
+        // Exact binary identities are used for both planned and installed
+        // versions. No name-only merge may override a foreign or all package.
+        let staged: BTreeMap<PackageKey, &PlanStep> = self.plan.iter().map(|step| (
+            PackageKey { name: step.package.clone(), architecture: step.architecture.clone() }, step
+        )).collect();
+        for (new_key, new_step) in &staged {
+            let new_pkg = self.catalog.get(new_key)
                 .context("staged package missing repository metadata")?;
-            for (installed_name, installed_version) in self.installed {
-                if installed_name == *new_name { continue; }
-                let effective_version = staged.get(installed_name.as_str())
-                    .copied().unwrap_or(installed_version);
+            for (installed_key, installed_version) in self.installed {
+                if installed_key == new_key { continue; }
+                let effective_version = staged.get(installed_key)
+                    .map(|item| item.version.as_str()).unwrap_or(installed_version);
                 let (conflicts, breaks, provider) =
-                    if let Some(pkg) = self.key_for(installed_name)?.and_then(|key| self.catalog.get(&key))
-                        .filter(|_| staged.contains_key(installed_name.as_str())) {
+                    if let Some(pkg) = staged.get(installed_key)
+                        .and_then(|_| self.catalog.get(installed_key)) {
                         (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
-                    } else if let Some(status) = self.installed_relations.get(installed_name) {
+                    } else if let Some(status) = self.installed_relations.get(installed_key) {
                         if status.version != *installed_version {
-                            bail!("inconsistent dpkg installed metadata for {installed_name}");
+                            bail!("inconsistent installed metadata for {}:{}",
+                                installed_key.name, installed_key.architecture);
                         }
                         (status.conflicts.as_str(), status.breaks.as_str(), status.provides.as_str())
                     } else {
-                        // Tests and legacy callers may lack installed relation
-                        // metadata. Never infer unknown reverse relationships.
+                        // Only test fixtures may omit installed relationship
+                        // records; real previews require exact agreement.
                         ("", "", "")
                     };
-                if relations_hit(&new_pkg.conflicts, installed_name, effective_version, provider)?
-                    || relations_hit(&new_pkg.breaks, installed_name, effective_version, provider)?
-                    || relations_hit(conflicts, new_name, new_version, &new_pkg.provides)?
-                    || relations_hit(breaks, new_name, new_version, &new_pkg.provides)? {
-                    bail!("Conflicts/Breaks between planned {new_name} and installed {installed_name}");
+                if relations_hit(&new_pkg.conflicts, &installed_key.name, effective_version, provider)?
+                    || relations_hit(&new_pkg.breaks, &installed_key.name, effective_version, provider)?
+                    || relations_hit(conflicts, &new_key.name, &new_step.version, &new_pkg.provides)?
+                    || relations_hit(breaks, &new_key.name, &new_step.version, &new_pkg.provides)? {
+                    bail!("Conflicts/Breaks between planned {}:{} and installed {}:{}",
+                        new_key.name, new_key.architecture, installed_key.name, installed_key.architecture);
                 }
             }
-            for (peer_name, peer_version) in &staged {
-                if peer_name == new_name { continue; }
-                let peer = self.key_for(peer_name)?.and_then(|key| self.catalog.get(&key))
+            for (peer_key, peer_step) in &staged {
+                if peer_key == new_key { continue; }
+                let peer = self.catalog.get(peer_key)
                     .context("staged peer missing repository metadata")?;
-                if relations_hit(&new_pkg.conflicts, peer_name, peer_version, &peer.provides)?
-                    || relations_hit(&new_pkg.breaks, peer_name, peer_version, &peer.provides)?
-                    || relations_hit(&peer.conflicts, new_name, new_version, &new_pkg.provides)?
-                    || relations_hit(&peer.breaks, new_name, new_version, &new_pkg.provides)? {
-                    bail!("Conflicts/Breaks between planned {new_name} and {peer_name}");
+                if relations_hit(&new_pkg.conflicts, &peer_key.name, &peer_step.version, &peer.provides)?
+                    || relations_hit(&new_pkg.breaks, &peer_key.name, &peer_step.version, &peer.provides)?
+                    || relations_hit(&peer.conflicts, &new_key.name, &new_step.version, &new_pkg.provides)?
+                    || relations_hit(&peer.breaks, &new_key.name, &new_step.version, &new_pkg.provides)? {
+                    bail!("Conflicts/Breaks between planned {}:{} and {}:{}",
+                        new_key.name, new_key.architecture, peer_key.name, peer_key.architecture);
                 }
             }
         }
@@ -442,10 +518,16 @@ impl Solver<'_> {
         self.resolve_groups(&groups, 0)?;
         self.visiting.remove(key);
         self.done.insert(key.clone());
-        let installed = self.installed.get(&requested.name).cloned();
+        let installed_identity = self.installed_for_name(&requested.name)?;
+        let installed = installed_identity.map(|(_, version)| version.clone());
+        if let Some((installed_key, _)) = installed_identity {
+            if installed_key != key {
+                bail!("installed binary identity differs from proposed {}:{}", key.name, key.architecture);
+            }
+        }
         if installed.as_deref() != Some(current.version.as_str()) {
             if let Some(existing) = &installed {
-                if let Some(relation) = self.installed_relations.get(&requested.name) {
+                if let Some(relation) = installed_identity.and_then(|(identity, _)| self.installed_relations.get(identity)) {
                     ensure_unchanged_protected(
                         &requested.name, existing, &current.version, relation,
                     )?;
@@ -532,22 +614,14 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
     let keyed = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     let catalog = keyed;
-    let installed = cache_query::installed_catalog(status, architecture)?;
-    let installed_relations = read_installed_relations(status, architecture)?;
-    // Missing installed relationship metadata would silently bypass critical
-    // flags. Require the installed catalog and parsed dpkg records to agree.
-    for (name, version) in &installed {
-        let entry = installed_relations.get(name)
-            .with_context(|| format!("missing installed safety metadata for {name}"))?;
-        if entry.version != *version {
-            bail!("inconsistent installed version metadata for {name}");
-        }
-    }
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let complete_relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &complete_relations)?;
+    let installed = scoped_installed(&complete, architecture)?;
+    let installed_relations = scoped_relations(&complete_relations, architecture)?;
     let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
-    let full_installed = cache_query::installed_catalog_by_arch(status)?;
-    reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
-    let keyed_relations = read_installed_relations_by_arch(status)?;
-    reject_foreign_negative_relations(&catalog, &keyed_relations, &plan, architecture)?;
+    reject_foreign_identity_overlap(&complete, &plan, architecture)?;
+    reject_foreign_negative_relations(&catalog, &complete_relations, &plan, architecture)?;
     Ok(plan)
 }
 
@@ -555,8 +629,8 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
 /// metadata selection. No transaction state or dpkg writes.
 fn solve_catalog(
     catalog: &BTreeMap<PackageKey, PackageSummary>,
-    installed: &BTreeMap<String, String>,
-    installed_relations: &BTreeMap<String, InstalledRelations>,
+    installed: &BTreeMap<PackageKey, String>,
+    installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
     package: &str, max_packages: usize, architecture: &str,
 ) -> Result<Vec<PlanStep>> {
     let mut solver = Solver {
@@ -586,17 +660,11 @@ pub fn preview_with_policy(
     crate::apt_pin_eval::evaluate_with_phasing(
         package, &[], &preferences, target_release.as_deref(), None,
     )?;
-    let installed = cache_query::installed_catalog(status, architecture)?;
-    let installed_relations = read_installed_relations(status, architecture)?;
-    // Missing installed relationship metadata would silently bypass critical
-    // flags. Require the installed catalog and parsed dpkg records to agree.
-    for (name, version) in &installed {
-        let entry = installed_relations.get(name)
-            .with_context(|| format!("missing installed safety metadata for {name}"))?;
-        if entry.version != *version {
-            bail!("inconsistent installed version metadata for {name}");
-        }
-    }
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let complete_relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &complete_relations)?;
+    let installed = scoped_installed(&complete, architecture)?;
+    let installed_relations = scoped_relations(&complete_relations, architecture)?;
     let mut catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
@@ -609,7 +677,7 @@ pub fn preview_with_policy(
             if validated.contains(name) { continue; }
             let origins = crate::package_provenance::verified_version_origins(cache, name, architecture)?;
             let chosen = crate::apt_pin_eval::preview_candidate_with_phasing(
-                name, &origins, &preferences, installed.get(name).map(String::as_str),
+                name, &origins, &preferences, installed.iter().find(|(key, _)| key.name == *name).map(|(_, version)| version.as_str()),
                 target_release.as_deref(), None,
             )?.candidate.with_context(|| format!("APT policy has no candidate for {name}"))?;
             if !origins.iter().any(|origin| origin.version == chosen) {
@@ -660,10 +728,8 @@ pub fn preview_with_policy(
                     target_release.as_deref(), None,
                 )?.candidate)
             })?;
-            let full_installed = cache_query::installed_catalog_by_arch(status)?;
-            reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
-            let keyed_relations = read_installed_relations_by_arch(status)?;
-            reject_foreign_negative_relations(&catalog, &keyed_relations, &plan, architecture)?;
+            reject_foreign_identity_overlap(&complete, &plan, architecture)?;
+            reject_foreign_negative_relations(&catalog, &complete_relations, &plan, architecture)?;
             return Ok(plan);
         }
     }
@@ -703,10 +769,43 @@ mod tests {
             name: item.name.clone(), architecture: item.architecture.clone(),
         }, item.clone())).collect()
     }
+    fn test_keyed_versions(
+        catalog: &BTreeMap<PackageKey, PackageSummary>,
+        installed: &BTreeMap<String, String>, arch: &str,
+    ) -> BTreeMap<PackageKey, String> {
+        installed.iter().map(|(name, value)| {
+            let key = metadata_query::native_key_for(catalog, name, arch).unwrap_or(
+                PackageKey { name: name.clone(), architecture: arch.into() }
+            );
+            (key, value.clone())
+        }).collect()
+    }
+    fn test_keyed_relations(
+        catalog: &BTreeMap<PackageKey, PackageSummary>,
+        relations: &BTreeMap<String, InstalledRelations>, arch: &str,
+    ) -> BTreeMap<PackageKey, InstalledRelations> {
+        relations.iter().map(|(name, value)| {
+            let key = metadata_query::native_key_for(catalog, name, arch).unwrap_or(
+                PackageKey { name: name.clone(), architecture: arch.into() }
+            );
+            (key, value.clone())
+        }).collect()
+    }
+    fn solve_catalog_test(
+        catalog: &BTreeMap<PackageKey, PackageSummary>,
+        installed: &BTreeMap<String, String>,
+        relations: &BTreeMap<String, InstalledRelations>,
+        package: &str, limit: usize, arch: &str,
+    ) -> Result<Vec<PlanStep>> {
+        let binary_installed = test_keyed_versions(catalog, installed, arch);
+        let binary_relations = test_keyed_relations(catalog, relations, arch);
+        solve_catalog(catalog, &binary_installed, &binary_relations, package, limit, arch)
+    }
     fn solve(catalog: &BTreeMap<String, PackageSummary>, installed: &BTreeMap<String,String>, name: &str) -> Result<Vec<PlanStep>> {
         let keyed = test_keyed(catalog);
+        let keyed_installed = test_keyed_versions(&keyed, installed, "amd64");
         let mut s = Solver {
-            catalog: &keyed, installed, installed_relations: &BTreeMap::new(),
+            catalog: &keyed, installed: &keyed_installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)),
         };
@@ -714,96 +813,60 @@ mod tests {
         Ok(s.plan)
     }
     #[test]
-    fn installed_relationships_keep_foreign_and_native_separate() {
-        let path = std::env::temp_dir().join(format!("rpt-relations-identity-{}", std::process::id()));
-        std::fs::write(&path, "\
-Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\nConflicts: oldnative\n\n\
-Package: libx\nVersion: 1\nArchitecture: i386\nStatus: hold ok installed\nConflicts: oldforeign\n\n\
-Package: docs\nVersion: 3\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
-        let all = read_installed_relations_by_arch(&path).unwrap();
-        assert_eq!(all.len(), 3);
-        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "amd64".into() }].conflicts, "oldnative");
-        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].conflicts, "oldforeign");
-        assert!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].held);
-        let native = native_installed_relations(&all, "amd64").unwrap();
-        assert_eq!(native.len(), 2);
-        assert_eq!(native["libx"].version, "2");
-        assert_eq!(native["docs"].version, "3");
-        std::fs::remove_file(path).unwrap();
+    fn installed_keyed_relations_reject_native_all_mismatch_even_same_version() {
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "lib".into(), architecture: "amd64".into() },
+            item("lib", "1", ""),
+        )]);
+        let installed = BTreeMap::from([(
+            PackageKey { name: "lib".into(), architecture: "all".into() },
+            "1".into(),
+        )]);
+        assert!(solve_catalog(&catalog, &installed, &BTreeMap::new(), "lib", 20, "amd64").is_err());
+        let root = BTreeMap::from([
+            (PackageKey { name: "app".into(), architecture: "amd64".into() },
+                item("app", "1", "lib")),
+            (PackageKey { name: "lib".into(), architecture: "amd64".into() },
+                item("lib", "1", "")),
+        ]);
+        assert!(solve_catalog(&root, &installed, &BTreeMap::new(), "app", 20, "amd64").is_err());
     }
 
     #[test]
-    fn installed_relationships_reject_native_all_collision_and_duplicate_identity() {
-        let path = std::env::temp_dir().join(format!("rpt-relations-duplicate-{}", std::process::id()));
-        std::fs::write(&path, "\
-Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
-Package: libx\nVersion: 2\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
-        let all = read_installed_relations_by_arch(&path).unwrap();
-        assert_eq!(all.len(), 2);
-        assert!(native_installed_relations(&all, "amd64").is_err());
-        std::fs::write(&path, "\
-Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
-Package: libx\nVersion: 3\nArchitecture: amd64\nStatus: install ok installed\n\n").unwrap();
-        assert!(read_installed_relations_by_arch(&path).is_err());
-        std::fs::remove_file(path).unwrap();
+    fn installed_all_reverse_conflict_checked_by_exact_identity() {
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "app".into(), architecture: "amd64".into() },
+            item("app", "1", ""),
+        )]);
+        let installed = BTreeMap::from([(
+            PackageKey { name: "blocker".into(), architecture: "all".into() },
+            "3".into(),
+        )]);
+        let relations = BTreeMap::from([(
+            PackageKey { name: "blocker".into(), architecture: "all".into() },
+            InstalledRelations {
+                version: "3".into(), breaks: "app (>= 1)".into(), ..Default::default()
+            },
+        )]);
+        assert!(solve_catalog(&catalog, &installed, &relations, "app", 20, "amd64").is_err());
     }
 
     #[test]
-    fn foreign_reverse_and_forward_conflicts_breaks_are_checked() {
-        let arch = "amd64";
-        let app = item("app", "2", "");
-        let key = PackageKey { name: "app".into(), architecture: arch.into() };
-        let plan = [PlanStep { package: "app".into(), architecture: arch.into(),
-            version: "2".into(), installed: None }];
-        let mut catalog = BTreeMap::from([(key, app.clone())]);
-        let other = PackageKey { name: "foreign-lib".into(), architecture: "i386".into() };
-        let mut installed = BTreeMap::from([(cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }, InstalledRelations {
-            version: "1".into(), ..Default::default()
-        })]);
-        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_ok());
-        // A foreign package's installed reverse relationship is authoritative.
-        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks = "app (>= 2)".into();
-        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks.clear();
-        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts = "app".into();
-        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts.clear();
-
-        // The staged native binary can itself conflict with an installed foreign name.
-        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
-            .unwrap().conflicts = "foreign-lib (>= 1)".into();
-        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
-            .unwrap().conflicts.clear();
-        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
-            .unwrap().breaks = "foreign-lib".into();
-        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
-            .unwrap().breaks.clear();
-
-        // Versioned virtual Provides on the installed foreign binary are checked.
-        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().provides = "foreign-virtual (= 2)".into();
-        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
-            .unwrap().conflicts = "foreign-virtual (>= 2)".into();
-        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
-    }
-
-    #[test]
-    fn installed_foreign_relations_remain_distinct_from_native() {
-        let path = std::env::temp_dir().join(format!("rpt-foreign-relations-{}", std::process::id()));
-        std::fs::write(&path, "\
-Package: libdemo\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
-Package: libdemo\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nConflicts: app (>= 3)\n\n\
-Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n").unwrap();
-        let keyed = read_installed_relations_by_arch(&path).unwrap();
-        assert_eq!(keyed.len(), 3);
-        let foreign = &keyed[&cache_query::InstalledKey { name: "libdemo".into(), architecture: "i386".into() }];
-        assert!(foreign.held);
-        assert_eq!(foreign.conflicts, "app (>= 3)");
-        let native = read_installed_relations(&path, "amd64").unwrap();
-        assert_eq!(native.len(), 2);
-        assert_eq!(native["libdemo"].version, "2");
-        std::fs::remove_file(path).unwrap();
+    fn installed_status_safety_metadata_reconciles_foreign_identities() {
+        let file = std::env::temp_dir().join(format!("rpt-keyed-relations-{}", std::process::id()));
+        std::fs::write(&file, "\
+Package: lib\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
+Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssential: yes\n\n").unwrap();
+        let complete = cache_query::installed_catalog_by_arch(&file).unwrap();
+        let relations = read_installed_relations_by_arch(&file).unwrap();
+        validate_installed_metadata(&complete, &relations).unwrap();
+        let selected = scoped_relations(&relations, "amd64").unwrap();
+        assert_eq!(selected.len(), 1);
+        let foreign = &relations[&cache_query::InstalledKey {
+            name: "lib".into(), architecture: "i386".into(),
+        }];
+        assert!(foreign.held && foreign.essential);
+        std::fs::remove_file(file).unwrap();
     }
 
     #[test]
@@ -839,7 +902,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
             ("app".into(), item("app", "1", "docs (>= 1)")),
             ("docs".into(), docs),
         ]);
-        let plan = solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+        let plan = solve_catalog_test(&test_keyed(&catalog), &BTreeMap::new(),
             &BTreeMap::new(), "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|p| (p.package.as_str(), p.architecture.as_str()))
             .collect::<Vec<_>>(), [("docs", "all"), ("app", "amd64")]);
@@ -856,7 +919,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
             (PackageKey { name: "lib".into(), architecture: "amd64".into() }, lib),
             (PackageKey { name: "lib".into(), architecture: "all".into() }, common),
         ]);
-        assert!(solve_catalog(&keyed, &BTreeMap::new(),
+        assert!(solve_catalog_test(&keyed, &BTreeMap::new(),
             &BTreeMap::new(), "app", 20, "amd64").is_err());
     }
 
@@ -872,7 +935,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         // different dependency graph from the latest published version.
         latest.insert("app".into(), item("app", "1", "lib (>= 1)"));
         latest.insert("lib".into(), item("lib", "1", ""));
-        let plan = solve_catalog(&test_keyed(&latest), &installed, &relations, "app", 20, "amd64").unwrap();
+        let plan = solve_catalog_test(&test_keyed(&latest), &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|x| (x.package.as_str(), x.version.as_str()))
             .collect::<Vec<_>>(), [("lib", "1"), ("app", "1")]);
     }
@@ -930,7 +993,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
                 ("app".into(), app.clone()),
                 ("interpreter".into(), interpreter.clone()),
             ]);
-            let result = solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+            let result = solve_catalog_test(&test_keyed(&catalog), &BTreeMap::new(),
                 &BTreeMap::new(), "app", 20, arch).unwrap();
             assert_eq!(result.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
                 ["interpreter", "app"]);
@@ -940,7 +1003,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
                 let catalog = BTreeMap::from([
                     ("app".into(), app.clone()), ("interpreter".into(), denied),
                 ]);
-                assert!(solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+                assert!(solve_catalog_test(&test_keyed(&catalog), &BTreeMap::new(),
                     &BTreeMap::new(), "app", 20, arch).is_err());
             }
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
@@ -995,7 +1058,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         let relations = BTreeMap::from([("held-dep".into(), InstalledRelations {
             version: "1".into(), held: true, ..Default::default()
         })]);
-        let plan = solve_catalog(&test_keyed(&catalog), &installed, &relations, "app", 20, "amd64").unwrap();
+        let plan = solve_catalog_test(&test_keyed(&catalog), &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["other", "app"]);
     }
 
@@ -1008,7 +1071,7 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
             if name == "essential" { state.essential = true; }
             else { state.protected = true; }
             let relations = BTreeMap::from([("core".into(), state)]);
-            assert!(solve_catalog(&test_keyed(&catalog), &installed, &relations, "core", 20, "amd64").is_err());
+            assert!(solve_catalog_test(&test_keyed(&catalog), &installed, &relations, "core", 20, "amd64").is_err());
         }
     }
     #[test]
@@ -1022,11 +1085,11 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
             ("lib".into(), item("lib", "2", "")),
         ]);
         let installed = BTreeMap::from([("lib".into(), "1".into())]);
-        assert!(solve_catalog(
+        assert!(solve_catalog_test(
             &test_keyed(&catalog), &installed, &installed_relations, "app", 20, "amd64",
         ).is_err());
         installed_relations.get_mut("lib").unwrap().held = false;
-        assert!(solve_catalog(
+        assert!(solve_catalog_test(
             &test_keyed(&catalog), &installed, &installed_relations, "app", 20, "amd64",
         ).is_ok());
     }
@@ -1191,8 +1254,10 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         let catalog = BTreeMap::from([("app".into(), item("app", "2", ""))]);
         let installed = BTreeMap::from([("legacy".into(), "3".into())]);
         let keyed = test_keyed(&catalog);
+        let binary_installed = test_keyed_versions(&keyed, &installed, "amd64");
+        let binary_relations = test_keyed_relations(&keyed, &installed_relations, "amd64");
         let mut solver = Solver {
-            catalog: &keyed, installed: &installed, installed_relations: &installed_relations,
+            catalog: &keyed, installed: &binary_installed, installed_relations: &binary_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)),
         };
@@ -1216,4 +1281,101 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         assert!(solve(&BTreeMap::from([("pkg".into(), p)]),
             &BTreeMap::from([("pkg".into(), "2".into())]), "pkg").is_err());
     }
+    #[test]
+    fn installed_relationships_keep_foreign_and_native_separate() {
+        let path = std::env::temp_dir().join(format!("rpt-relations-identity-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\nConflicts: oldnative\n\n\
+Package: libx\nVersion: 1\nArchitecture: i386\nStatus: hold ok installed\nConflicts: oldforeign\n\n\
+Package: docs\nVersion: 3\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
+        let all = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "amd64".into() }].conflicts, "oldnative");
+        assert_eq!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].conflicts, "oldforeign");
+        assert!(all[&cache_query::InstalledKey { name: "libx".into(), architecture: "i386".into() }].held);
+        let native = native_installed_relations(&all, "amd64").unwrap();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native["libx"].version, "2");
+        assert_eq!(native["docs"].version, "3");
+        std::fs::remove_file(path).unwrap();
+    }
+
+
+    #[test]
+    fn installed_relationships_reject_native_all_collision_and_duplicate_identity() {
+        let path = std::env::temp_dir().join(format!("rpt-relations-duplicate-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
+Package: libx\nVersion: 2\nArchitecture: all\nStatus: install ok installed\n\n").unwrap();
+        let all = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(native_installed_relations(&all, "amd64").is_err());
+        std::fs::write(&path, "\
+Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
+Package: libx\nVersion: 3\nArchitecture: amd64\nStatus: install ok installed\n\n").unwrap();
+        assert!(read_installed_relations_by_arch(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+
+    #[test]
+    fn foreign_reverse_and_forward_conflicts_breaks_are_checked() {
+        let arch = "amd64";
+        let app = item("app", "2", "");
+        let key = PackageKey { name: "app".into(), architecture: arch.into() };
+        let plan = [PlanStep { package: "app".into(), architecture: arch.into(),
+            version: "2".into(), installed: None }];
+        let mut catalog = BTreeMap::from([(key, app.clone())]);
+        let other = PackageKey { name: "foreign-lib".into(), architecture: "i386".into() };
+        let mut installed = BTreeMap::from([(cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }, InstalledRelations {
+            version: "1".into(), ..Default::default()
+        })]);
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_ok());
+        // A foreign package's installed reverse relationship is authoritative.
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks = "app (>= 2)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks.clear();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts = "app".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts.clear();
+
+        // The staged native binary can itself conflict with an installed foreign name.
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts = "foreign-lib (>= 1)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts.clear();
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().breaks = "foreign-lib".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().breaks.clear();
+
+        // Versioned virtual Provides on the installed foreign binary are checked.
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().provides = "foreign-virtual (= 2)".into();
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts = "foreign-virtual (>= 2)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+    }
+
+
+    #[test]
+    fn installed_foreign_relations_remain_distinct_from_native() {
+        let path = std::env::temp_dir().join(format!("rpt-foreign-relations-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libdemo\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
+Package: libdemo\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nConflicts: app (>= 3)\n\n\
+Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n").unwrap();
+        let keyed = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(keyed.len(), 3);
+        let foreign = &keyed[&cache_query::InstalledKey { name: "libdemo".into(), architecture: "i386".into() }];
+        assert!(foreign.held);
+        assert_eq!(foreign.conflicts, "app (>= 3)");
+        let native = read_installed_relations(&path, "amd64").unwrap();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native["libdemo"].version, "2");
+        std::fs::remove_file(path).unwrap();
+    }
+
+
 }

@@ -393,3 +393,7 @@ RPT now reads installed `Conflicts`, `Breaks`, `Provides`, hold, `Essential` and
 ### Foreign installed binary conflict guards
 
 Read-only planning checks staged native candidates against actual foreign-architecture installed `Conflicts`, `Breaks` and versioned virtual `Provides` from dpkg status, in both directions. This detects a conflict with a foreign package of a *different* name, not just unsafe same-name coexistence. Native package changes remain subject to APT policy and dpkg hold/Essential/Protected restrictions. No foreign removal, co-installation solver, or dpkg transaction is implemented.
+
+### Keyed installed-state and relationship evaluation
+
+The read-only native dependency solver now uses exact `(name, architecture)` keys for installed versions, holds, Essential/Protected and staged-vs-installed `Conflicts/Breaks`. It validates complete dpkg installed identities against relationship metadata, prevents native/all candidate mismatches even at the same version, and retains the separate foreign-architecture negative-relations check. This does not enable cross-architecture package transactions or co-installation.
