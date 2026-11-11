@@ -151,7 +151,7 @@ fn ensure_unchanged_protected(
 
 /// Read conflict metadata from the *installed* dpkg status, never infer it
 /// from the latest repository version. Dpkg status is local, not signed policy.
-fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+fn read_installed_relations_by_arch(status: &Path) -> Result<BTreeMap<PackageKey, InstalledRelations>> {
     let data = std::fs::read(status)?;
     if data.len() > 64 * 1024 * 1024 { bail!("dpkg status file exceeds safe size"); }
     let text = std::str::from_utf8(&data)?;
@@ -159,7 +159,7 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
     for record in crate::package_index::parse(text)? {
         let state = record.field("Status").context("dpkg stanza missing Status")?;
         if !crate::cache_query::is_installed_status(state) { continue; }
-        if !matches!(record.field("Architecture"), Some(a) if a == arch || a == "all") { continue; }
+        let architecture = record.field("Architecture").context("installed status missing Architecture")?;
         let name = record.field("Package").context("installed status missing Package")?;
         let version = record.field("Version").context("installed status missing Version")?;
         parse_atom(name)?;
@@ -173,11 +173,50 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
             essential: parse_critical_flag(record.field("Essential"), "Essential")?,
             protected: parse_critical_flag(record.field("Protected"), "Protected")?,
         };
-        if result.insert(name.to_owned(), entry).is_some() {
-            bail!("duplicate installed package in dpkg status: {name}");
+        let key = PackageKey { name: name.to_owned(), architecture: architecture.to_owned() };
+        if result.insert(key.clone(), entry).is_some() {
+            bail!("duplicate installed package in dpkg status: {}:{}", key.name, key.architecture);
         }
     }
     Ok(result)
+}
+
+/// Test/legacy native projection. New planning paths keep the full binary
+/// identity and only derive a name-keyed view for old unit fixtures.
+#[cfg(test)]
+fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+    let mut result = BTreeMap::new();
+    for (key, relation) in read_installed_relations_by_arch(status)? {
+        if key.architecture != arch && key.architecture != "all" { continue; }
+        if result.insert(key.name.clone(), relation).is_some() {
+            bail!("ambiguous native/all installed relation for {}", key.name);
+        }
+    }
+    Ok(result)
+}
+
+/// Check that all installed binary identities have exactly matching dpkg
+/// safety metadata. Foreign identities are retained, never overwritten.
+fn validate_installed_metadata(
+    installed: &BTreeMap<cache_query::InstalledKey, cache_query::Installed>,
+    relations: &BTreeMap<PackageKey, InstalledRelations>,
+) -> Result<()> {
+    for (key, item) in installed {
+        let relation = relations.get(key).with_context(|| format!(
+            "missing installed safety metadata for {}:{}", key.name, key.architecture
+        ))?;
+        if relation.version != item.version {
+            bail!("inconsistent installed version for {}:{}", key.name, key.architecture);
+        }
+    }
+    for key in relations.keys() {
+        if !installed.contains_key(&cache_query::InstalledKey {
+            name: key.name.clone(), architecture: key.architecture.clone()
+        }) {
+            bail!("installed dpkg safety metadata has unknown binary identity");
+        }
+    }
+    Ok(())
 }
 
 /// A negative relationship must be a simple comma-separated set of names
