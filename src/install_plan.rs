@@ -378,7 +378,11 @@ impl Solver<'_> {
         // Preserve the established behavior: an already installed direct
         // alternative satisfies a dependency without changing package state.
         for alternative in group {
-            if let Some((_, installed)) = self.installed_for_name(&alternative.name)? {
+            if let Some((installed_key, installed)) = self.installed_for_name(&alternative.name)? {
+                let candidate_key = self.key_for(&alternative.name)?;
+                if candidate_key.as_ref().is_some_and(|key| key != installed_key) {
+                    bail!("installed and repository binary identities disagree for {}", alternative.name);
+                }
                 let allowed_installed = !alternative.any_arch
                     || self.key_for(&alternative.name)?.and_then(|key| self.catalog.get(&key))
                         .is_some_and(|item| item.multi_arch == "allowed" && item.version == *installed);
@@ -508,7 +512,7 @@ impl Solver<'_> {
         let installed_identity = self.installed_for_name(&requested.name)?;
         let installed = installed_identity.map(|(_, version)| version.clone());
         if let Some((installed_key, _)) = installed_identity {
-            if installed_key != key && installed.as_deref() != Some(current.version.as_str()) {
+            if installed_key != key {
                 bail!("installed binary identity differs from proposed {}:{}", key.name, key.architecture);
             }
         }
@@ -759,6 +763,63 @@ mod tests {
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
     }
+    #[test]
+    fn installed_keyed_relations_reject_native_all_mismatch_even_same_version() {
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "lib".into(), architecture: "amd64".into() },
+            item("lib", "1", ""),
+        )]);
+        let installed = BTreeMap::from([(
+            PackageKey { name: "lib".into(), architecture: "all".into() },
+            "1".into(),
+        )]);
+        assert!(solve_catalog(&catalog, &installed, &BTreeMap::new(), "lib", 20, "amd64").is_err());
+        let root = BTreeMap::from([
+            (PackageKey { name: "app".into(), architecture: "amd64".into() },
+                item("app", "1", "lib")),
+            (PackageKey { name: "lib".into(), architecture: "amd64".into() },
+                item("lib", "1", "")),
+        ]);
+        assert!(solve_catalog(&root, &installed, &BTreeMap::new(), "app", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn installed_all_reverse_conflict_checked_by_exact_identity() {
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "app".into(), architecture: "amd64".into() },
+            item("app", "1", ""),
+        )]);
+        let installed = BTreeMap::from([(
+            PackageKey { name: "blocker".into(), architecture: "all".into() },
+            "3".into(),
+        )]);
+        let relations = BTreeMap::from([(
+            PackageKey { name: "blocker".into(), architecture: "all".into() },
+            InstalledRelations {
+                version: "3".into(), breaks: "app (>= 1)".into(), ..Default::default()
+            },
+        )]);
+        assert!(solve_catalog(&catalog, &installed, &relations, "app", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn installed_status_safety_metadata_reconciles_foreign_identities() {
+        let file = std::env::temp_dir().join(format!("rpt-keyed-relations-{}", std::process::id()));
+        std::fs::write(&file, "\
+Package: lib\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
+Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssential: yes\n\n").unwrap();
+        let complete = cache_query::installed_catalog_by_arch(&file).unwrap();
+        let relations = read_installed_relations_by_arch(&file).unwrap();
+        validate_installed_metadata(&complete, &relations).unwrap();
+        let selected = scoped_relations(&relations, "amd64").unwrap();
+        assert_eq!(selected.len(), 1);
+        let foreign = &relations[&PackageKey {
+            name: "lib".into(), architecture: "i386".into(),
+        }];
+        assert!(foreign.held && foreign.essential);
+        std::fs::remove_file(file).unwrap();
+    }
+
     #[test]
     fn planned_foreign_coinstalled_identity_fails_closed() {
         let entries = BTreeMap::from([
