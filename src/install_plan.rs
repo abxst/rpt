@@ -38,7 +38,15 @@ fn parse_atom(text: &str) -> Result<Requirement> {
         }
         (name.trim(), Some((fields[0].to_owned(), fields[1].to_owned())))
     } else { (atom, None) };
-    if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'.' | b'-')) {
+    // Debian binary package names contain at least two characters, begin
+    // with an ASCII lowercase letter or digit, and contain only lowercase
+    // letters, digits, '+', '-' and '.'. Reject invalid metadata before
+    // dependency resolution instead of accepting names dpkg cannot install.
+    let valid_name = name.len() >= 2
+        && name.as_bytes().first().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()
+            || matches!(c, b'+' | b'.' | b'-'));
+    if !valid_name {
         bail!("unsupported dependency name: {name}");
     }
     if let Some((_, required)) = &constraint { version::compare(required, required)?; }
@@ -1458,6 +1466,18 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         assert_eq!(native.len(), 2);
         assert_eq!(native["libdemo"].version, "2");
         std::fs::remove_file(path).unwrap();
+    }
+
+
+    #[test]
+    fn dependency_names_follow_debian_binary_package_rules() {
+        for valid in ["libc6", "python3-apt", "g++", "a.b", "0ad"] {
+            assert!(parse_atom(valid).is_ok(), "expected valid: {valid}");
+        }
+        for invalid in ["a", "Apt", "-apt", ".apt", "+apt", "apt_name", "apt/name", "apt name"] {
+            assert!(parse_atom(invalid).is_err(), "expected invalid: {invalid}");
+            assert!(parse_atom_for_arch(&format!("{invalid}:native"), "amd64").is_err());
+        }
     }
 
 
