@@ -19,6 +19,7 @@ struct Requirement {
     name: String,
     constraint: Option<(String, String)>,
     any_arch: bool,
+    requested_arch: Option<String>,
 }
 
 fn parse_atom(text: &str) -> Result<Requirement> {
@@ -38,19 +39,12 @@ fn parse_atom(text: &str) -> Result<Requirement> {
         }
         (name.trim(), Some((fields[0].to_owned(), fields[1].to_owned())))
     } else { (atom, None) };
-    // Debian binary package names contain at least two characters, begin
-    // with an ASCII lowercase letter or digit, and contain only lowercase
-    // letters, digits, '+', '-' and '.'. Reject invalid metadata before
-    // dependency resolution instead of accepting names dpkg cannot install.
-    let valid_name = name.len() >= 2
-        && name.as_bytes().first().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()
-            || matches!(c, b'+' | b'.' | b'-'));
-    if !valid_name {
+    if name.len() < 2 || !name.as_bytes()[0].is_ascii_lowercase() && !name.as_bytes()[0].is_ascii_digit()
+        || !name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'.' | b'-')) {
         bail!("unsupported dependency name: {name}");
     }
     if let Some((_, required)) = &constraint { version::compare(required, required)?; }
-    Ok(Requirement { name: name.to_owned(), constraint, any_arch: false })
+    Ok(Requirement { name: name.to_owned(), constraint, any_arch: false, requested_arch: None })
 }
 
 /// Support only native-architecture dependency qualifiers. Foreign-arch
@@ -61,8 +55,9 @@ fn parse_atom_for_arch(text: &str, arch: &str) -> Result<Requirement> {
     let (head, tail) = atom.split_once('(').map_or((atom, None), |(h, t)| (h, Some(t)));
     let head = head.trim();
     let normalized = if let Some((name, qualifier)) = head.split_once(':') {
-        if qualifier != "native" && qualifier != arch && qualifier != "any" {
-            bail!("unsupported foreign or ambiguous architecture qualifier: {qualifier}");
+        if qualifier != "native" && qualifier != "any"
+            && (qualifier.is_empty() || !qualifier.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')) {
+            bail!("invalid architecture qualifier: {qualifier}");
         }
         if name.is_empty() || qualifier.contains(':') {
             bail!("invalid architecture-qualified dependency");
@@ -75,7 +70,107 @@ fn parse_atom_for_arch(text: &str, arch: &str) -> Result<Requirement> {
     };
     let mut requirement = parse_atom(&rebuilt)?;
     requirement.any_arch = head.ends_with(":any");
+    requirement.requested_arch = head.split_once(':').and_then(|(_, qualifier)| {
+        if qualifier == "any" { None }
+        else if qualifier == "native" { Some(arch.to_owned()) }
+        else { Some(qualifier.to_owned()) }
+    });
     Ok(requirement)
+}
+
+/// Preflight a possible cross-architecture co-installation without mutating
+/// package state. Debian permits same-name, different-architecture binaries
+/// to coexist only when both declare Multi-Arch: same and have identical
+/// versions. This check does not authorize installing a foreign package:
+/// the planner still requires a complete foreign-architecture resolver.
+fn validate_multiarch_same_pair(
+    native: &PackageSummary,
+    foreign: &PackageSummary,
+) -> Result<()> {
+    if native.name != foreign.name {
+        bail!("Multi-Arch pair must refer to the same package name");
+    }
+    if native.architecture == foreign.architecture
+        || native.architecture == "all" || foreign.architecture == "all" {
+        bail!("Multi-Arch co-installation requires two distinct concrete architectures");
+    }
+    if native.multi_arch != "same" || foreign.multi_arch != "same" {
+        bail!("cross-architecture co-installation requires Multi-Arch: same on both binaries");
+    }
+    if version::compare(&native.version, &foreign.version)? != Ordering::Equal {
+        bail!("cross-architecture co-installation requires identical package versions");
+    }
+    Ok(())
+}
+
+/// Resolve a foreign co-installation partner by exact binary identity.
+/// The foreign candidate must be present in the verified catalog and pass
+/// Multi-Arch: same validation before a planner may consider it.
+#[allow(dead_code)] // Foreign package installation remains fail-closed until solver integration.
+fn validated_foreign_partner<'a>(
+    catalog: &'a BTreeMap<PackageKey, PackageSummary>,
+    native: &PackageSummary,
+    foreign_arch: &str,
+) -> Result<&'a PackageSummary> {
+    let key = PackageKey {
+        name: native.name.clone(),
+        architecture: foreign_arch.to_owned(),
+    };
+    let foreign = catalog.get(&key).with_context(|| format!(
+        "missing foreign candidate {}:{foreign_arch}", native.name
+    ))?;
+    validate_multiarch_same_pair(native, foreign)?;
+    Ok(foreign)
+}
+
+/// Validate every pair in a proposed multi-architecture install set.
+/// This deliberately does not infer removals, version synchronization, or
+/// foreign candidates. Callers must supply the exact verified candidate
+/// metadata for each planned binary identity.
+fn validate_multiarch_plan(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    steps: &[PlanStep],
+) -> Result<()> {
+    let mut staged = BTreeMap::<PackageKey, &PackageSummary>::new();
+    for step in steps {
+        let key = PackageKey {
+            name: step.package.clone(),
+            architecture: step.architecture.clone(),
+        };
+        let candidate = catalog.get(&key).with_context(|| format!(
+            "missing verified candidate {}:{}", step.package, step.architecture
+        ))?;
+        if candidate.name != key.name || candidate.architecture != key.architecture
+            || candidate.version != step.version {
+            bail!("inconsistent verified candidate identity or version for {}:{}", key.name, key.architecture);
+        }
+        // Unknown Multi-Arch declarations cannot be treated as 'no':
+        // doing so could silently change dependency and co-install semantics.
+        if !matches!(candidate.multi_arch.as_str(), "no" | "same" | "foreign" | "allowed") {
+            bail!("unsupported Multi-Arch declaration for {}:{}", step.package, step.architecture);
+        }
+        if staged.insert(key, candidate).is_some() {
+            bail!("duplicate staged binary identity {}:{}", step.package, step.architecture);
+        }
+    }
+    // No package with Architecture: all may share its binary name with a
+    // concrete architecture in the same transaction. Such a projection
+    // would silently alias two distinct dpkg identities.
+    for left_key in staged.keys() {
+        for right_key in staged.keys() {
+            if left_key >= right_key || left_key.name != right_key.name { continue; }
+            if left_key.architecture == "all" || right_key.architecture == "all" {
+                bail!("Architecture: all cannot be co-staged with a concrete binary of the same name");
+            }
+        }
+    }
+    for (left_key, left) in &staged {
+        for (right_key, right) in &staged {
+            if left_key >= right_key || left_key.name != right_key.name { continue; }
+            validate_multiarch_same_pair(left, right)?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_groups_for_arch(raw: &str, arch: &str) -> Result<Vec<Vec<Requirement>>> {
@@ -125,6 +220,7 @@ fn capability_satisfies(cap: &Requirement, required: &Requirement) -> Result<boo
 #[derive(Clone, Debug, Default)]
 struct InstalledRelations {
     version: String,
+    multi_arch: String,
     conflicts: String,
     breaks: String,
     replaces: String,
@@ -175,6 +271,7 @@ fn read_installed_relations_by_arch(status: &Path) -> Result<BTreeMap<cache_quer
         version::compare(version, version)?;
         let entry = InstalledRelations {
             version: version.into(),
+            multi_arch: record.field("Multi-Arch").unwrap_or("no").into(),
             conflicts: record.field("Conflicts").unwrap_or("").into(),
             breaks: record.field("Breaks").unwrap_or("").into(),
             replaces: record.field("Replaces").unwrap_or("").into(),
@@ -230,10 +327,25 @@ fn validate_installed_metadata(
         if relation.version != item.version {
             bail!("inconsistent installed version for {}:{}", key.name, key.architecture);
         }
+        if !matches!(relation.multi_arch.as_str(), "no" | "same" | "foreign" | "allowed") {
+            bail!("unsupported installed Multi-Arch declaration for {}:{}", key.name, key.architecture);
+        }
     }
     for key in relations.keys() {
         if !installed.contains_key(key) {
             bail!("installed dpkg safety metadata has unknown binary identity");
+        }
+    }
+    // Validate existing co-installed binaries before planning any mutation.
+    // A corrupt dpkg state must never be used as the basis for a new plan.
+    for (left_key, left) in relations {
+        for (right_key, right) in relations {
+            if left_key >= right_key || left_key.name != right_key.name { continue; }
+            if left_key.architecture == "all" || right_key.architecture == "all"
+                || left.multi_arch != "same" || right.multi_arch != "same"
+                || version::compare(&left.version, &right.version)? != Ordering::Equal {
+                bail!("inconsistent installed Multi-Arch co-installation for {}", left_key.name);
+            }
         }
     }
     Ok(())
@@ -362,6 +474,16 @@ impl Solver<'_> {
     }
 
     fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
+        if let Some(requested_arch) = &required.requested_arch {
+            let explicit = PackageKey { name: required.name.clone(), architecture: requested_arch.clone() };
+            if let Some(item) = self.catalog.get(&explicit) {
+                if required.any_arch { bail!("conflicting architecture qualifiers"); }
+                return Ok(if satisfies(&item.version, required)? { Some(explicit) } else { None });
+            }
+            if requested_arch != &self.architecture {
+                return Ok(None); // Never silently substitute a native or all binary.
+            }
+        }
         if let Some(key) = self.key_for(&required.name)? {
             let real = &self.catalog[&key];
             if required.any_arch && real.multi_arch != "allowed" {
@@ -374,6 +496,13 @@ impl Solver<'_> {
         }
         let mut candidates = Vec::new();
         for (key, item) in self.catalog {
+            // A virtual provider must be installable in this dependency
+            // architecture. A foreign binary must not satisfy a native
+            // dependency merely because it advertises the same capability.
+            if key.architecture != self.architecture && key.architecture != "all" {
+                continue;
+            }
+            if required.any_arch { continue; }
             let mut matches = false;
             for cap in provides(item)? {
                 if capability_satisfies(&cap, required)? {
@@ -395,9 +524,17 @@ impl Solver<'_> {
     fn resolve(&mut self, requested: &Requirement) -> Result<()> {
         let concrete = self.concrete(requested)?
             .with_context(|| format!("unresolved dependency {} (no matching real package or provider)", requested.name))?;
-        self.resolve_concrete(&concrete, &Requirement {
-            name: concrete.name.clone(), constraint: None, any_arch: false,
-        })
+        if concrete.name == requested.name {
+            self.resolve_concrete(&concrete, requested)
+        } else {
+            // The virtual capability constraint was checked against Provides
+            // in concrete(); it is not a constraint on the provider's own version.
+            let actual = Requirement {
+                name: concrete.name.clone(), constraint: None,
+                any_arch: false, requested_arch: Some(concrete.architecture.clone()),
+            };
+            self.resolve_concrete(&concrete, &actual)
+        }
     }
 
     /// Explore a branch with a copy of the entire partial plan. Commit only
@@ -409,8 +546,18 @@ impl Solver<'_> {
         // Preserve the established behavior: an already installed direct
         // alternative satisfies a dependency without changing package state.
         for alternative in group {
-            if let Some((installed_key, installed)) = self.installed_for_name(&alternative.name)? {
-                let candidate_key = self.key_for(&alternative.name)?;
+            let selected_installed = if let Some(arch) = &alternative.requested_arch {
+                let exact = PackageKey { name: alternative.name.clone(), architecture: arch.clone() };
+                self.installed.get_key_value(&exact)
+            } else {
+                self.installed_for_name(&alternative.name)?
+            };
+            if let Some((installed_key, installed)) = selected_installed {
+                let candidate_key = if alternative.requested_arch.is_some() {
+                    Some(installed_key.clone())
+                } else {
+                    self.key_for(&alternative.name)?
+                };
                 if candidate_key.as_ref().is_some_and(|key| key != installed_key) {
                     bail!("installed and repository binary identities disagree for {}", alternative.name);
                 }
@@ -437,9 +584,24 @@ impl Solver<'_> {
             if remaining == 0 { bail!("dependency branch budget exhausted"); }
             self.branch_budget.set(remaining - 1);
             let mut branch = self.clone();
-            let requirement = Requirement { name: option.name.clone(), constraint: None, any_arch: false };
+            // Preserve the originating dependency constraint and qualifier.
+            // An alternative must not be silently weakened to an unversioned
+            // package request when exploring a backtracking branch.
+            let matching = group.iter().find(|req| {
+                branch.concrete(req).ok().flatten().as_ref() == Some(&option)
+            });
             // Only branch-local resolution errors are candidates for retry.
-            if branch.resolve_concrete(&option, &requirement).is_ok()
+            if matching.is_some_and(|req| {
+                let actual = if req.name == option.name {
+                    req.clone()
+                } else {
+                    Requirement {
+                        name: option.name.clone(), constraint: None,
+                        any_arch: false, requested_arch: Some(option.architecture.clone()),
+                    }
+                };
+                branch.resolve_concrete(&option, &actual).is_ok()
+            })
                 && branch.resolve_groups(groups, index + 1).is_ok() {
                 if winner.is_some() {
                     bail!("multiple viable dependency alternatives; full APT solver required");
@@ -546,21 +708,22 @@ impl Solver<'_> {
             bail!("dependency plan exceeded maximum package count");
         }
         self.visiting.insert(key.clone());
-        let groups = parse_groups_for_arch(&current.pre_depends, &self.architecture)?.into_iter()
-            .chain(parse_groups_for_arch(&current.depends, &self.architecture)?).collect::<Vec<_>>();
+        let dependency_arch = if current.architecture == "all" { &self.architecture } else { &current.architecture };
+        let groups = parse_groups_for_arch(&current.pre_depends, dependency_arch)?.into_iter()
+            .chain(parse_groups_for_arch(&current.depends, dependency_arch)?).collect::<Vec<_>>();
         self.resolve_groups(&groups, 0)?;
         self.visiting.remove(key);
         self.done.insert(key.clone());
-        let installed_identity = self.installed_for_name(&requested.name)?;
-        let installed = installed_identity.map(|(_, version)| version.clone());
-        if let Some((installed_key, _)) = installed_identity {
-            if installed_key != key {
-                bail!("installed binary identity differs from proposed {}:{}", key.name, key.architecture);
-            }
+        let installed = self.installed.get(key).cloned();
+        if self.installed.keys().any(|existing| {
+            existing.name == key.name && existing != key
+                && (existing.architecture == "all" || key.architecture == "all")
+        }) {
+            bail!("installed and repository binary identities disagree for {}", key.name);
         }
         if installed.as_deref() != Some(current.version.as_str()) {
             if let Some(existing) = &installed {
-                if let Some(relation) = installed_identity.and_then(|(identity, _)| self.installed_relations.get(identity)) {
+                if let Some(relation) = self.installed_relations.get(key) {
                     ensure_unchanged_protected(
                         &requested.name, existing, &current.version, relation,
                     )?;
@@ -573,7 +736,7 @@ impl Solver<'_> {
                 }
             }
             self.plan.push(PlanStep {
-                package: requested.name.clone(), architecture: key.architecture.clone(),
+                package: key.name.clone(), architecture: key.architecture.clone(),
                 version: current.version.clone(), installed,
             });
             self.check_negative_relations()?;
@@ -593,6 +756,9 @@ fn reject_foreign_negative_relations(
     architecture: &str,
 ) -> Result<()> {
     for step in plan {
+        if step.architecture != architecture && step.architecture != "all" {
+            bail!("foreign-architecture transaction step requires a complete foreign resolver");
+        }
         let staged_key = PackageKey {
             name: step.package.clone(), architecture: step.architecture.clone(),
         };
@@ -605,9 +771,15 @@ fn reject_foreign_negative_relations(
         }
         for (key, foreign) in installed {
             if key.architecture == architecture || key.architecture == "all" { continue; }
-            if key.name == step.package {
-                bail!("planned {} overlaps installed foreign architecture {}; full Multi-Arch solver required",
-                    key.name, key.architecture);
+            if !matches!(foreign.multi_arch.as_str(), "no" | "same" | "foreign" | "allowed") {
+                bail!("invalid installed Multi-Arch declaration for {}:{}", key.name, key.architecture);
+            }
+            if key.name == step.package
+                && (key.architecture == "all" || step.architecture == "all"
+                    || proposed.multi_arch != "same" || foreign.multi_arch != "same"
+                    || version::compare(&step.version, &foreign.version)? != Ordering::Equal) {
+                bail!("unsafe cross-architecture co-installation of {}:{} with installed {}:{}",
+                    step.package, step.architecture, key.name, key.architecture);
             }
             if relations_hit(&proposed.conflicts, &key.name, &foreign.version, &foreign.provides)?
                 || relations_hit(&proposed.breaks, &key.name, &foreign.version, &foreign.provides)?
@@ -630,6 +802,7 @@ fn reject_foreign_negative_relations(
 /// with a same-name foreign installed counterpart could require Multi-Arch:
 /// same version synchronization, file overlap checks or removals. The planner
 /// cannot safely assume any such action, so it refuses these cases.
+#[allow(dead_code)]
 fn reject_foreign_identity_overlap(
     entries: &BTreeMap<cache_query::InstalledKey, cache_query::Installed>,
     steps: &[PlanStep], architecture: &str,
@@ -647,6 +820,185 @@ fn reject_foreign_identity_overlap(
     Ok(())
 }
 
+/// Experimental read-only preview for an explicitly requested foreign
+/// architecture. This is not a dpkg transaction or an APT policy candidate:
+/// it refuses implicit architecture substitution, ambiguous dependencies,
+/// installed cross-architecture conflicts, and unsupported Multi-Arch syntax.
+/// The returned plan must never be used to authorize package installation.
+pub fn preview_explicit_architecture(
+    cache: &Path, status: &Path, requested: &str,
+    native_architecture: &str, foreign_architecture: &str,
+    max_packages: usize,
+) -> Result<Vec<PlanStep>> {
+    if max_packages == 0 || max_packages > 5000 {
+        bail!("max_packages must be 1..=5000");
+    }
+    if foreign_architecture == native_architecture {
+        bail!("explicit foreign preview requires a distinct architecture");
+    }
+    // Validate both architecture identifiers before using either as a solver
+    // scope. An empty or synthetic "all" scope is never a concrete target.
+    for arch in [native_architecture, foreign_architecture] {
+        if arch.is_empty() || arch == "all"
+            || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            bail!("invalid concrete preview architecture: {arch}");
+        }
+    }
+    let parsed = parse_atom_for_arch(requested, native_architecture)?;
+    if parsed.any_arch || parsed.requested_arch.as_deref() != Some(foreign_architecture) {
+        bail!("foreign preview requires an explicit package:architecture request");
+    }
+    let catalog = metadata_query::catalog_by_architectures(
+        cache, &[native_architecture, foreign_architecture], 1_000_000,
+    )?;
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &relations)?;
+    let installed = scoped_installed(&complete, foreign_architecture)?;
+    let scoped = scoped_relations(&relations, foreign_architecture)?;
+    let plan = solve_catalog(
+        &catalog, &installed, &scoped, requested, max_packages, foreign_architecture,
+    )?;
+    // Validate against every installed identity outside the target architecture,
+    // including the native host. No removals or version synchronization inferred.
+    reject_foreign_negative_relations(&catalog, &relations, &plan, foreign_architecture)?;
+    Ok(plan)
+}
+
+/// Policy-checked diagnostic for an explicit foreign-architecture request.
+/// Unlike the exploratory preview, this requires every staged version to be
+/// the APT-policy candidate from verified metadata for that exact architecture.
+/// It is still read-only and cannot authorize dpkg transactions.
+pub fn preview_explicit_architecture_with_policy(
+    cache: &Path, status: &Path, apt_root: &Path, requested: &str,
+    native_architecture: &str, foreign_architecture: &str,
+    max_packages: usize,
+) -> Result<Vec<PlanStep>> {
+    let target_release = crate::policy::read_default_release(apt_root)?;
+    let preferences = crate::apt_preferences::load(apt_root)?;
+    // Resolve the explicitly requested root against its policy-selected
+    // version, not the latest index stanza. This avoids rejecting a valid
+    // pinned root solely because the exploratory catalog chose a newer one.
+    let parsed = parse_atom_for_arch(requested, native_architecture)?;
+    if parsed.any_arch || parsed.requested_arch.as_deref() != Some(foreign_architecture) {
+        bail!("foreign policy preview requires an explicit package:architecture request");
+    }
+    let mut catalog = metadata_query::catalog_by_architectures(
+        cache, &[native_architecture, foreign_architecture], 1_000_000,
+    )?;
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &relations)?;
+    let installed = scoped_installed(&complete, foreign_architecture)?;
+    let scoped = scoped_relations(&relations, foreign_architecture)?;
+    let root_key = PackageKey {
+        name: parsed.name.clone(), architecture: foreign_architecture.to_owned(),
+    };
+    if !catalog.contains_key(&root_key) {
+        bail!("foreign root {}:{} missing from repository catalog", parsed.name, foreign_architecture);
+    }
+    let root_origins = crate::package_provenance::verified_version_origins(
+        cache, &parsed.name, foreign_architecture,
+    )?;
+    let root_candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
+        &parsed.name, &root_origins, &preferences,
+        installed.get(&root_key).map(String::as_str), target_release.as_deref(), None,
+    )?.candidate.with_context(|| format!(
+        "APT policy has no foreign root candidate for {}:{}", parsed.name, foreign_architecture,
+    ))?;
+    let root_summary = metadata_query::verified_exact_version(
+        cache, foreign_architecture, &parsed.name, &root_candidate, &root_origins,
+    )?;
+    if root_summary.architecture != foreign_architecture {
+        bail!("foreign root policy candidate has incorrect binary architecture");
+    }
+    catalog.insert(root_key, root_summary);
+    // Candidate-select the dependency closure before returning a plan.
+    // Repository latest is only a discovery seed: every discovered package
+    // gets replaced with the verified policy candidate, then re-solved.
+    // A bounded fixed point prevents cycles or endlessly changing closures.
+    let mut validated = BTreeSet::new();
+    validated.insert(parsed.name.clone());
+    let mut roots = BTreeSet::new();
+    roots.insert(parsed.name.clone());
+    for _ in 0..16 {
+        let mut changed = false;
+        for name in &roots {
+            if validated.contains(name) { continue; }
+            let key = PackageKey {
+                name: name.clone(), architecture: foreign_architecture.to_owned(),
+            };
+            if !catalog.contains_key(&key) {
+                bail!("foreign dependency {}:{} has no exact-architecture metadata",
+                    name, foreign_architecture);
+            }
+            let origins = crate::package_provenance::verified_version_origins(
+                cache, name, foreign_architecture,
+            )?;
+            let candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
+                name, &origins, &preferences,
+                installed.get(&key).map(String::as_str), target_release.as_deref(), None,
+            )?.candidate.with_context(|| format!(
+                "APT policy has no candidate for foreign dependency {}:{}", name, foreign_architecture,
+            ))?;
+            let summary = metadata_query::verified_exact_version(
+                cache, foreign_architecture, name, &candidate, &origins,
+            )?;
+            if summary.architecture != foreign_architecture {
+                bail!("foreign dependency candidate has incorrect architecture");
+            }
+            if catalog.get(&key) != Some(&summary) { changed = true; }
+            catalog.insert(key, summary);
+            validated.insert(name.clone());
+        }
+        // Discover mandatory concrete dependencies of the policy-selected
+        // packages before solving; otherwise a newer, unpinned dependency
+        // can make an otherwise valid plan fail prematurely.
+        let mut discovered = false;
+        let mut mandatory = BTreeSet::new();
+        for name in &roots {
+            if !validated.contains(name) { continue; }
+            let key = PackageKey {
+                name: name.clone(), architecture: foreign_architecture.to_owned(),
+            };
+            let item = catalog.get(&key).context("validated foreign dependency missing catalog entry")?;
+            for group in parse_groups_for_arch(&item.pre_depends, foreign_architecture)?.into_iter()
+                .chain(parse_groups_for_arch(&item.depends, foreign_architecture)?) {
+                if group.len() == 1 {
+                    let dep = &group[0];
+                    let dep_key = PackageKey {
+                        name: dep.name.clone(), architecture: foreign_architecture.to_owned(),
+                    };
+                    if catalog.contains_key(&dep_key) { mandatory.insert(dep.name.clone()); }
+                }
+            }
+        }
+        for name in mandatory {
+            if roots.insert(name) { discovered = true; }
+        }
+        if discovered { continue; }
+        let plan = solve_catalog(
+            &catalog, &installed, &scoped, requested, max_packages, foreign_architecture,
+        )?;
+        for step in &plan {
+            if roots.insert(step.package.clone()) { discovered = true; }
+        }
+        if changed || discovered { continue; }
+        reject_foreign_negative_relations(&catalog, &relations, &plan, foreign_architecture)?;
+        // Exact-architecture candidate validation is mandatory for every step.
+        for step in &plan {
+            if step.architecture != foreign_architecture {
+                bail!("foreign policy preview cannot stage another architecture");
+            }
+            if !validated.contains(&step.package) {
+                bail!("foreign dependency was not policy-validated");
+            }
+        }
+        return Ok(plan);
+    }
+    bail!("foreign policy dependency closure did not converge in 16 rounds")
+}
+
 /// Read installed packages in bulk; this deliberately does not trust the
 /// resolver for actual package transactions.
 pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, max_packages: usize) -> Result<Vec<PlanStep>> {
@@ -659,7 +1011,7 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let installed = scoped_installed(&complete, architecture)?;
     let installed_relations = scoped_relations(&complete_relations, architecture)?;
     let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
-    reject_foreign_identity_overlap(&complete, &plan, architecture)?;
+    // Foreign identity compatibility is checked with installed dpkg Multi-Arch metadata below.
     reject_foreign_negative_relations(&catalog, &complete_relations, &plan, architecture)?;
     Ok(plan)
 }
@@ -679,6 +1031,39 @@ fn solve_catalog(
         branch_budget: Rc::new(Cell::new(4096)),
     };
     solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
+    // Validate the entire staged set before exposing a read-only plan.
+    // This does not authorize foreign-architecture package installation.
+    validate_multiarch_plan(catalog, &solver.plan)?;
+    // Validate staged binaries against installed peers as well as other staged
+    // binaries. A partial plan must never silently desynchronize Multi-Arch:
+    // same co-installed versions or treat Architecture: all as a peer.
+    for step in &solver.plan {
+        let staged_key = PackageKey {
+            name: step.package.clone(), architecture: step.architecture.clone(),
+        };
+        let candidate = catalog.get(&staged_key)
+            .context("staged binary missing verified catalog metadata")?;
+        for (installed_key, installed_version) in installed {
+            if installed_key.name != step.package || installed_key == &staged_key {
+                continue;
+            }
+            if installed_key.architecture == "all" || staged_key.architecture == "all" {
+                bail!("installed Architecture: all collides with staged concrete binary {}", step.package);
+            }
+            // The exact installed identity is needed: repository latest is not
+            // evidence of the version or Multi-Arch flag currently installed.
+            let relation = installed_relations.get(installed_key)
+                .with_context(|| format!("missing installed Multi-Arch metadata for {}:{}",
+                    installed_key.name, installed_key.architecture))?;
+            if relation.version != *installed_version || relation.multi_arch != "same"
+                || candidate.multi_arch != "same"
+                || version::compare(&step.version, installed_version)? != Ordering::Equal {
+                bail!("unsafe staged/installed Multi-Arch co-installation for {}:{} and {}:{}",
+                    staged_key.name, staged_key.architecture,
+                    installed_key.name, installed_key.architecture);
+            }
+        }
+    }
     Ok(solver.plan)
 }
 
@@ -767,7 +1152,7 @@ pub fn preview_with_policy(
                     target_release.as_deref(), None,
                 )?.candidate)
             })?;
-            reject_foreign_identity_overlap(&complete, &plan, architecture)?;
+            // Foreign identity compatibility is checked with installed dpkg Multi-Arch metadata below.
             reject_foreign_negative_relations(&catalog, &complete_relations, &plan, architecture)?;
             return Ok(plan);
         }
@@ -894,7 +1279,7 @@ mod tests {
         let catalog = test_keyed(&BTreeMap::from([("app".into(), app)]));
         let foreign = BTreeMap::from([(
             cache_query::InstalledKey { name: "lib".into(), architecture: "i386".into() },
-            InstalledRelations { version: "1".into(), ..Default::default() },
+            InstalledRelations { version: "1".into(), multi_arch: "no".into(), ..Default::default() },
         )]);
         let plan = [PlanStep { package: "app".into(), architecture: "amd64".into(),
             version: "1".into(), installed: None }];
@@ -924,6 +1309,69 @@ mod tests {
     }
 
     #[test]
+    fn explicit_foreign_preview_requires_qualified_request_and_safe_catalog() {
+        let root = std::env::temp_dir().join(format!("rpt-foreign-preview-{}", std::process::id()));
+        let dir = root.join("0123456789abcdef01234567");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("InRelease"), "fixture").unwrap();
+        std::fs::write(dir.join("index-0.raw"),
+            "Package: lib\nVersion: 1\nArchitecture: amd64\nMulti-Arch: same\n\n\
+Package: lib\nVersion: 1\nArchitecture: i386\nMulti-Arch: same\n\n").unwrap();
+        let status = root.join("status");
+        std::fs::write(&status, "").unwrap();
+        let plan = preview_explicit_architecture(&root, &status, "lib:i386", "amd64", "i386", 20).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].architecture, "i386");
+        assert!(preview_explicit_architecture(&root, &status, "lib", "amd64", "i386", 20).is_err());
+        assert!(preview_explicit_architecture(&root, &status, "lib:amd64", "amd64", "i386", 20).is_err());
+        assert!(preview_explicit_architecture(&root, &status, "lib:i386", "amd64", "amd64", 20).is_err());
+        std::fs::write(&status,
+            "Package: lib\nArchitecture: amd64\nVersion: 2\nMulti-Arch: same\nStatus: install ok installed\n\n").unwrap();
+        assert!(preview_explicit_architecture(&root, &status, "lib:i386", "amd64", "i386", 20).is_err());
+        // Foreign preview must not silently stage a native dependency. A
+        // mixed-architecture transaction needs a complete APT resolver.
+        std::fs::write(&status, "").unwrap();
+        std::fs::write(dir.join("index-0.raw"),
+            "Package: app\nVersion: 1\nArchitecture: i386\nDepends: native-lib:amd64\n\n\
+Package: native-lib\nVersion: 1\nArchitecture: amd64\n\n").unwrap();
+        assert!(preview_explicit_architecture(&root, &status, "app:i386", "amd64", "i386", 20).is_err());
+        // A dependency resolved entirely within the foreign architecture is
+        // still a valid read-only plan.
+        std::fs::write(dir.join("index-0.raw"),
+            "Package: app\nVersion: 1\nArchitecture: i386\nDepends: foreign-lib\n\n\
+Package: foreign-lib\nVersion: 1\nArchitecture: i386\n\n").unwrap();
+        let foreign_plan = preview_explicit_architecture(&root, &status, "app:i386", "amd64", "i386", 20).unwrap();
+        assert_eq!(foreign_plan.len(), 2);
+        assert!(foreign_plan.iter().all(|step| step.architecture == "i386"));
+        assert!(preview_explicit_architecture(&root, &status, "app:i386", "all", "i386", 20).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_multiarch_peer_requires_installed_status_and_matching_version() {
+        let mut native = item("lib", "2", "");
+        native.multi_arch = "same".into();
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "lib".into(), architecture: "amd64".into() }, native,
+        )]);
+        let foreign = PackageKey { name: "lib".into(), architecture: "i386".into() };
+        let installed = BTreeMap::from([(foreign.clone(), "2".into())]);
+        let mut relations = BTreeMap::from([(foreign.clone(), InstalledRelations {
+            version: "2".into(), multi_arch: "same".into(), ..Default::default()
+        })]);
+        assert!(solve_catalog(&catalog, &installed, &relations, "lib", 20, "amd64").is_ok());
+        relations.get_mut(&foreign).unwrap().version = "1".into();
+        assert!(solve_catalog(&catalog, &installed, &relations, "lib", 20, "amd64").is_err());
+        relations.get_mut(&foreign).unwrap().version = "2".into();
+        relations.get_mut(&foreign).unwrap().multi_arch = "foreign".into();
+        assert!(solve_catalog(&catalog, &installed, &relations, "lib", 20, "amd64").is_err());
+        assert!(solve_catalog(&catalog, &installed, &BTreeMap::new(), "lib", 20, "amd64").is_err());
+        relations.get_mut(&foreign).unwrap().multi_arch = "same".into();
+        let older = BTreeMap::from([(foreign, "1".into())]);
+        assert!(solve_catalog(&catalog, &older, &relations, "lib", 20, "amd64").is_err());
+    }
+
+    #[test]
     fn installed_all_reverse_conflict_checked_by_exact_identity() {
         let catalog = BTreeMap::from([(
             PackageKey { name: "app".into(), architecture: "amd64".into() },
@@ -946,8 +1394,8 @@ mod tests {
     fn installed_status_safety_metadata_reconciles_foreign_identities() {
         let file = std::env::temp_dir().join(format!("rpt-keyed-relations-{}", std::process::id()));
         std::fs::write(&file, "\
-Package: lib\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
-Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssential: yes\n\n").unwrap();
+Package: lib\nArchitecture: amd64\nVersion: 1\nMulti-Arch: same\nStatus: install ok installed\n\n\
+Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok installed\nEssential: yes\n\n").unwrap();
         let complete = cache_query::installed_catalog_by_arch(&file).unwrap();
         let relations = read_installed_relations_by_arch(&file).unwrap();
         validate_installed_metadata(&complete, &relations).unwrap();
@@ -1098,7 +1546,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssenti
                     &BTreeMap::new(), "app", 20, arch).is_err());
             }
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
-            assert!(parse_atom_for_arch(&format!("interpreter:{foreign}"), arch).is_err());
+            assert_eq!(parse_atom_for_arch(&format!("interpreter:{foreign}"), arch).unwrap().requested_arch.as_deref(), Some(foreign));
         }
     }
     #[test]
@@ -1108,7 +1556,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssenti
             assert_eq!(parse_atom_for_arch(&format!("lib:{arch}"), arch).unwrap().name, "lib");
             assert!(parse_atom_for_arch("lib:any", arch).unwrap().any_arch);
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
-            assert!(parse_atom_for_arch(&format!("lib:{foreign}"), arch).is_err());
+            assert_eq!(parse_atom_for_arch(&format!("lib:{foreign}"), arch).unwrap().requested_arch.as_deref(), Some(foreign));
             assert!(parse_groups_for_arch("pkg-a:native | pkg-b:native, pkg-c (>= 2)", arch).is_ok());
         }
     }
@@ -1419,7 +1867,7 @@ Package: libx\nVersion: 3\nArchitecture: amd64\nStatus: install ok installed\n\n
         let mut catalog = BTreeMap::from([(key, app.clone())]);
         let other = PackageKey { name: "foreign-lib".into(), architecture: "i386".into() };
         let mut installed = BTreeMap::from([(cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }, InstalledRelations {
-            version: "1".into(), ..Default::default()
+            version: "1".into(), multi_arch: "no".into(), ..Default::default()
         })]);
         assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_ok());
         // A foreign package's installed reverse relationship is authoritative.
@@ -1468,6 +1916,193 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         std::fs::remove_file(path).unwrap();
     }
 
+
+    #[test]
+    fn multiarch_same_coinstallation_preflight_requires_matching_versions_and_metadata() {
+        let mut native = item("libdemo", "2:1.0-1", "");
+        native.multi_arch = "same".into();
+        let mut foreign = native.clone();
+        foreign.architecture = "i386".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_ok());
+
+        foreign.version = "2:1.0-2".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_err());
+        foreign.version = native.version.clone();
+
+        foreign.multi_arch = "foreign".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_err());
+        foreign.multi_arch = "same".into();
+
+        native.multi_arch = "allowed".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_err());
+        native.multi_arch = "same".into();
+
+        foreign.architecture = "all".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_err());
+        foreign.architecture = "amd64".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_err());
+        foreign.architecture = "i386".into();
+        foreign.name = "another".into();
+        assert!(validate_multiarch_same_pair(&native, &foreign).is_err());
+    }
+
+
+    #[test]
+    fn foreign_partner_lookup_uses_exact_architecture_and_matching_multiarch_version() {
+        let mut native = item("libdemo", "1.0-1", "");
+        native.multi_arch = "same".into();
+        let mut foreign = native.clone();
+        foreign.architecture = "i386".into();
+        let key = PackageKey { name: "libdemo".into(), architecture: "i386".into() };
+        let mut catalog = BTreeMap::from([(key.clone(), foreign.clone())]);
+        assert_eq!(validated_foreign_partner(&catalog, &native, "i386").unwrap().architecture, "i386");
+        assert!(validated_foreign_partner(&catalog, &native, "arm64").is_err());
+        foreign.version = "1.0-2".into();
+        catalog.insert(key.clone(), foreign.clone());
+        assert!(validated_foreign_partner(&catalog, &native, "i386").is_err());
+        foreign.version = native.version.clone();
+        foreign.multi_arch = "foreign".into();
+        catalog.insert(key, foreign);
+        assert!(validated_foreign_partner(&catalog, &native, "i386").is_err());
+    }
+
+
+    #[test]
+    fn multiarch_plan_gate_checks_all_staged_binary_identities() {
+        let mut native = item("libdemo", "1", "");
+        native.multi_arch = "same".into();
+        let mut foreign = native.clone();
+        foreign.architecture = "i386".into();
+        let nk = PackageKey { name: "libdemo".into(), architecture: "amd64".into() };
+        let fk = PackageKey { name: "libdemo".into(), architecture: "i386".into() };
+        let mut catalog = BTreeMap::from([(nk, native), (fk.clone(), foreign)]);
+        let steps = vec![
+            PlanStep { package: "libdemo".into(), architecture: "amd64".into(), version: "1".into(), installed: None },
+            PlanStep { package: "libdemo".into(), architecture: "i386".into(), version: "1".into(), installed: None },
+        ];
+        assert!(validate_multiarch_plan(&catalog, &steps).is_ok());
+        let mut wrong = steps.clone();
+        wrong[1].version = "2".into();
+        assert!(validate_multiarch_plan(&catalog, &wrong).is_err());
+        let mut duplicate = steps.clone();
+        duplicate.push(steps[0].clone());
+        assert!(validate_multiarch_plan(&catalog, &duplicate).is_err());
+        catalog.get_mut(&fk).unwrap().multi_arch = "foreign".into();
+        assert!(validate_multiarch_plan(&catalog, &steps).is_err());
+        catalog.remove(&fk);
+        assert!(validate_multiarch_plan(&catalog, &steps).is_err());
+    }
+
+
+    #[test]
+    fn multiarch_plan_rejects_all_and_concrete_same_name_pair() {
+        let native = item("libdemo", "1", "");
+        let mut common = native.clone();
+        common.architecture = "all".into();
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "libdemo".into(), architecture: "amd64".into() }, native),
+            (PackageKey { name: "libdemo".into(), architecture: "all".into() }, common),
+        ]);
+        let plan = vec![
+            PlanStep { package: "libdemo".into(), architecture: "amd64".into(), version: "1".into(), installed: None },
+            PlanStep { package: "libdemo".into(), architecture: "all".into(), version: "1".into(), installed: None },
+        ];
+        assert!(validate_multiarch_plan(&catalog, &plan).is_err());
+    }
+
+
+    #[test]
+    fn multiarch_plan_rejects_unknown_declarations_before_returning_plan() {
+        let mut pkg = item("libdemo", "1", "");
+        pkg.multi_arch = "unexpected".into();
+        let key = PackageKey { name: "libdemo".into(), architecture: "amd64".into() };
+        let mut catalog = BTreeMap::from([(key.clone(), pkg)]);
+        let plan = vec![PlanStep {
+            package: "libdemo".into(), architecture: "amd64".into(),
+            version: "1".into(), installed: None,
+        }];
+        assert!(validate_multiarch_plan(&catalog, &plan).is_err());
+        for accepted in ["no", "same", "foreign", "allowed"] {
+            catalog.get_mut(&key).unwrap().multi_arch = accepted.into();
+            assert!(validate_multiarch_plan(&catalog, &plan).is_ok());
+        }
+    }
+
+
+    #[test]
+    fn foreign_installed_same_version_coinstallation_gate() {
+        let mut native = item("libdemo", "1", "");
+        native.multi_arch = "same".into();
+        let key = PackageKey { name: "libdemo".into(), architecture: "amd64".into() };
+        let mut catalog = BTreeMap::from([(key.clone(), native)]);
+        let foreign_key = cache_query::InstalledKey {
+            name: "libdemo".into(), architecture: "i386".into(),
+        };
+        let mut foreign = BTreeMap::from([(foreign_key.clone(), InstalledRelations {
+            version: "1".into(), multi_arch: "same".into(), ..Default::default()
+        })]);
+        let plan = [PlanStep {
+            package: "libdemo".into(), architecture: "amd64".into(),
+            version: "1".into(), installed: None,
+        }];
+        assert!(reject_foreign_negative_relations(&catalog, &foreign, &plan, "amd64").is_ok());
+        foreign.get_mut(&foreign_key).unwrap().version = "2".into();
+        assert!(reject_foreign_negative_relations(&catalog, &foreign, &plan, "amd64").is_err());
+        foreign.get_mut(&foreign_key).unwrap().version = "1".into();
+        foreign.get_mut(&foreign_key).unwrap().multi_arch = "no".into();
+        assert!(reject_foreign_negative_relations(&catalog, &foreign, &plan, "amd64").is_err());
+        foreign.get_mut(&foreign_key).unwrap().multi_arch = "same".into();
+        catalog.get_mut(&key).unwrap().multi_arch = "allowed".into();
+        assert!(reject_foreign_negative_relations(&catalog, &foreign, &plan, "amd64").is_err());
+    }
+
+
+    #[test]
+    fn installed_multiarch_metadata_rejects_inconsistent_coinstalled_pairs() {
+        let a = cache_query::InstalledKey { name: "libdemo".into(), architecture: "amd64".into() };
+        let b = cache_query::InstalledKey { name: "libdemo".into(), architecture: "i386".into() };
+        let installed = BTreeMap::from([
+            (a.clone(), cache_query::Installed { version: "1".into(), architecture: "amd64".into(), status: "install ok installed".into() }),
+            (b.clone(), cache_query::Installed { version: "1".into(), architecture: "i386".into(), status: "install ok installed".into() }),
+        ]);
+        let mut relations = BTreeMap::from([
+            (a.clone(), InstalledRelations { version: "1".into(), multi_arch: "same".into(), ..Default::default() }),
+            (b.clone(), InstalledRelations { version: "1".into(), multi_arch: "same".into(), ..Default::default() }),
+        ]);
+        assert!(validate_installed_metadata(&installed, &relations).is_ok());
+        relations.get_mut(&b).unwrap().multi_arch = "foreign".into();
+        assert!(validate_installed_metadata(&installed, &relations).is_err());
+        relations.get_mut(&b).unwrap().multi_arch = "same".into();
+        relations.get_mut(&b).unwrap().version = "2".into();
+        assert!(validate_installed_metadata(&installed, &relations).is_err());
+        relations.get_mut(&b).unwrap().version = "1".into();
+        relations.get_mut(&b).unwrap().multi_arch = "unknown".into();
+        assert!(validate_installed_metadata(&installed, &relations).is_err());
+    }
+
+
+    #[test]
+    fn explicit_foreign_dependency_selects_exact_binary_identity() {
+        let app = item("app", "1", "libdemo:i386 (>= 2)");
+        let mut foreign = item("libdemo", "2", "");
+        foreign.architecture = "i386".into();
+        foreign.multi_arch = "same".into();
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "app".into(), architecture: "amd64".into() }, app),
+            (PackageKey { name: "libdemo".into(), architecture: "i386".into() }, foreign),
+        ]);
+        let plan = solve_catalog(&catalog, &BTreeMap::new(), &BTreeMap::new(), "app", 20, "amd64").unwrap();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].architecture, "i386");
+        assert_eq!(plan[0].package, "libdemo");
+        let mut mismatched = catalog.clone();
+        let foreign_key = PackageKey { name: "libdemo".into(), architecture: "i386".into() };
+        mismatched.get_mut(&foreign_key).unwrap().version = "1".into();
+        assert!(solve_catalog(&mismatched, &BTreeMap::new(), &BTreeMap::new(),
+            "app", 20, "amd64").is_err());
+        assert!(solve_catalog(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            "libdemo:armhf", 20, "amd64").is_err());
+    }
 
     #[test]
     fn dependency_names_follow_debian_binary_package_rules() {

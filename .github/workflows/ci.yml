@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, feat/multiarch-coinstall-preflight]
   pull_request:
   workflow_dispatch:
 permissions:
