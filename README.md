@@ -389,3 +389,7 @@ The experimental solver now resolves concrete candidates and tracks visiting/com
 ### Architecture-keyed installed relationship metadata
 
 RPT now reads installed `Conflicts`, `Breaks`, `Provides`, hold, `Essential` and `Protected` fields into a dpkg status map indexed by `(package, architecture)`. This preserves native and foreign copies of a same-name package without overwriting their relationship metadata. Its read-only native solver projects only the selected architecture plus `Architecture: all` and refuses native/all collisions, while validating staged package identities. **It does not yet resolve cross-architecture conflicts/co-installation or execute dpkg transactions**; foreign packages stay excluded from the native dependency solver.
+
+### Foreign installed binary conflict guards
+
+Read-only planning checks staged native candidates against actual foreign-architecture installed `Conflicts`, `Breaks` and versioned virtual `Provides` from dpkg status, in both directions. This detects a conflict with a foreign package of a *different* name, not just unsafe same-name coexistence. Native package changes remain subject to APT policy and dpkg hold/Essential/Protected restrictions. No foreign removal, co-installation solver, or dpkg transaction is implemented.

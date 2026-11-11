@@ -467,6 +467,44 @@ impl Solver<'_> {
     }
 }
 
+/// Validate both directions of Conflicts/Breaks against *foreign* installed
+/// package identities, using actual dpkg status metadata (not repository latest).
+/// A native-only plan is invalid even when the conflicting foreign package has
+/// a different name. Never infer that a foreign package will be removed.
+fn reject_foreign_negative_relations(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    plan: &[PlanStep],
+    architecture: &str,
+) -> Result<()> {
+    for step in plan {
+        let staged_key = PackageKey {
+            name: step.package.clone(), architecture: step.architecture.clone(),
+        };
+        let proposed = catalog.get(&staged_key).with_context(|| format!(
+            "planned {}:{} missing repository metadata", step.package, step.architecture,
+        ))?;
+        if proposed.version != step.version {
+            bail!("inconsistent planned version for {}:{}", step.package, step.architecture);
+        }
+        for (key, foreign) in installed {
+            if key.architecture == architecture || key.architecture == "all" { continue; }
+            if key.name == step.package {
+                bail!("planned {} overlaps installed foreign architecture {}; full Multi-Arch solver required",
+                    key.name, key.architecture);
+            }
+            if relations_hit(&proposed.conflicts, &key.name, &foreign.version, &foreign.provides)?
+                || relations_hit(&proposed.breaks, &key.name, &foreign.version, &foreign.provides)?
+                || relations_hit(&foreign.conflicts, &step.package, &step.version, &proposed.provides)?
+                || relations_hit(&foreign.breaks, &step.package, &step.version, &proposed.provides)? {
+                bail!("Conflicts/Breaks between planned {}:{} and foreign installed {}:{}",
+                    step.package, step.architecture, key.name, key.architecture);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The current solver plans only one native architecture. A staged binary
 /// with a same-name foreign installed counterpart could require Multi-Arch:
 /// same version synchronization, file overlap checks or removals. The planner
@@ -508,6 +546,8 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
     let full_installed = cache_query::installed_catalog_by_arch(status)?;
     reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+    let keyed_relations = read_installed_relations_by_arch(status)?;
+    reject_foreign_negative_relations(&catalog, &keyed_relations, &plan, architecture)?;
     Ok(plan)
 }
 
@@ -622,6 +662,8 @@ pub fn preview_with_policy(
             })?;
             let full_installed = cache_query::installed_catalog_by_arch(status)?;
             reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+            let keyed_relations = read_installed_relations_by_arch(status)?;
+            reject_foreign_negative_relations(&catalog, &keyed_relations, &plan, architecture)?;
             return Ok(plan);
         }
     }
@@ -703,6 +745,64 @@ Package: libx\nVersion: 2\nArchitecture: all\nStatus: install ok installed\n\n")
 Package: libx\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n\
 Package: libx\nVersion: 3\nArchitecture: amd64\nStatus: install ok installed\n\n").unwrap();
         assert!(read_installed_relations_by_arch(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn foreign_reverse_and_forward_conflicts_breaks_are_checked() {
+        let arch = "amd64";
+        let app = item("app", "2", "");
+        let key = PackageKey { name: "app".into(), architecture: arch.into() };
+        let plan = [PlanStep { package: "app".into(), architecture: arch.into(),
+            version: "2".into(), installed: None }];
+        let mut catalog = BTreeMap::from([(key, app.clone())]);
+        let other = PackageKey { name: "foreign-lib".into(), architecture: "i386".into() };
+        let mut installed = BTreeMap::from([(cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }, InstalledRelations {
+            version: "1".into(), ..Default::default()
+        })]);
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_ok());
+        // A foreign package's installed reverse relationship is authoritative.
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks = "app (>= 2)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().breaks.clear();
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts = "app".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().conflicts.clear();
+
+        // The staged native binary can itself conflict with an installed foreign name.
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts = "foreign-lib (>= 1)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts.clear();
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().breaks = "foreign-lib".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().breaks.clear();
+
+        // Versioned virtual Provides on the installed foreign binary are checked.
+        installed.get_mut(&cache_query::InstalledKey { name: other.name.clone(), architecture: other.architecture.clone() }).unwrap().provides = "foreign-virtual (= 2)".into();
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts = "foreign-virtual (>= 2)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+    }
+
+    #[test]
+    fn installed_foreign_relations_remain_distinct_from_native() {
+        let path = std::env::temp_dir().join(format!("rpt-foreign-relations-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libdemo\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
+Package: libdemo\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nConflicts: app (>= 3)\n\n\
+Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n").unwrap();
+        let keyed = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(keyed.len(), 3);
+        let foreign = &keyed[&cache_query::InstalledKey { name: "libdemo".into(), architecture: "i386".into() }];
+        assert!(foreign.held);
+        assert_eq!(foreign.conflicts, "app (>= 3)");
+        let native = read_installed_relations(&path, "amd64").unwrap();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native["libdemo"].version, "2");
         std::fs::remove_file(path).unwrap();
     }
 
