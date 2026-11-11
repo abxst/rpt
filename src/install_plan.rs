@@ -249,11 +249,47 @@ fn relations_hit(raw: &str, subject_name: &str, subject_version: &str,
     Ok(false)
 }
 
+/// Projection for the current native-only solver. The map remains keyed by
+/// exact binary identity; foreign entries are kept for the outer guard.
+fn scoped_installed(
+    complete: &BTreeMap<cache_query::InstalledKey, cache_query::Installed>,
+    architecture: &str,
+) -> Result<BTreeMap<PackageKey, String>> {
+    let mut scoped = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (identity, item) in complete {
+        if identity.architecture != architecture && identity.architecture != "all" { continue; }
+        if !seen.insert(identity.name.clone()) {
+            bail!("ambiguous native/all installed binary {}", identity.name);
+        }
+        scoped.insert(PackageKey {
+            name: identity.name.clone(), architecture: identity.architecture.clone(),
+        }, item.version.clone());
+    }
+    Ok(scoped)
+}
+
+fn scoped_relations(
+    complete: &BTreeMap<PackageKey, InstalledRelations>,
+    architecture: &str,
+) -> Result<BTreeMap<PackageKey, InstalledRelations>> {
+    let mut scoped = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (key, relation) in complete {
+        if key.architecture != architecture && key.architecture != "all" { continue; }
+        if !seen.insert(key.name.clone()) {
+            bail!("ambiguous native/all installed relation {}", key.name);
+        }
+        scoped.insert(key.clone(), relation.clone());
+    }
+    Ok(scoped)
+}
+
 #[derive(Clone)]
 struct Solver<'a> {
     catalog: &'a BTreeMap<PackageKey, PackageSummary>,
-    installed: &'a BTreeMap<String, String>,
-    installed_relations: &'a BTreeMap<String, InstalledRelations>,
+    installed: &'a BTreeMap<PackageKey, String>,
+    installed_relations: &'a BTreeMap<PackageKey, InstalledRelations>,
     visiting: BTreeSet<PackageKey>,
     done: BTreeSet<PackageKey>,
     plan: Vec<PlanStep>,
@@ -277,6 +313,20 @@ impl Solver<'_> {
             (false, true) => Ok(Some(all)),
             (false, false) => Ok(None),
         }
+    }
+
+    /// Resolve installed binary identity independently of repository candidate
+    /// metadata. This avoids conflating the installed native and all states.
+    fn installed_for_name(&self, name: &str) -> Result<Option<(&PackageKey, &String)>> {
+        let mut found = None;
+        for (key, version) in self.installed {
+            if key.name != name { continue; }
+            if found.is_some() {
+                bail!("ambiguous installed architectures for {name}");
+            }
+            found = Some((key, version));
+        }
+        Ok(found)
     }
 
     fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
@@ -327,7 +377,7 @@ impl Solver<'_> {
         // Preserve the established behavior: an already installed direct
         // alternative satisfies a dependency without changing package state.
         for alternative in group {
-            if let Some(installed) = self.installed.get(&alternative.name) {
+            if let Some((_, installed)) = self.installed_for_name(&alternative.name)? {
                 let allowed_installed = !alternative.any_arch
                     || self.key_for(&alternative.name)?.and_then(|key| self.catalog.get(&key))
                         .is_some_and(|item| item.multi_arch == "allowed" && item.version == *installed);
@@ -372,45 +422,51 @@ impl Solver<'_> {
     /// staged upgrades plus all staged additions). Include reverse relations
     /// from installed dpkg status, rather than newest repository metadata.
     fn check_negative_relations(&self) -> Result<()> {
-        let staged: BTreeMap<&str, &str> = self.plan.iter()
-            .map(|step| (step.package.as_str(), step.version.as_str())).collect();
-        for (new_name, new_version) in &staged {
-            let new_pkg = self.key_for(new_name)?.and_then(|key| self.catalog.get(&key))
+        // Exact binary identities are used for both planned and installed
+        // versions. No name-only merge may override a foreign or all package.
+        let staged: BTreeMap<PackageKey, &PlanStep> = self.plan.iter().map(|step| (
+            PackageKey { name: step.package.clone(), architecture: step.architecture.clone() }, step
+        )).collect();
+        for (new_key, new_step) in &staged {
+            let new_pkg = self.catalog.get(new_key)
                 .context("staged package missing repository metadata")?;
-            for (installed_name, installed_version) in self.installed {
-                if installed_name == *new_name { continue; }
-                let effective_version = staged.get(installed_name.as_str())
-                    .copied().unwrap_or(installed_version);
+            for (installed_key, installed_version) in self.installed {
+                if installed_key == new_key { continue; }
+                let effective_version = staged.get(installed_key)
+                    .map(|item| item.version.as_str()).unwrap_or(installed_version);
                 let (conflicts, breaks, provider) =
-                    if let Some(pkg) = self.key_for(installed_name)?.and_then(|key| self.catalog.get(&key))
-                        .filter(|_| staged.contains_key(installed_name.as_str())) {
+                    if let Some(pkg) = staged.get(installed_key)
+                        .and_then(|_| self.catalog.get(installed_key)) {
                         (pkg.conflicts.as_str(), pkg.breaks.as_str(), pkg.provides.as_str())
-                    } else if let Some(status) = self.installed_relations.get(installed_name) {
+                    } else if let Some(status) = self.installed_relations.get(installed_key) {
                         if status.version != *installed_version {
-                            bail!("inconsistent dpkg installed metadata for {installed_name}");
+                            bail!("inconsistent installed metadata for {}:{}",
+                                installed_key.name, installed_key.architecture);
                         }
                         (status.conflicts.as_str(), status.breaks.as_str(), status.provides.as_str())
                     } else {
-                        // Tests and legacy callers may lack installed relation
-                        // metadata. Never infer unknown reverse relationships.
+                        // Only test fixtures may omit installed relationship
+                        // records; real previews require exact agreement.
                         ("", "", "")
                     };
-                if relations_hit(&new_pkg.conflicts, installed_name, effective_version, provider)?
-                    || relations_hit(&new_pkg.breaks, installed_name, effective_version, provider)?
-                    || relations_hit(conflicts, new_name, new_version, &new_pkg.provides)?
-                    || relations_hit(breaks, new_name, new_version, &new_pkg.provides)? {
-                    bail!("Conflicts/Breaks between planned {new_name} and installed {installed_name}");
+                if relations_hit(&new_pkg.conflicts, &installed_key.name, effective_version, provider)?
+                    || relations_hit(&new_pkg.breaks, &installed_key.name, effective_version, provider)?
+                    || relations_hit(conflicts, &new_key.name, &new_step.version, &new_pkg.provides)?
+                    || relations_hit(breaks, &new_key.name, &new_step.version, &new_pkg.provides)? {
+                    bail!("Conflicts/Breaks between planned {}:{} and installed {}:{}",
+                        new_key.name, new_key.architecture, installed_key.name, installed_key.architecture);
                 }
             }
-            for (peer_name, peer_version) in &staged {
-                if peer_name == new_name { continue; }
-                let peer = self.key_for(peer_name)?.and_then(|key| self.catalog.get(&key))
+            for (peer_key, peer_step) in &staged {
+                if peer_key == new_key { continue; }
+                let peer = self.catalog.get(peer_key)
                     .context("staged peer missing repository metadata")?;
-                if relations_hit(&new_pkg.conflicts, peer_name, peer_version, &peer.provides)?
-                    || relations_hit(&new_pkg.breaks, peer_name, peer_version, &peer.provides)?
-                    || relations_hit(&peer.conflicts, new_name, new_version, &new_pkg.provides)?
-                    || relations_hit(&peer.breaks, new_name, new_version, &new_pkg.provides)? {
-                    bail!("Conflicts/Breaks between planned {new_name} and {peer_name}");
+                if relations_hit(&new_pkg.conflicts, &peer_key.name, &peer_step.version, &peer.provides)?
+                    || relations_hit(&new_pkg.breaks, &peer_key.name, &peer_step.version, &peer.provides)?
+                    || relations_hit(&peer.conflicts, &new_key.name, &new_step.version, &new_pkg.provides)?
+                    || relations_hit(&peer.breaks, &new_key.name, &new_step.version, &new_pkg.provides)? {
+                    bail!("Conflicts/Breaks between planned {}:{} and {}:{}",
+                        new_key.name, new_key.architecture, peer_key.name, peer_key.architecture);
                 }
             }
         }
@@ -448,10 +504,16 @@ impl Solver<'_> {
         self.resolve_groups(&groups, 0)?;
         self.visiting.remove(key);
         self.done.insert(key.clone());
-        let installed = self.installed.get(&requested.name).cloned();
+        let installed_identity = self.installed_for_name(&requested.name)?;
+        let installed = installed_identity.map(|(_, version)| version.clone());
+        if let Some((installed_key, _)) = installed_identity {
+            if installed_key != key && installed.as_deref() != Some(current.version.as_str()) {
+                bail!("installed binary identity differs from proposed {}:{}", key.name, key.architecture);
+            }
+        }
         if installed.as_deref() != Some(current.version.as_str()) {
             if let Some(existing) = &installed {
-                if let Some(relation) = self.installed_relations.get(&requested.name) {
+                if let Some(relation) = installed_identity.and_then(|(identity, _)| self.installed_relations.get(identity)) {
                     ensure_unchanged_protected(
                         &requested.name, existing, &current.version, relation,
                     )?;
