@@ -844,6 +844,58 @@ mod tests {
         Ok(s.plan)
     }
     #[test]
+    fn replaces_declared_against_installed_binary_blocks_plan() {
+        let mut app = item("app", "1", "");
+        app.replaces = "old-lib (<< 3)".into();
+        let catalog = test_keyed(&BTreeMap::from([("app".into(), app)]));
+        let installed = BTreeMap::from([("old-lib".into(), "2".into())]);
+        let relations = BTreeMap::from([("old-lib".into(), InstalledRelations {
+            version: "2".into(), ..Default::default()
+        })]);
+        assert!(solve_catalog_test(&catalog, &installed, &relations, "app", 20, "amd64")
+            .unwrap_err().to_string().contains("Replaces"));
+        // Outside the versioned Replaces range: no known ownership transfer.
+        let installed = BTreeMap::from([("old-lib".into(), "3".into())]);
+        let relations = BTreeMap::from([("old-lib".into(), InstalledRelations {
+            version: "3".into(), ..Default::default()
+        })]);
+        assert!(solve_catalog_test(&catalog, &installed, &relations, "app", 20, "amd64").is_ok());
+    }
+
+    #[test]
+    fn reverse_installed_replaces_blocks_plan() {
+        let catalog = test_keyed(&BTreeMap::from([("app".into(), item("app", "1", ""))]));
+        let installed = BTreeMap::from([("old-lib".into(), "2".into())]);
+        let relations = BTreeMap::from([("old-lib".into(), InstalledRelations {
+            version: "2".into(), replaces: "app".into(), ..Default::default()
+        })]);
+        assert!(solve_catalog_test(&catalog, &installed, &relations, "app", 20, "amd64")
+            .unwrap_err().to_string().contains("Replaces"));
+    }
+
+    #[test]
+    fn staged_replaces_and_foreign_installed_replaces_fail_closed() {
+        let mut app = item("app", "1", "lib");
+        app.replaces = "lib".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), app.clone()), ("lib".into(), item("lib", "1", "")),
+        ]));
+        assert!(solve_catalog_test(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            "app", 20, "amd64").is_err());
+        app.depends.clear();
+        let catalog = test_keyed(&BTreeMap::from([("app".into(), app)]));
+        let foreign = BTreeMap::from([(
+            cache_query::InstalledKey { name: "lib".into(), architecture: "i386".into() },
+            InstalledRelations { version: "1".into(), ..Default::default() },
+        )]);
+        let plan = [PlanStep { package: "app".into(), architecture: "amd64".into(),
+            version: "1".into(), installed: None }];
+        assert!(reject_foreign_negative_relations(&catalog, &foreign, &plan, "amd64")
+            .unwrap_err().to_string().contains("Replaces"));
+        assert!(replaces_hit("lib [amd64]", "lib", "1").is_err());
+    }
+
+    #[test]
     fn installed_keyed_relations_reject_native_all_mismatch_even_same_version() {
         let catalog = BTreeMap::from([(
             PackageKey { name: "lib".into(), architecture: "amd64".into() },
