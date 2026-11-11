@@ -215,6 +215,53 @@ pub fn catalog_by_arch(
     Ok(result)
 }
 
+/// Load a bounded, explicit set of binary architectures from verified cache
+/// indexes. Architecture: all is always included once. This is metadata-only:
+/// callers must independently validate dependencies, installed state and
+/// transaction safety before allowing a foreign-architecture installation.
+pub fn catalog_by_architectures(
+    cache: &Path, architectures: &[&str], max_packages: usize,
+) -> Result<BTreeMap<PackageKey, PackageSummary>> {
+    if architectures.is_empty() || architectures.len() > 16 {
+        bail!("architectures must contain 1..=16 concrete architectures");
+    }
+    if max_packages == 0 || max_packages > 1_000_000 {
+        bail!("max_packages must be 1..=1000000");
+    }
+    let mut allowed = std::collections::BTreeSet::new();
+    for arch in architectures {
+        if *arch == "all" || arch.is_empty()
+            || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            bail!("invalid concrete architecture: {arch}");
+        }
+        if !allowed.insert(*arch) {
+            bail!("duplicate requested architecture: {arch}");
+        }
+    }
+    let mut result = BTreeMap::<PackageKey, PackageSummary>::new();
+    for path in indexes(cache)? {
+        stream_stanzas(open_index(&path)?, |item| {
+            if item.architecture != "all" && !allowed.contains(item.architecture.as_str()) {
+                return Ok(());
+            }
+            let key = PackageKey { name: item.name.clone(), architecture: item.architecture.clone() };
+            if let Some(old) = result.get(&key) {
+                if is_better(&item.version, &old.version)? {
+                    result.insert(key, item);
+                } else if old.version == item.version && old != &item {
+                    bail!("divergent repository metadata for {}:{} {}", key.name, key.architecture, item.version);
+                }
+            } else {
+                if result.len() >= max_packages { bail!("package catalog exceeds max_packages"); }
+                version::compare(&item.version, &item.version)?;
+                result.insert(key, item);
+            }
+            Ok(())
+        }).with_context(|| format!("parsing {}", path.display()))?;
+    }
+    Ok(result)
+}
+
 /// Find one unambiguous binary identity in the native-only policy scope.
 /// The candidate's architecture comes from verified Packages metadata; the
 /// caller must not infer it from the architecture requested on the CLI.
@@ -533,6 +580,28 @@ Package: foreign\nVersion: 10\nArchitecture: arm64\n\n").unwrap();
         assert!(catalog(&root, "amd64", 20).is_err());
         let arm = catalog_by_arch(&root, "arm64", 20).unwrap();
         assert!(arm.contains_key(&PackageKey { name: "foreign".into(), architecture: "arm64".into() }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_multiarch_catalog_keeps_binary_identities_separate() {
+        let root = std::env::temp_dir().join(format!("rpt-explicit-arch-catalog-{}", std::process::id()));
+        let dir = root.join("0123456789abcdef01234567");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("InRelease"), "fixture").unwrap();
+        fs::write(dir.join("index-0.raw"),
+            "Package: lib\nVersion: 2\nArchitecture: amd64\nMulti-Arch: same\n\n\
+Package: lib\nVersion: 2\nArchitecture: i386\nMulti-Arch: same\n\n\
+Package: docs\nVersion: 1\nArchitecture: all\n\n\
+Package: foreign\nVersion: 1\nArchitecture: arm64\n\n").unwrap();
+        let catalog = catalog_by_architectures(&root, &["amd64", "i386"], 10).unwrap();
+        assert_eq!(catalog.len(), 3);
+        assert!(catalog.contains_key(&PackageKey { name: "lib".into(), architecture: "amd64".into() }));
+        assert!(catalog.contains_key(&PackageKey { name: "lib".into(), architecture: "i386".into() }));
+        assert!(catalog.contains_key(&PackageKey { name: "docs".into(), architecture: "all".into() }));
+        assert!(catalog_by_architectures(&root, &["amd64", "amd64"], 10).is_err());
+        assert!(catalog_by_architectures(&root, &["all"], 10).is_err());
+        assert!(catalog_by_architectures(&root, &["amd64", "i386"], 2).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
