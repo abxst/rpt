@@ -1,7 +1,8 @@
 //! Linux OverlayFS staging preparation. No dpkg execution or live-root commit.
-//! The caller must isolate mounts and maintainer scripts before using a staged root.
+//! Mounting and dpkg execution require separate namespace isolation; this module
+//! intentionally does not provide a mount executor.
 use anyhow::{bail, Context, Result};
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{fs, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone)]
 pub struct OverlayStage {
@@ -20,12 +21,9 @@ impl OverlayStage {
         if !lower.is_dir() { bail!("lower root must be a directory"); }
         fs::create_dir_all(base).context("creating overlay staging base")?;
         let base = fs::canonicalize(base)?;
-        if base == lower || lower.starts_with(&base) || base.starts_with(&lower) && lower != Path::new("/") {
+        if base == lower || lower.starts_with(&base) || base.starts_with(&lower) {
             bail!("overlay base must not overlap the lower filesystem tree");
         }
-        // When staging the live / root, the upper directory necessarily
-        // resides somewhere under /. This is safe only with explicit mount
-        // namespace isolation; the stage must not be mounted into live /.
         for name in ["upper", "work", "merged"] {
             let path = base.join(name);
             if path.exists() { bail!("staging path already exists: {}", path.display()); }
@@ -37,25 +35,6 @@ impl OverlayStage {
         fs::create_dir(&work)?;
         fs::create_dir(&merged)?;
         Ok(Self { lower, upper, work, merged })
-    }
-
-    /// Mount only in an already isolated mount namespace. No implicit
-    /// namespace creation, dpkg invocation, or promotion to the live root.
-    #[cfg(target_os = "linux")]
-    pub fn mount_in_private_namespace(&self) -> Result<()> {
-        if fs::read_to_string("/proc/self/mountinfo")?.is_empty() {
-            bail!("mount namespace cannot be inspected");
-        }
-        // Namespace isolation is the responsibility of the caller. Avoid
-        // exposing this method as a safe automatic host-root operation.
-        let options = format!("lowerdir={},upperdir={},workdir={}",
-            self.lower.display(), self.upper.display(), self.work.display());
-        let result = Command::new("mount")
-            .arg("-t").arg("overlay").arg("overlay")
-            .arg("-o").arg(&options).arg(&self.merged)
-            .status().context("executing overlay mount")?;
-        if !result.success() { bail!("OverlayFS mount failed: {result}"); }
-        Ok(())
     }
 
     pub fn is_mounted(&self) -> Result<bool> {
