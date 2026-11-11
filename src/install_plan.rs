@@ -822,7 +822,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssenti
         validate_installed_metadata(&complete, &relations).unwrap();
         let selected = scoped_relations(&relations, "amd64").unwrap();
         assert_eq!(selected.len(), 1);
-        let foreign = &relations[&PackageKey {
+        let foreign = &relations[&cache_query::InstalledKey {
             name: "lib".into(), architecture: "i386".into(),
         }];
         assert!(foreign.held && foreign.essential);
