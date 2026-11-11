@@ -700,6 +700,64 @@ mod tests {
         Ok(s.plan)
     }
     #[test]
+    fn foreign_reverse_and_forward_conflicts_breaks_are_checked() {
+        let arch = "amd64";
+        let app = item("app", "2", "");
+        let key = PackageKey { name: "app".into(), architecture: arch.into() };
+        let plan = [PlanStep { package: "app".into(), architecture: arch.into(),
+            version: "2".into(), installed: None }];
+        let mut catalog = BTreeMap::from([(key, app.clone())]);
+        let other = PackageKey { name: "foreign-lib".into(), architecture: "i386".into() };
+        let mut installed = BTreeMap::from([(other.clone(), InstalledRelations {
+            version: "1".into(), ..Default::default()
+        })]);
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_ok());
+        // A foreign package's installed reverse relationship is authoritative.
+        installed.get_mut(&other).unwrap().breaks = "app (>= 2)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        installed.get_mut(&other).unwrap().breaks.clear();
+        installed.get_mut(&other).unwrap().conflicts = "app".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        installed.get_mut(&other).unwrap().conflicts.clear();
+
+        // The staged native binary can itself conflict with an installed foreign name.
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts = "foreign-lib (>= 1)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts.clear();
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().breaks = "foreign-lib".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().breaks.clear();
+
+        // Versioned virtual Provides on the installed foreign binary are checked.
+        installed.get_mut(&other).unwrap().provides = "foreign-virtual (= 2)".into();
+        catalog.get_mut(&PackageKey { name: "app".into(), architecture: arch.into() })
+            .unwrap().conflicts = "foreign-virtual (>= 2)".into();
+        assert!(reject_foreign_negative_relations(&catalog, &installed, &plan, arch).is_err());
+    }
+
+    #[test]
+    fn installed_foreign_relations_remain_distinct_from_native() {
+        let path = std::env::temp_dir().join(format!("rpt-foreign-relations-{}", std::process::id()));
+        std::fs::write(&path, "\
+Package: libdemo\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n\
+Package: libdemo\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nConflicts: app (>= 3)\n\n\
+Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n").unwrap();
+        let keyed = read_installed_relations_by_arch(&path).unwrap();
+        assert_eq!(keyed.len(), 3);
+        let foreign = &keyed[&PackageKey { name: "libdemo".into(), architecture: "i386".into() }];
+        assert!(foreign.held);
+        assert_eq!(foreign.conflicts, "app (>= 3)");
+        let native = read_installed_relations(&path, "amd64").unwrap();
+        assert_eq!(native.len(), 2);
+        assert_eq!(native["libdemo"].version, "2");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn planned_foreign_coinstalled_identity_fails_closed() {
         let entries = BTreeMap::from([
             (cache_query::InstalledKey { name: "lib".into(), architecture: "amd64".into() },
