@@ -562,20 +562,13 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     if max_packages == 0 || max_packages > 5000 { bail!("max_packages must be 1..=5000"); }
     let keyed = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     let catalog = keyed;
-    let installed = cache_query::installed_catalog(status, architecture)?;
-    let installed_relations = read_installed_relations(status, architecture)?;
-    // Missing installed relationship metadata would silently bypass critical
-    // flags. Require the installed catalog and parsed dpkg records to agree.
-    for (name, version) in &installed {
-        let entry = installed_relations.get(name)
-            .with_context(|| format!("missing installed safety metadata for {name}"))?;
-        if entry.version != *version {
-            bail!("inconsistent installed version metadata for {name}");
-        }
-    }
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let complete_relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &complete_relations)?;
+    let installed = scoped_installed(&complete, architecture)?;
+    let installed_relations = scoped_relations(&complete_relations, architecture)?;
     let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
-    let full_installed = cache_query::installed_catalog_by_arch(status)?;
-    reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+    reject_foreign_identity_overlap(&complete, &plan, architecture)?;
     Ok(plan)
 }
 
@@ -583,8 +576,8 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
 /// metadata selection. No transaction state or dpkg writes.
 fn solve_catalog(
     catalog: &BTreeMap<PackageKey, PackageSummary>,
-    installed: &BTreeMap<String, String>,
-    installed_relations: &BTreeMap<String, InstalledRelations>,
+    installed: &BTreeMap<PackageKey, String>,
+    installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
     package: &str, max_packages: usize, architecture: &str,
 ) -> Result<Vec<PlanStep>> {
     let mut solver = Solver {
@@ -614,17 +607,11 @@ pub fn preview_with_policy(
     crate::apt_pin_eval::evaluate_with_phasing(
         package, &[], &preferences, target_release.as_deref(), None,
     )?;
-    let installed = cache_query::installed_catalog(status, architecture)?;
-    let installed_relations = read_installed_relations(status, architecture)?;
-    // Missing installed relationship metadata would silently bypass critical
-    // flags. Require the installed catalog and parsed dpkg records to agree.
-    for (name, version) in &installed {
-        let entry = installed_relations.get(name)
-            .with_context(|| format!("missing installed safety metadata for {name}"))?;
-        if entry.version != *version {
-            bail!("inconsistent installed version metadata for {name}");
-        }
-    }
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let complete_relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &complete_relations)?;
+    let installed = scoped_installed(&complete, architecture)?;
+    let installed_relations = scoped_relations(&complete_relations, architecture)?;
     let mut catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
@@ -637,7 +624,7 @@ pub fn preview_with_policy(
             if validated.contains(name) { continue; }
             let origins = crate::package_provenance::verified_version_origins(cache, name, architecture)?;
             let chosen = crate::apt_pin_eval::preview_candidate_with_phasing(
-                name, &origins, &preferences, installed.get(name).map(String::as_str),
+                name, &origins, &preferences, installed.iter().find(|(key, _)| key.name == *name).map(|(_, version)| version.as_str()),
                 target_release.as_deref(), None,
             )?.candidate.with_context(|| format!("APT policy has no candidate for {name}"))?;
             if !origins.iter().any(|origin| origin.version == chosen) {
@@ -688,8 +675,7 @@ pub fn preview_with_policy(
                     target_release.as_deref(), None,
                 )?.candidate)
             })?;
-            let full_installed = cache_query::installed_catalog_by_arch(status)?;
-            reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+            reject_foreign_identity_overlap(&complete, &plan, architecture)?;
             return Ok(plan);
         }
     }
