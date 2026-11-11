@@ -1109,7 +1109,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nStatus: hold ok installed\nEssenti
             assert!(parse_atom_for_arch("lib:any", arch).unwrap().any_arch);
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
             assert!(parse_atom_for_arch(&format!("lib:{foreign}"), arch).is_err());
-            assert!(parse_groups_for_arch("a:native | b:native, c (>= 2)", arch).is_ok());
+            assert!(parse_groups_for_arch("pkg-a:native | pkg-b:native, pkg-c (>= 2)", arch).is_ok());
         }
     }
     #[test]
