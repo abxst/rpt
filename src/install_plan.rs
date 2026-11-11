@@ -151,7 +151,9 @@ fn ensure_unchanged_protected(
 
 /// Read conflict metadata from the *installed* dpkg status, never infer it
 /// from the latest repository version. Dpkg status is local, not signed policy.
-fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+fn read_installed_relations_by_arch(
+    status: &Path,
+) -> Result<BTreeMap<PackageKey, InstalledRelations>> {
     let data = std::fs::read(status)?;
     if data.len() > 64 * 1024 * 1024 { bail!("dpkg status file exceeds safe size"); }
     let text = std::str::from_utf8(&data)?;
@@ -159,10 +161,13 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
     for record in crate::package_index::parse(text)? {
         let state = record.field("Status").context("dpkg stanza missing Status")?;
         if !crate::cache_query::is_installed_status(state) { continue; }
-        if !matches!(record.field("Architecture"), Some(a) if a == arch || a == "all") { continue; }
         let name = record.field("Package").context("installed status missing Package")?;
+        let arch = record.field("Architecture").context("installed status missing Architecture")?;
         let version = record.field("Version").context("installed status missing Version")?;
         parse_atom(name)?;
+        if arch.is_empty() || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("invalid installed architecture for {name}");
+        }
         version::compare(version, version)?;
         let entry = InstalledRelations {
             version: version.into(),
@@ -173,8 +178,22 @@ fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String
             essential: parse_critical_flag(record.field("Essential"), "Essential")?,
             protected: parse_critical_flag(record.field("Protected"), "Protected")?,
         };
-        if result.insert(name.to_owned(), entry).is_some() {
-            bail!("duplicate installed package in dpkg status: {name}");
+        let key = PackageKey { name: name.into(), architecture: arch.into() };
+        if result.insert(key.clone(), entry).is_some() {
+            bail!("duplicate installed package in dpkg status: {}:{}", key.name, key.architecture);
+        }
+    }
+    Ok(result)
+}
+
+/// Keep a narrow native name-keyed view for legacy installed version handling.
+/// A keyed view of *all* architectures is retained for conflict validation.
+fn read_installed_relations(status: &Path, arch: &str) -> Result<BTreeMap<String, InstalledRelations>> {
+    let mut result = BTreeMap::new();
+    for (key, entry) in read_installed_relations_by_arch(status)? {
+        if key.architecture != arch && key.architecture != "all" { continue; }
+        if result.insert(key.name.clone(), entry).is_some() {
+            bail!("ambiguous installed native/all relation identity for {}", key.name);
         }
     }
     Ok(result)
@@ -434,6 +453,44 @@ impl Solver<'_> {
     }
 }
 
+/// Validate both directions of Conflicts/Breaks against *foreign* installed
+/// package identities, using actual dpkg status metadata (not repository latest).
+/// A native-only plan is invalid even when the conflicting foreign package has
+/// a different name. Never infer that a foreign package will be removed.
+fn reject_foreign_negative_relations(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    installed: &BTreeMap<PackageKey, InstalledRelations>,
+    plan: &[PlanStep],
+    architecture: &str,
+) -> Result<()> {
+    for step in plan {
+        let staged_key = PackageKey {
+            name: step.package.clone(), architecture: step.architecture.clone(),
+        };
+        let proposed = catalog.get(&staged_key).with_context(|| format!(
+            "planned {}:{} missing repository metadata", step.package, step.architecture,
+        ))?;
+        if proposed.version != step.version {
+            bail!("inconsistent planned version for {}:{}", step.package, step.architecture);
+        }
+        for (key, foreign) in installed {
+            if key.architecture == architecture || key.architecture == "all" { continue; }
+            if key.name == step.package {
+                bail!("planned {} overlaps installed foreign architecture {}; full Multi-Arch solver required",
+                    key.name, key.architecture);
+            }
+            if relations_hit(&proposed.conflicts, &key.name, &foreign.version, &foreign.provides)?
+                || relations_hit(&proposed.breaks, &key.name, &foreign.version, &foreign.provides)?
+                || relations_hit(&foreign.conflicts, &step.package, &step.version, &proposed.provides)?
+                || relations_hit(&foreign.breaks, &step.package, &step.version, &proposed.provides)? {
+                bail!("Conflicts/Breaks between planned {}:{} and foreign installed {}:{}",
+                    step.package, step.architecture, key.name, key.architecture);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The current solver plans only one native architecture. A staged binary
 /// with a same-name foreign installed counterpart could require Multi-Arch:
 /// same version synchronization, file overlap checks or removals. The planner
@@ -475,6 +532,8 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
     let full_installed = cache_query::installed_catalog_by_arch(status)?;
     reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+    let keyed_relations = read_installed_relations_by_arch(status)?;
+    reject_foreign_negative_relations(&catalog, &keyed_relations, &plan, architecture)?;
     Ok(plan)
 }
 
@@ -589,6 +648,8 @@ pub fn preview_with_policy(
             })?;
             let full_installed = cache_query::installed_catalog_by_arch(status)?;
             reject_foreign_identity_overlap(&full_installed, &plan, architecture)?;
+            let keyed_relations = read_installed_relations_by_arch(status)?;
+            reject_foreign_negative_relations(&catalog, &keyed_relations, &plan, architecture)?;
             return Ok(plan);
         }
     }
