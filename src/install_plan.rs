@@ -202,7 +202,8 @@ fn validate_installed_metadata(
     relations: &BTreeMap<PackageKey, InstalledRelations>,
 ) -> Result<()> {
     for (key, item) in installed {
-        let relation = relations.get(key).with_context(|| format!(
+        let identity = PackageKey { name: key.name.clone(), architecture: key.architecture.clone() };
+        let relation = relations.get(&identity).with_context(|| format!(
             "missing installed safety metadata for {}:{}", key.name, key.architecture
         ))?;
         if relation.version != item.version {
@@ -715,10 +716,43 @@ mod tests {
             name: item.name.clone(), architecture: item.architecture.clone(),
         }, item.clone())).collect()
     }
+    fn test_keyed_versions(
+        catalog: &BTreeMap<PackageKey, PackageSummary>,
+        installed: &BTreeMap<String, String>, arch: &str,
+    ) -> BTreeMap<PackageKey, String> {
+        installed.iter().map(|(name, value)| {
+            let key = metadata_query::native_key_for(catalog, name, arch).unwrap_or(
+                PackageKey { name: name.clone(), architecture: arch.into() }
+            );
+            (key, value.clone())
+        }).collect()
+    }
+    fn test_keyed_relations(
+        catalog: &BTreeMap<PackageKey, PackageSummary>,
+        relations: &BTreeMap<String, InstalledRelations>, arch: &str,
+    ) -> BTreeMap<PackageKey, InstalledRelations> {
+        relations.iter().map(|(name, value)| {
+            let key = metadata_query::native_key_for(catalog, name, arch).unwrap_or(
+                PackageKey { name: name.clone(), architecture: arch.into() }
+            );
+            (key, value.clone())
+        }).collect()
+    }
+    fn solve_catalog_test(
+        catalog: &BTreeMap<PackageKey, PackageSummary>,
+        installed: &BTreeMap<String, String>,
+        relations: &BTreeMap<String, InstalledRelations>,
+        package: &str, limit: usize, arch: &str,
+    ) -> Result<Vec<PlanStep>> {
+        let binary_installed = test_keyed_versions(catalog, installed, arch);
+        let binary_relations = test_keyed_relations(catalog, relations, arch);
+        solve_catalog(catalog, &binary_installed, &binary_relations, package, limit, arch)
+    }
     fn solve(catalog: &BTreeMap<String, PackageSummary>, installed: &BTreeMap<String,String>, name: &str) -> Result<Vec<PlanStep>> {
         let keyed = test_keyed(catalog);
+        let keyed_installed = test_keyed_versions(&keyed, installed, "amd64");
         let mut s = Solver {
-            catalog: &keyed, installed, installed_relations: &BTreeMap::new(),
+            catalog: &keyed, installed: &keyed_installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)),
         };
@@ -758,7 +792,7 @@ mod tests {
             ("app".into(), item("app", "1", "docs (>= 1)")),
             ("docs".into(), docs),
         ]);
-        let plan = solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+        let plan = solve_catalog_test(&test_keyed(&catalog), &BTreeMap::new(),
             &BTreeMap::new(), "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|p| (p.package.as_str(), p.architecture.as_str()))
             .collect::<Vec<_>>(), [("docs", "all"), ("app", "amd64")]);
@@ -775,7 +809,7 @@ mod tests {
             (PackageKey { name: "lib".into(), architecture: "amd64".into() }, lib),
             (PackageKey { name: "lib".into(), architecture: "all".into() }, common),
         ]);
-        assert!(solve_catalog(&keyed, &BTreeMap::new(),
+        assert!(solve_catalog_test(&keyed, &BTreeMap::new(),
             &BTreeMap::new(), "app", 20, "amd64").is_err());
     }
 
@@ -791,7 +825,7 @@ mod tests {
         // different dependency graph from the latest published version.
         latest.insert("app".into(), item("app", "1", "lib (>= 1)"));
         latest.insert("lib".into(), item("lib", "1", ""));
-        let plan = solve_catalog(&test_keyed(&latest), &installed, &relations, "app", 20, "amd64").unwrap();
+        let plan = solve_catalog_test(&test_keyed(&latest), &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|x| (x.package.as_str(), x.version.as_str()))
             .collect::<Vec<_>>(), [("lib", "1"), ("app", "1")]);
     }
@@ -849,7 +883,7 @@ mod tests {
                 ("app".into(), app.clone()),
                 ("interpreter".into(), interpreter.clone()),
             ]);
-            let result = solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+            let result = solve_catalog_test(&test_keyed(&catalog), &BTreeMap::new(),
                 &BTreeMap::new(), "app", 20, arch).unwrap();
             assert_eq!(result.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
                 ["interpreter", "app"]);
@@ -859,7 +893,7 @@ mod tests {
                 let catalog = BTreeMap::from([
                     ("app".into(), app.clone()), ("interpreter".into(), denied),
                 ]);
-                assert!(solve_catalog(&test_keyed(&catalog), &BTreeMap::new(),
+                assert!(solve_catalog_test(&test_keyed(&catalog), &BTreeMap::new(),
                     &BTreeMap::new(), "app", 20, arch).is_err());
             }
             let foreign = if arch == "arm64" { "amd64" } else { "arm64" };
@@ -914,7 +948,7 @@ mod tests {
         let relations = BTreeMap::from([("held-dep".into(), InstalledRelations {
             version: "1".into(), held: true, ..Default::default()
         })]);
-        let plan = solve_catalog(&test_keyed(&catalog), &installed, &relations, "app", 20, "amd64").unwrap();
+        let plan = solve_catalog_test(&test_keyed(&catalog), &installed, &relations, "app", 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["other", "app"]);
     }
 
@@ -927,7 +961,7 @@ mod tests {
             if name == "essential" { state.essential = true; }
             else { state.protected = true; }
             let relations = BTreeMap::from([("core".into(), state)]);
-            assert!(solve_catalog(&test_keyed(&catalog), &installed, &relations, "core", 20, "amd64").is_err());
+            assert!(solve_catalog_test(&test_keyed(&catalog), &installed, &relations, "core", 20, "amd64").is_err());
         }
     }
     #[test]
@@ -941,11 +975,11 @@ mod tests {
             ("lib".into(), item("lib", "2", "")),
         ]);
         let installed = BTreeMap::from([("lib".into(), "1".into())]);
-        assert!(solve_catalog(
+        assert!(solve_catalog_test(
             &test_keyed(&catalog), &installed, &installed_relations, "app", 20, "amd64",
         ).is_err());
         installed_relations.get_mut("lib").unwrap().held = false;
-        assert!(solve_catalog(
+        assert!(solve_catalog_test(
             &test_keyed(&catalog), &installed, &installed_relations, "app", 20, "amd64",
         ).is_ok());
     }
@@ -1110,8 +1144,10 @@ mod tests {
         let catalog = BTreeMap::from([("app".into(), item("app", "2", ""))]);
         let installed = BTreeMap::from([("legacy".into(), "3".into())]);
         let keyed = test_keyed(&catalog);
+        let binary_installed = test_keyed_versions(&keyed, &installed, "amd64");
+        let binary_relations = test_keyed_relations(&keyed, &installed_relations, "amd64");
         let mut solver = Solver {
-            catalog: &keyed, installed: &installed, installed_relations: &installed_relations,
+            catalog: &keyed, installed: &binary_installed, installed_relations: &binary_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)),
         };
