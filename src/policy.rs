@@ -328,6 +328,30 @@ mod tests {
             .unwrap().as_deref(), Some("2.0"));
     }
     #[test]
+    fn exact_pin_candidate_respects_downgrade_boundary() {
+        let versions = vec!["1.0".into()];
+        for (priority, expected) in [(999, "2.0"), (1000, "2.0"), (1001, "1.0")] {
+            let records = crate::apt_preferences::parse(&format!(
+                "Package: app\nPin: version 1.0\nPin-Priority: {priority}\n"
+            )).unwrap();
+            assert_eq!(
+                choose_exact_pin_candidate("app", &versions, Some("2.0"), &records, 500)
+                    .unwrap().as_deref(),
+                Some(expected),
+                "pin priority {priority}"
+            );
+        }
+    }
+    #[test]
+    fn exact_pin_candidate_excludes_negative_pins() {
+        let records = crate::apt_preferences::parse(
+            "Package: app\nPin: version 2.0\nPin-Priority: -1\n",
+        ).unwrap();
+        let versions = vec!["1.0".into(), "2.0".into()];
+        assert_eq!(choose_exact_pin_candidate("app", &versions, None, &records, 500)
+            .unwrap().as_deref(), Some("1.0"));
+    }
+    #[test]
     fn exact_pin_candidate_rejects_unsupported_rules_even_without_versions() {
         let records = crate::apt_preferences::parse(
             "Package: *\nPin: release a=noble\nPin-Priority: 990\n",
