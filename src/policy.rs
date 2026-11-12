@@ -220,7 +220,7 @@ pub fn choose_priority_candidate(
             None => true,
             Some((current, priority)) => {
                 let order = version::compare(value, current)?;
-                (order == Ordering::Greater && priority < 1000)
+                (order == Ordering::Greater && priority <= 1000)
                     || (order == Ordering::Equal && priority < 100)
                     || (order == Ordering::Less && priority < 100)
             }
@@ -263,8 +263,20 @@ mod tests {
     fn priority_candidate_respects_downgrade_threshold() {
         let low = vec![("1.0".into(), 999)];
         assert_eq!(choose_priority_candidate(&low, Some("2.0")).unwrap().as_deref(), Some("2.0"));
-        let high = vec![("1.0".into(), 1000)];
+        let boundary = vec![("1.0".into(), 1000)];
+        assert_eq!(choose_priority_candidate(&boundary, Some("2.0")).unwrap().as_deref(), Some("2.0"));
+        let high = vec![("1.0".into(), 1001)];
         assert_eq!(choose_priority_candidate(&high, Some("2.0")).unwrap().as_deref(), Some("1.0"));
+    }
+    #[test]
+    fn priority_candidate_breaks_equal_pins_by_debian_version() {
+        let versions = vec![("1.9".into(), 500), ("2.0~rc1".into(), 500),
+            ("2.0".into(), 500)];
+        assert_eq!(choose_priority_candidate(&versions, None).unwrap().as_deref(), Some("2.0"));
+    }
+    #[test]
+    fn priority_candidate_keeps_installed_version_without_available_versions() {
+        assert_eq!(choose_priority_candidate(&[], Some("3.0")).unwrap().as_deref(), Some("3.0"));
     }
     #[test]
     fn priority_candidate_upgrades_at_normal_repository_priority() {
