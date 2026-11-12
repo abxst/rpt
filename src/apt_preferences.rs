@@ -78,6 +78,38 @@ fn valid_pin(value: &str) -> bool {
     }
 }
 
+/// Evaluate only explicit package names and exact version pins. Repository
+/// release/origin selectors and glob patterns require provenance-aware policy
+/// evaluation and deliberately fail closed here.
+pub fn exact_version_priority(
+    records: &[PinRecord], package: &str, version: &str,
+) -> Result<Option<i32>> {
+    let mut selected = None;
+    for record in records {
+        for selector in record.package.split_whitespace() {
+            if selector == "*" || selector.contains(['*', '?', '[', ']']) {
+                bail!("wildcard Package selectors require full APT policy evaluation");
+            }
+        }
+        let Some((kind, pattern)) = record.pin.split_once(' ') else {
+            bail!("invalid APT pin selector");
+        };
+        if !kind.eq_ignore_ascii_case("version")
+            || pattern.contains(['*', '?', '[', ']'])
+            || pattern.chars().any(char::is_whitespace)
+        {
+            bail!("only exact version pins are supported by this evaluator");
+        }
+        if record.package.split_whitespace().any(|name| name == package)
+            && pattern == version
+            && selected.replace(record.priority).is_some()
+        {
+            bail!("multiple matching exact version pins require full APT policy evaluation");
+        }
+    }
+    Ok(selected)
+}
+
 /// Inventory both canonical APT preferences locations in deterministic order.
 /// Do not follow arbitrary names in preferences.d: only files with accepted
 /// APT-style names are read. Any unsupported name with active content fails
@@ -131,6 +163,26 @@ mod tests {
         ] {
             assert!(parse(value).is_err(), "should refuse: {value}");
         }
+    }
+    #[test]
+    fn evaluates_only_exact_package_and_version_pins() {
+        let records = parse("Package: bash curl\nPin: version 2.0\nPin-Priority: 1001\n").unwrap();
+        assert_eq!(exact_version_priority(&records, "bash", "2.0").unwrap(), Some(1001));
+        assert_eq!(exact_version_priority(&records, "curl", "1.0").unwrap(), None);
+        assert_eq!(exact_version_priority(&records, "other", "2.0").unwrap(), None);
+    }
+    #[test]
+    fn exact_pin_evaluator_rejects_unsupported_and_ambiguous_rules() {
+        for input in [
+            "Package: *\nPin: version 2.0\nPin-Priority: 500\n",
+            "Package: bash\nPin: version 2.*\nPin-Priority: 500\n",
+            "Package: bash\nPin: release a=noble\nPin-Priority: 990\n",
+        ] {
+            let records = parse(input).unwrap();
+            assert!(exact_version_priority(&records, "bash", "2.0").is_err());
+        }
+        let records = parse("Package: bash\nPin: version 2.0\nPin-Priority: 500\n\nPackage: bash\nPin: version 2.0\nPin-Priority: 600\n").unwrap();
+        assert!(exact_version_priority(&records, "bash", "2.0").is_err());
     }
     #[test]
     fn ignores_empty_and_comment_only_files() {
