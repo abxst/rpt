@@ -2135,4 +2135,48 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
     }
 
 
+
+    #[test]
+    fn alternatives_reject_unsatisfied_version_constraints() {
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "app".into(), architecture: "amd64".into() },
+                item("app", "1", "libfirst (>= 3) | libsecond (>= 4)")),
+            (PackageKey { name: "libfirst".into(), architecture: "amd64".into() },
+                item("libfirst", "2", "")),
+            (PackageKey { name: "libsecond".into(), architecture: "amd64".into() },
+                item("libsecond", "3", "")),
+        ]);
+        assert!(solve_catalog(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            "app", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn alternatives_reject_missing_providers_without_partial_plan() {
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "app".into(), architecture: "amd64".into() },
+            item("app", "1", "missing-one | missing-two"),
+        )]);
+        assert!(solve_catalog(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            "app", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn alternatives_preserve_versioned_installed_satisfaction() {
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "app".into(), architecture: "amd64".into() },
+                item("app", "1", "libfirst (>= 2) | libsecond")),
+            (PackageKey { name: "libfirst".into(), architecture: "amd64".into() },
+                item("libfirst", "2", "")),
+            (PackageKey { name: "libsecond".into(), architecture: "amd64".into() },
+                item("libsecond", "1", "")),
+        ]);
+        let installed = BTreeMap::from([(
+            PackageKey { name: "libfirst".into(), architecture: "amd64".into() },
+            "2".into(),
+        )]);
+        let plan = solve_catalog(&catalog, &installed, &BTreeMap::new(),
+            "app", 20, "amd64").unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].package, "app");
+    }
 }
