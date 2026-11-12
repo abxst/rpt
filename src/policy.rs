@@ -332,8 +332,8 @@ mod tests {
         let versions = vec!["1.0".into()];
         for (priority, expected) in [(999, "2.0"), (1000, "2.0"), (1001, "1.0")] {
             let records = crate::apt_preferences::parse(&format!(
-                "Package: app\\nPin: version 1.0\\nPin-Priority: {priority}\\n"
-            ).replace("\\\\n", "\\n")).unwrap();
+                "Package: app\nPin: version 1.0\nPin-Priority: {priority}\n"
+            )).unwrap();
             assert_eq!(
                 choose_exact_pin_candidate("app", &versions, Some("2.0"), &records, 500)
                     .unwrap().as_deref(),
