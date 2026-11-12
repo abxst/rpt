@@ -65,9 +65,15 @@ impl Journal {
                 bail!("incomplete journal write {}; manual inspection required", path.display());
             }
             if path.extension().is_some_and(|ext| ext == "json") {
+                if !entry.file_type()?.is_file() {
+                    bail!("journal record is not a regular file {}; manual inspection required", path.display());
+                }
                 let bytes = fs::read(&path)?;
                 let record: JournalRecord = serde_json::from_slice(&bytes)
                     .with_context(|| format!("invalid journal record {}", path.display()))?;
+                if path.file_stem().and_then(|name| name.to_str()) != Some(record.id.as_str()) {
+                    bail!("journal filename/identifier mismatch {}; manual inspection required", path.display());
+                }
                 if matches!(record.phase, Phase::Prepared | Phase::Running | Phase::Interrupted) {
                     bail!("unfinished transaction {} ({:?}); manual recovery required", record.id, record.phase);
                 }
@@ -92,6 +98,11 @@ impl Journal {
             bail!("only failed transactions may contain an error");
         }
         let path = self.dir.join(format!("{}.json", record.id));
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if !meta.file_type().is_file() {
+                bail!("journal record is not a regular file {}", path.display());
+            }
+        }
         let previous = match fs::read(&path) {
             Ok(bytes) => {
                 let old: JournalRecord = serde_json::from_slice(&bytes)
@@ -121,6 +132,11 @@ impl Journal {
             bail!("invalid transaction identifier");
         }
         let target = self.dir.join(format!("{}.json", record.id));
+        if let Ok(meta) = fs::symlink_metadata(&target) {
+            if !meta.file_type().is_file() {
+                bail!("refusing to replace non-regular journal record {}", target.display());
+            }
+        }
         // Never overwrite a journal entry with a malformed or unrelated ID.
         let data = serde_json::to_vec_pretty(record)?;
         let temp = self.dir.join(format!(".{}.{}.tmp", record.id, std::process::id()));
@@ -226,4 +242,35 @@ mod tests {
         drop(journal);
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn rejects_mismatched_journal_filename() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("wrong.json"), r#"{"id":"right","phase":"succeeded","error":null}"#).unwrap();
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_journal_without_following_it() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let external = temp_dir();
+        fs::write(&external, r#"{"id":"tx","phase":"succeeded","error":null}"#).unwrap();
+        symlink(&external, dir.join("tx.json")).unwrap();
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_file(dir.join("tx.json")).unwrap();
+        let journal = Journal::open(&dir).unwrap();
+        symlink(&external, dir.join("tx.json")).unwrap();
+        let record = JournalRecord { id: "tx".into(), phase: Phase::Prepared, error: None };
+        assert!(journal.advance(&record).is_err());
+        assert!(journal.write(&record).is_err());
+        assert_eq!(fs::read_to_string(&external).unwrap(), r#"{"id":"tx","phase":"succeeded","error":null}"#);
+        drop(journal);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_file(external).unwrap();
+    }
+
 }
