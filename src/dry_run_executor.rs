@@ -64,6 +64,10 @@ impl DryRunExecutor {
                     bail!("{detail}");
                 }
             };
+            // A direct child may exit while its descendants remain alive.
+            // Verify group shutdown before recording any terminal state.
+            supervisor.stop(stop_grace).await
+                .context("process-group shutdown unverified; journal left Running for manual recovery")?;
             if status.success() {
                 record.phase = Phase::Succeeded;
                 journal.advance(&record).context("recording successful supervised transaction")?;
