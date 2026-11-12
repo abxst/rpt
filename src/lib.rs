@@ -17,6 +17,7 @@ pub mod error;
 pub mod sources;
 pub mod transaction;
 pub mod transaction_journal;
+pub mod dry_run_executor;
 pub mod overlay_stage;
 
 use anyhow::{bail, Result};
