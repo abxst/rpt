@@ -44,6 +44,35 @@ fn main() -> Result<()> {
                 .arg(options).arg(&stage.merged).status().context("mounting OverlayFS")?;
             if !status.success() { bail!("overlay mount failed: {status}"); }
             if !stage.is_mounted()? { bail!("overlay mount not visible in child namespace"); }
+            if env::var_os("RPT_OVERLAY_INTEGRATION_FIXTURE").is_some() {
+                // The fixture is opt-in and must never operate on a live root.
+                // Require the exact known fixture files before any writes.
+                for name in ["modified", "deleted", "untouched"] {
+                    if !stage.lower.join(name).is_file() {
+                        bail!("missing disposable integration fixture: {name}");
+                    }
+                }
+                if fs::read_to_string(stage.lower.join("modified"))? != "original\\n"
+                    || fs::read_to_string(stage.lower.join("deleted"))? != "remove-me\\n"
+                    || fs::read_to_string(stage.lower.join("untouched"))? != "untouched\\n" {
+                    bail!("unexpected fixture contents");
+                }
+                fs::write(stage.merged.join("modified"), "changed\\n")?;
+                fs::remove_file(stage.merged.join("deleted"))?;
+                fs::write(stage.merged.join("created"), "new\\n")?;
+                fs::create_dir(stage.merged.join("new-directory"))?;
+                if fs::read_to_string(stage.merged.join("modified"))? != "changed\\n"
+                    || stage.merged.join("deleted").exists()
+                    || fs::read_to_string(stage.merged.join("created"))? != "new\\n"
+                    || !stage.merged.join("new-directory").is_dir() {
+                    bail!("overlay copy-up/whiteout/new-file validation failed");
+                }
+                if fs::read_to_string(stage.lower.join("modified"))? != "original\\n"
+                    || !stage.lower.join("deleted").exists()
+                    || stage.lower.join("created").exists() {
+                    bail!("lower filesystem was modified");
+                }
+            }
             // Exit drops the entire mount namespace. No copy-back, no dpkg.
         }
         _ => bail!("usage: rpt-overlay-probe probe <lower-directory> <staging-directory>"),
