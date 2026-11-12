@@ -102,10 +102,9 @@ pub fn exact_version_priority(
         }
         if record.package.split_whitespace().any(|name| name == package)
             && pattern == version
+            && selected.replace(record.priority).is_some()
         {
-            if selected.replace(record.priority).is_some() {
-                bail!("multiple matching exact version pins require full APT policy evaluation");
-            }
+            bail!("multiple matching exact version pins require full APT policy evaluation");
         }
     }
     Ok(selected)
