@@ -65,9 +65,15 @@ impl Journal {
                 bail!("incomplete journal write {}; manual inspection required", path.display());
             }
             if path.extension().is_some_and(|ext| ext == "json") {
+                if !fs::symlink_metadata(&path)?.file_type().is_file() {
+                    bail!("journal entry is not a regular file {}; manual inspection required", path.display());
+                }
                 let bytes = fs::read(&path)?;
                 let record: JournalRecord = serde_json::from_slice(&bytes)
                     .with_context(|| format!("invalid journal record {}", path.display()))?;
+                if path.file_stem().and_then(|name| name.to_str()) != Some(record.id.as_str()) {
+                    bail!("journal filename/identifier mismatch {}; manual inspection required", path.display());
+                }
                 if matches!(record.phase, Phase::Prepared | Phase::Running | Phase::Interrupted) {
                     bail!("unfinished transaction {} ({:?}); manual recovery required", record.id, record.phase);
                 }
@@ -92,6 +98,11 @@ impl Journal {
             bail!("only failed transactions may contain an error");
         }
         let path = self.dir.join(format!("{}.json", record.id));
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if !metadata.file_type().is_file() {
+                bail!("journal entry is not a regular file {}", path.display());
+            }
+        }
         let previous = match fs::read(&path) {
             Ok(bytes) => {
                 let old: JournalRecord = serde_json::from_slice(&bytes)
@@ -226,4 +237,31 @@ mod tests {
         drop(journal);
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn rejects_mismatched_record_filename_on_reopen() {
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        journal.write(&JournalRecord { id: "actual".into(), phase: Phase::Succeeded, error: None }).unwrap();
+        drop(journal);
+        fs::rename(dir.join("actual.json"), dir.join("other.json")).unwrap();
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_journal_on_reopen_and_advance() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        let external = dir.join("external-data");
+        fs::write(&external, b"unrelated content").unwrap();
+        symlink(&external, dir.join("linked.json")).unwrap();
+        assert!(journal.advance(&JournalRecord { id: "linked".into(), phase: Phase::Prepared, error: None }).is_err());
+        drop(journal);
+        assert!(Journal::open(&dir).is_err());
+        assert_eq!(fs::read(&external).unwrap(), b"unrelated content");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
 }
