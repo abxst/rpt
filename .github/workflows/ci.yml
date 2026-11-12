@@ -105,6 +105,45 @@ jobs:
             echo "Malformed pinning unexpectedly accepted" >&2
             exit 1
           fi
+      - name: Isolated APT candidate policy fixture
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rpt-apt-policy"
+          mkdir -p "$root/lists/partial" "$root/cache/archives/partial" "$root/etc/preferences.d"
+          cat > "$root/status" <<'EOF'
+          Package: rpt-fixture
+          Status: install ok installed
+          Architecture: all
+          Version: 2.0
+
+          EOF
+          cat > "$root/lists/fixture_Packages" <<'EOF'
+          Package: rpt-fixture
+          Version: 1.0
+          Architecture: all
+          Description: isolated test package
+
+          Package: rpt-fixture
+          Version: 2.0
+          Architecture: all
+          Description: isolated test package
+
+          EOF
+          cat > "$root/etc/preferences" <<'EOF'
+          Package: rpt-fixture
+          Pin: version 1.0
+          Pin-Priority: 1001
+          EOF
+          apt-cache -o Dir::State::status="$root/status" \\
+            -o Dir::State::lists="$root/lists" \\
+            -o Dir::Cache="$root/cache" \\
+            -o Dir::Etc::sourcelist=/dev/null \\
+            -o Dir::Etc::sourceparts=/dev/null \\
+            -o Dir::Etc::preferences="$root/etc/preferences" \\
+            -o Dir::Etc::preferencesparts="$root/etc/preferences.d" \\
+            policy rpt-fixture > "$root/policy.txt"
+          grep -q 'Installed: 2.0' "$root/policy.txt"
+          cat "$root/policy.txt"
       - name: Dry-run transaction CLI end-to-end (unprivileged)
         run: |
           set -euo pipefail
