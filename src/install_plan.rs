@@ -2179,4 +2179,30 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].package, "app");
     }
+
+    #[test]
+    fn nested_backtracking_discards_transitive_failed_branch() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "bad | good")),
+            ("bad".into(), item("bad", "1", "transitive")),
+            ("transitive".into(), item("transitive", "1", "missing")),
+            ("good".into(), item("good", "1", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["good", "app"]);
+    }
+
+    #[test]
+    fn backtracking_does_not_resurrect_failed_branch_with_shared_dependency() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "bad | good, shared")),
+            ("bad".into(), item("bad", "1", "shared, missing")),
+            ("good".into(), item("good", "1", "shared")),
+            ("shared".into(), item("shared", "1", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        let names = plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["shared", "good", "app"]);
+    }
 }
