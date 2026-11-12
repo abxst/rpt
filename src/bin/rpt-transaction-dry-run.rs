@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use rpt::dry_run_executor::DryRunExecutor;
 use std::{path::PathBuf, process::ExitCode};
+use rpt::transaction_journal::{JournalRecord, Phase};
 
 #[derive(Parser)]
 #[command(about = "Simulate a journaled transaction without installing packages")]
@@ -20,7 +21,7 @@ struct Args {
     json: bool,
 }
 
-async fn execute(args: Args) -> Result<()> {
+async fn execute(args: Args) -> Result<u8> {
     if args.id.is_empty()
         || !args.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
@@ -32,12 +33,52 @@ async fn execute(args: Args) -> Result<()> {
     let executor = DryRunExecutor::new(args.journal_dir.clone(), args.queue_capacity)?;
     emit_event(args.json, &args.id, "queued", None);
     let id = args.id.clone();
-    let result = executor.submit(args.id, args.simulate_failure).await;
+    // Never drop an active transaction future on SIGINT/SIGTERM.
+    let mut job = Box::pin(executor.submit(args.id, args.simulate_failure));
+    #[cfg(unix)]
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let (result, signal_code) = tokio::select! {
+        result = &mut job => (result, None),
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            emit_event(args.json, &id, "shutdown_requested", Some("SIGINT; draining transaction"));
+            (job.await, Some(130u8))
+        }
+        signal = term.recv() => {
+            if signal.is_none() { bail!("SIGTERM listener closed"); }
+            emit_event(args.json, &id, "shutdown_requested", Some("SIGTERM; draining transaction"));
+            (job.await, Some(143u8))
+        }
+    };
+    #[cfg(not(unix))]
+    let (result, signal_code) = tokio::select! {
+        result = &mut job => (result, None),
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            emit_event(args.json, &id, "shutdown_requested", Some("interrupt; draining transaction"));
+            (job.await, Some(130u8))
+        }
+    };
+    if let Some(code) = signal_code {
+        // This check is only sufficient for dry-run: no dpkg or children exist.
+        let path = args.journal_dir.join(format!("{id}.json"));
+        let bytes = std::fs::read(&path)?;
+        let record: JournalRecord = serde_json::from_slice(&bytes)?;
+        if record.id != id || !matches!(record.phase, Phase::Succeeded | Phase::Failed) {
+            bail!("transaction not verified terminal; manual inspection required");
+        }
+        if let Err(error) = &result {
+            emit_event(args.json, &id, "failed", Some(&format!("{error:#}")));
+        }
+        emit_event(args.json, &id, "stopped_verified", Some("dry-run terminal journal; no host mutations"));
+        return Ok(code);
+    }
     match &result {
         Ok(()) => emit_event(args.json, &id, "succeeded", None),
         Err(error) => emit_event(args.json, &id, "failed", Some(&format!("{error:#}"))),
     }
-    result
+    result.map(|()| 0)
 }
 
 fn emit_event(json: bool, id: &str, event: &str, error: Option<&str>) {
@@ -58,8 +99,8 @@ fn emit_event(json: bool, id: &str, event: &str, error: Option<&str>) {
 #[tokio::main]
 async fn main() -> ExitCode {
     match execute(Args::parse()).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Ok(code) => ExitCode::from(code),
+        Err(error) => { eprintln!("rpt: {error:#}"); ExitCode::FAILURE },
     }
 }
 
