@@ -318,7 +318,8 @@ mod tests {
     }
     #[test]
     fn candidate_priority_matrix_covers_ties_and_installed_state() {
-        let cases: &[(&[(&str, i32)], Option<&str>, Option<&str>)] = &[
+        type CandidateCase<'a> = (&'a [(&'a str, i32)], Option<&'a str>, Option<&'a str>);
+        let cases: &[CandidateCase<'_>] = &[
             (&[("1.0", 500), ("2.0", 500)], None, Some("2.0")),
             (&[("1.0", 990), ("2.0", 500)], None, Some("1.0")),
             (&[("1.0", -1), ("2.0", 0)], None, None),
