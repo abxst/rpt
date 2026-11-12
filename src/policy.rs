@@ -230,6 +230,34 @@ pub fn choose_priority_candidate(
     Ok(selected.map(|(candidate, _)| candidate.to_owned()))
 }
 
+/// Read-only candidate diagnostic for the explicitly supported exact-version
+/// preferences subset. All available versions are assumed to have the caller's
+/// trusted baseline priority; repository provenance is not inferred here.
+pub fn choose_exact_pin_candidate(
+    package: &str,
+    available: &[String],
+    installed: Option<&str>,
+    records: &[crate::apt_preferences::PinRecord],
+    baseline_priority: i32,
+) -> Result<Option<String>> {
+    if baseline_priority <= 0 {
+        bail!("baseline repository priority must be positive");
+    }
+    let mut prioritized = Vec::with_capacity(available.len());
+    for candidate in available {
+        let pinned = crate::apt_preferences::exact_version_priority(
+            records, package, candidate,
+        )?;
+        prioritized.push((candidate.clone(), pinned.unwrap_or(baseline_priority)));
+    }
+    // Even with no repository candidates, unsupported preference semantics
+    // must not silently become a successful installed-only preview.
+    if available.is_empty() {
+        crate::apt_preferences::exact_version_priority(records, package, "")?;
+    }
+    choose_priority_candidate(&prioritized, installed)
+}
+
 pub fn preview(
     cache: &Path, status_file: &Path, apt_root: &Path, package: &str, arch: &str,
 ) -> Result<PolicyPreview> {
@@ -287,6 +315,26 @@ mod tests {
     fn priority_candidate_ignores_nonpositive_pins_and_rejects_bad_versions() {
         assert_eq!(choose_priority_candidate(&[("2.0".into(), -1)], None).unwrap(), None);
         assert!(choose_priority_candidate(&[("bad version".into(), 500)], None).is_err());
+    }
+    #[test]
+    fn exact_pin_candidate_prefers_explicit_priority() {
+        let records = crate::apt_preferences::parse(
+            "Package: app\nPin: version 1.0\nPin-Priority: 990\n",
+        ).unwrap();
+        let versions = vec!["1.0".into(), "2.0".into()];
+        assert_eq!(choose_exact_pin_candidate("app", &versions, None, &records, 500)
+            .unwrap().as_deref(), Some("1.0"));
+        assert_eq!(choose_exact_pin_candidate("other", &versions, None, &records, 500)
+            .unwrap().as_deref(), Some("2.0"));
+    }
+    #[test]
+    fn exact_pin_candidate_rejects_unsupported_rules_even_without_versions() {
+        let records = crate::apt_preferences::parse(
+            "Package: *\nPin: release a=noble\nPin-Priority: 990\n",
+        ).unwrap();
+        assert!(choose_exact_pin_candidate("app", &[], Some("1.0"), &records, 500).is_err());
+        assert!(choose_exact_pin_candidate("app", &["2.0".into()], None, &records, 500).is_err());
+        assert!(choose_exact_pin_candidate("app", &["2.0".into()], None, &[], 0).is_err());
     }
     #[test]
     fn refuses_pin_preferences() {
