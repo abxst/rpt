@@ -65,9 +65,20 @@ impl Journal {
                 bail!("incomplete journal write {}; manual inspection required", path.display());
             }
             if path.extension().is_some_and(|ext| ext == "json") {
+                let kind = fs::symlink_metadata(&path)
+                    .with_context(|| format!("inspecting journal {}", path.display()))?;
+                if !kind.file_type().is_file() {
+                    bail!("journal entry is not a regular file {}; manual inspection required", path.display());
+                }
                 let bytes = fs::read(&path)?;
                 let record: JournalRecord = serde_json::from_slice(&bytes)
                     .with_context(|| format!("invalid journal record {}", path.display()))?;
+                if path.file_stem().and_then(|name| name.to_str()) != Some(record.id.as_str())
+                    || record.id.is_empty()
+                    || !record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    bail!("journal filename/identifier mismatch {}; manual inspection required", path.display());
+                }
                 if matches!(record.phase, Phase::Prepared | Phase::Running | Phase::Interrupted) {
                     bail!("unfinished transaction {} ({:?}); manual recovery required", record.id, record.phase);
                 }
@@ -215,6 +226,40 @@ mod tests {
         assert!(journal.advance(&record).is_err());
         drop(journal);
         assert!(Journal::open(&dir).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_journal_filename_identifier_mismatch() {
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        journal.write(&JournalRecord { id: "actual".into(), phase: Phase::Succeeded, error: None }).unwrap();
+        drop(journal);
+        fs::rename(dir.join("actual.json"), dir.join("renamed.json")).unwrap();
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_journal_entry() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        journal.write(&JournalRecord { id: "real".into(), phase: Phase::Succeeded, error: None }).unwrap();
+        drop(journal);
+        symlink(dir.join("real.json"), dir.join("alias.json")).unwrap();
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_directory_disguised_as_journal() {
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        drop(journal);
+        fs::create_dir(dir.join("fake.json")).unwrap();
+        assert!(Journal::open(&dir).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 
