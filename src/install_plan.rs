@@ -589,9 +589,15 @@ impl Solver<'_> {
             // Preserve the originating dependency constraint and qualifier.
             // An alternative must not be silently weakened to an unversioned
             // package request when exploring a backtracking branch.
-            let matching = group.iter().find(|req| {
-                branch.concrete(req).ok().flatten().as_ref() == Some(&option)
-            });
+            let mut matching = None;
+            for req in group {
+                // Candidate lookup failures are policy/metadata errors, not
+                // evidence that an alternative is simply unavailable.
+                if branch.concrete(req)?.as_ref() == Some(&option) {
+                    matching = Some(req);
+                    break;
+                }
+            }
             // Only branch-local resolution errors are candidates for retry.
             if matching.is_some_and(|req| {
                 let actual = if req.name == option.name {
