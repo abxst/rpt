@@ -98,7 +98,8 @@ impl ProcessSupervisor {
             // Reap direct child even if it died before its descendants.
             let status = match last_status {
                 Some(status) => status,
-                None => self.child.wait().await?,
+                None => tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await
+                    .context("timed out reaping supervised child after SIGKILL")??,
             };
             // Reaping grandchildren belongs to their parent or an init/subreaper.
             // If group still exists, refuse to claim successful shutdown.
@@ -161,6 +162,18 @@ mod tests {
         let outcome = child.stop(Duration::ZERO).await.unwrap();
         assert!(matches!(outcome, StopOutcome::Terminated(_) | StopOutcome::Killed(_) | StopOutcome::Exited(_)));
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repeated_stop_after_successful_reap_is_safe() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("exec sleep 30");
+        let mut supervisor = ProcessSupervisor::spawn(&mut command).unwrap();
+        let first = supervisor.stop(Duration::from_secs(2)).await.unwrap();
+        assert!(matches!(first, StopOutcome::Terminated(_) | StopOutcome::Exited(_)));
+        let second = supervisor.stop(Duration::from_secs(2)).await.unwrap();
+        assert!(matches!(second, StopOutcome::Exited(_)));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_reaps_shell_and_two_background_children() {
