@@ -36,6 +36,12 @@ impl DryRunExecutor {
             let journal = Journal::wait_async(dir).await.context("acquiring transaction journal lock")?;
             let mut record = JournalRecord { id, phase: Phase::Prepared, error: None };
             journal.advance(&record).context("preparing supervised transaction")?;
+            // Persist Running before spawning: a journal write failure must
+            // never leave a newly spawned child executing without a durable
+            // Running record. A crash between this write and spawn is
+            // conservatively treated as unfinished during recovery.
+            record.phase = Phase::Running;
+            journal.advance(&record).context("recording supervised transaction before spawn")?;
             let mut command = Command::new(&program);
             command.args(&args);
             let mut supervisor = match ProcessSupervisor::spawn(&mut command) {
@@ -47,8 +53,6 @@ impl DryRunExecutor {
                     return Err(error);
                 }
             };
-            record.phase = Phase::Running;
-            journal.advance(&record).context("starting supervised transaction")?;
             let status = match tokio::time::timeout(timeout, supervisor.wait()).await {
                 Ok(result) => result.context("waiting for supervised command")?,
                 Err(_) => {
