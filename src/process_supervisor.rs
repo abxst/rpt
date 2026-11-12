@@ -62,6 +62,14 @@ impl ProcessSupervisor {
         })
     }
 
+    #[cfg(unix)]
+    async fn reap_bounded(&mut self) -> Result<ExitStatus> {
+        tokio::time::timeout(Duration::from_secs(2), self.child.wait())
+            .await
+            .context("timed out reaping supervised child; shutdown unverified")?
+            .context("reaping supervised child")
+    }
+
     pub async fn wait(&mut self) -> Result<ExitStatus> {
         self.child.wait().await.context("waiting for supervised process")
     }
@@ -75,7 +83,7 @@ impl ProcessSupervisor {
             if !signals::exists(self.pgid)? {
                 let status = match initial {
                     Some(status) => status,
-                    None => self.child.wait().await?,
+                    None => self.reap_bounded().await?,
                 };
                 return Ok(StopOutcome::Exited(status));
             }
@@ -87,7 +95,7 @@ impl ProcessSupervisor {
                 if !signals::exists(self.pgid)? {
                     let status = match last_status {
                         Some(status) => status,
-                        None => self.child.wait().await?,
+                        None => self.reap_bounded().await?,
                     };
                     return Ok(StopOutcome::Terminated(status));
                 }
@@ -98,8 +106,7 @@ impl ProcessSupervisor {
             // Reap direct child even if it died before its descendants.
             let status = match last_status {
                 Some(status) => status,
-                None => tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await
-                    .context("timed out reaping supervised child after SIGKILL")??,
+                None => self.reap_bounded().await?,
             };
             // Reaping grandchildren belongs to their parent or an init/subreaper.
             // If group still exists, refuse to claim successful shutdown.
@@ -195,6 +202,19 @@ mod tests {
         let outcome = supervisor.stop(Duration::from_secs(3)).await.unwrap();
         assert!(matches!(outcome, StopOutcome::Terminated(_) | StopOutcome::Exited(_)));
         let _ = std::fs::remove_file(marker);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaping_completed_child_is_idempotent() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("exit 7");
+        let mut supervisor = ProcessSupervisor::spawn(&mut command).unwrap();
+        let first = supervisor.wait().await.unwrap();
+        assert_eq!(first.code(), Some(7));
+        let second = supervisor.reap_bounded().await.unwrap();
+        assert_eq!(second.code(), Some(7));
+        let outcome = supervisor.stop(Duration::ZERO).await.unwrap();
+        assert!(matches!(outcome, StopOutcome::Exited(status) if status.code() == Some(7)));
     }
 
 }
