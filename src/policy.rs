@@ -220,9 +220,9 @@ pub fn choose_priority_candidate(
             None => true,
             Some((current, priority)) => {
                 let order = version::compare(value, current)?;
-                (order == Ordering::Greater && priority < 100)
+                (order == Ordering::Greater && priority < 1000)
                     || (order == Ordering::Equal && priority < 100)
-                    || (order == Ordering::Less && priority < 1000)
+                    || (order == Ordering::Less && priority < 100)
             }
         };
         if replace { return Ok(Some(value.to_owned())); }
@@ -267,9 +267,14 @@ mod tests {
         assert_eq!(choose_priority_candidate(&high, Some("2.0")).unwrap().as_deref(), Some("1.0"));
     }
     #[test]
+    fn priority_candidate_upgrades_at_normal_repository_priority() {
+        assert_eq!(choose_priority_candidate(&[("2.0".into(), 500)], Some("1.0"))
+            .unwrap().as_deref(), Some("2.0"));
+    }
+    #[test]
     fn priority_candidate_ignores_nonpositive_pins_and_rejects_bad_versions() {
         assert_eq!(choose_priority_candidate(&[("2.0".into(), -1)], None).unwrap(), None);
-        assert_eq!(choose_priority_candidate(&[("bad version".into(), 500)], None).is_err(), true);
+        assert!(choose_priority_candidate(&[("bad version".into(), 500)], None).is_err());
     }
     #[test]
     fn refuses_pin_preferences() {
