@@ -254,6 +254,16 @@ enum Command {
         #[arg(required = true)]
         packages: Vec<String>,
     },
+    /// Simulate a journaled transaction; never runs dpkg or mounts filesystems.
+    TransactionDryRun {
+        #[arg(long)]
+        journal_dir: PathBuf,
+        #[arg(long)]
+        id: String,
+        /// Simulate a failure and persist its diagnostic message.
+        #[arg(long)]
+        fail_message: Option<String>,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -292,6 +302,25 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli) -> Result<()> {
     let format = cli.log_format;
     match cli.command {
+        Command::TransactionDryRun { journal_dir, id, fail_message } => {
+            let executor = rpt::dry_run_executor::DryRunExecutor::new(journal_dir.clone(), 8)?;
+            if format == LogFormat::Text {
+                eprintln!("rpt: dry-run transaction {id}: waiting for journal lock");
+            }
+            let result = executor.submit(id.clone(), fail_message).await;
+            if let Err(error) = result {
+                eprintln!("rpt: transaction {id} failed; inspect journal: rpt-journal-inspect {} --json",
+                    journal_dir.display());
+                return Err(error);
+            }
+            match format {
+                LogFormat::Text => println!("rpt: dry-run transaction {id} succeeded; no packages installed"),
+                LogFormat::Json => println!("{}", serde_json::json!({
+                    "event": "transaction_complete", "id": id, "phase": "succeeded",
+                    "dry_run": true, "journal_dir": journal_dir
+                })),
+            }
+        }
         Command::DriverInfo { driver, os_release } => {
             let kind = match driver {
                 Some(value) => DriverKind::from_str(&value)?,
