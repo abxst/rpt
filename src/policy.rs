@@ -193,6 +193,43 @@ pub fn choose_default_candidate(
     Ok(selected.map(str::to_owned))
 }
 
+/// Select a candidate from already authenticated, externally assigned APT
+/// priorities. This is a pure policy primitive, not a preferences parser.
+pub fn choose_priority_candidate(
+    available: &[(String, i32)], installed: Option<&str>,
+) -> Result<Option<String>> {
+    let mut selected: Option<(&str, i32)> = None;
+    for (candidate, priority) in available {
+        version::compare(candidate, candidate)?;
+        if *priority <= 0 { continue; }
+        let replace = match selected {
+            None => true,
+            Some((current, current_priority)) => {
+                *priority > current_priority
+                    || (*priority == current_priority
+                        && version::compare(candidate, current)? == Ordering::Greater)
+            }
+        };
+        if replace { selected = Some((candidate, *priority)); }
+    }
+    if let Some(value) = installed {
+        version::compare(value, value)?;
+        // The installed version participates at priority 100. Equal-version
+        // repository entries do not constitute a downgrade.
+        let replace = match selected {
+            None => true,
+            Some((current, priority)) => {
+                let order = version::compare(value, current)?;
+                (order == Ordering::Greater && priority < 100)
+                    || (order == Ordering::Equal && priority < 100)
+                    || (order == Ordering::Less && priority < 1000)
+            }
+        };
+        if replace { return Ok(Some(value.to_owned())); }
+    }
+    Ok(selected.map(|(candidate, _)| candidate.to_owned()))
+}
+
 pub fn preview(
     cache: &Path, status_file: &Path, apt_root: &Path, package: &str, arch: &str,
 ) -> Result<PolicyPreview> {
@@ -216,6 +253,23 @@ mod tests {
         assert!(choose_default_candidate(&["invalid".to_string()], None).is_err());
         assert!(choose_default_candidate(&["1.0".to_string(), "invalid".to_string()], None).is_err());
         assert!(choose_default_candidate(&["1.0".to_string()], Some("invalid")).is_err());
+    }
+    #[test]
+    fn priority_candidate_prefers_pin_over_newer_version() {
+        let versions = vec![("3.0".into(), 500), ("2.0".into(), 990)];
+        assert_eq!(choose_priority_candidate(&versions, None).unwrap().as_deref(), Some("2.0"));
+    }
+    #[test]
+    fn priority_candidate_respects_downgrade_threshold() {
+        let low = vec![("1.0".into(), 999)];
+        assert_eq!(choose_priority_candidate(&low, Some("2.0")).unwrap().as_deref(), Some("2.0"));
+        let high = vec![("1.0".into(), 1000)];
+        assert_eq!(choose_priority_candidate(&high, Some("2.0")).unwrap().as_deref(), Some("1.0"));
+    }
+    #[test]
+    fn priority_candidate_ignores_nonpositive_pins_and_rejects_bad_versions() {
+        assert_eq!(choose_priority_candidate(&[("2.0".into(), -1)], None).unwrap(), None);
+        assert_eq!(choose_priority_candidate(&[("bad version".into(), 500)], None).is_err(), true);
     }
     #[test]
     fn refuses_pin_preferences() {
