@@ -109,7 +109,7 @@ impl ProcessSupervisor {
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            return Ok(StopOutcome::Killed(status));
+            Ok(StopOutcome::Killed(status))
         }
         #[cfg(not(unix))]
         {
