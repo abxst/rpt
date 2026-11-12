@@ -75,6 +75,11 @@ jobs:
             echo "Malformed pinning unexpectedly accepted" >&2
             exit 1
           fi
+      - name: Dry-run transaction CLI end-to-end (unprivileged)
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin rpt-transaction-dry-run --bin rpt-journal-inspect
+          bash tests/dry-run-cli-e2e.sh ./target/debug/rpt-transaction-dry-run ./target/debug/rpt-journal-inspect
       - name: Release build
         run: cargo build --release --locked
   arm64-native:
