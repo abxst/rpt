@@ -49,6 +49,36 @@ jobs:
           EOF
           ./target/debug/rpt driver-info --os-release "$RUNNER_TEMP/rpt-fedora-os-release" | grep -q 'Driver: rpm'
           echo 'PASS package driver contracts and distro family discovery'
+      - name: Debian version ordering differential against dpkg
+        run: |
+          set -euo pipefail
+          pairs=(
+            '1.0|1.0'
+            '1.0~rc1|1.0'
+            '1:1.0|2.0'
+            '1.0-1|1.0-2'
+            '1.0+git1|1.0'
+            '2.0~~pre|2.0~pre'
+            '0:1.0|1.0'
+            '1.0-1ubuntu1|1.0-1ubuntu2'
+          )
+          for pair in "${pairs[@]}"; do
+            left="${pair%%|*}"
+            right="${pair#*|}"
+            actual="$(./target/debug/rpt version-compare --driver deb "$left" "$right")"
+            if dpkg --compare-versions "$left" lt "$right"; then
+              expected=-1
+            elif dpkg --compare-versions "$left" gt "$right"; then
+              expected=1
+            else
+              expected=0
+            fi
+            if [[ "$actual" != "$expected" ]]; then
+              echo "Version ordering mismatch: $left vs $right: rpt=$actual dpkg=$expected" >&2
+              exit 1
+            fi
+          done
+          echo 'PASS Debian version ordering differential'
       - name: Read-only APT preferences parser fixture
         run: |
           set -euo pipefail
