@@ -132,6 +132,9 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg("-c").arg("exit 0");
         let mut child = ProcessSupervisor::spawn(&mut command).unwrap();
+        // Wait for the short-lived child before testing the already-exited path.
+        let completed = child.wait().await.unwrap();
+        assert!(completed.success());
         let outcome = child.stop(Duration::from_secs(2)).await.unwrap();
         match outcome {
             StopOutcome::Exited(s) | StopOutcome::Terminated(s) => assert!(s.success()),
