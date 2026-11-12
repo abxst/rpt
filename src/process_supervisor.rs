@@ -161,4 +161,27 @@ mod tests {
         let outcome = child.stop(Duration::ZERO).await.unwrap();
         assert!(matches!(outcome, StopOutcome::Terminated(_) | StopOutcome::Killed(_) | StopOutcome::Exited(_)));
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_reaps_shell_and_two_background_children() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let marker = std::env::temp_dir().join(format!("rpt-process-group-{}-{stamp}", std::process::id()));
+        let mut command = Command::new("sh");
+        // The shell owns and reaps its children; all three remain in the
+        // supervisor's group. The readiness marker avoids a spawn race.
+        command.arg("-c").arg(
+            "trap 'wait; exit 0' TERM; sleep 30 & sleep 30 & : > \"$1\"; wait",
+        ).arg("rpt-test").arg(&marker);
+        let mut supervisor = ProcessSupervisor::spawn(&mut command).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !marker.exists() {
+            assert!(tokio::time::Instant::now() < deadline, "child did not become ready");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let outcome = supervisor.stop(Duration::from_secs(3)).await.unwrap();
+        assert!(matches!(outcome, StopOutcome::Terminated(_) | StopOutcome::Exited(_)));
+        let _ = std::fs::remove_file(marker);
+    }
+
 }
