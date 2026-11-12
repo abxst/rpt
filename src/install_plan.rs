@@ -2205,4 +2205,42 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         let names = plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>();
         assert_eq!(names, ["shared", "good", "app"]);
     }
+
+    #[test]
+    fn virtual_provider_version_is_not_binary_package_version() {
+        let mut provider = item("provider", "99", "");
+        provider.provides = "virtual-api (= 2)".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 3)")),
+            ("provider".into(), provider),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+    }
+
+    #[test]
+    fn virtual_provider_version_constraint_accepts_matching_provided_version() {
+        let mut provider = item("provider", "1", "");
+        provider.provides = "virtual-api (= 3)".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+            ("provider".into(), provider),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["provider", "app"]);
+    }
+
+    #[test]
+    fn multiple_equally_valid_versioned_virtual_providers_fail_closed() {
+        let mut first = item("first", "1", "");
+        first.provides = "virtual-api (= 3)".into();
+        let mut second = item("second", "2", "");
+        second.provides = "virtual-api (= 4)".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+            ("first".into(), first),
+            ("second".into(), second),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+    }
 }
