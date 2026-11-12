@@ -76,6 +76,46 @@ impl Journal {
         Ok(journal)
     }
 
+    /// State-checked journal API for future transaction executors.
+    /// The caller must hold this Journal's exclusive cross-process lock.
+    /// A failed or interrupted transaction is terminal until operator recovery.
+    pub fn advance(&self, record: &JournalRecord) -> Result<()> {
+        if record.id.is_empty()
+            || !record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("invalid transaction identifier");
+        }
+        if record.phase == Phase::Failed && record.error.as_deref().is_none_or(str::is_empty) {
+            bail!("failed transaction requires a diagnostic error");
+        }
+        if record.phase != Phase::Failed && record.error.is_some() {
+            bail!("only failed transactions may contain an error");
+        }
+        let path = self.dir.join(format!("{}.json", record.id));
+        let previous = match fs::read(&path) {
+            Ok(bytes) => {
+                let old: JournalRecord = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("invalid existing journal {}", path.display()))?;
+                if old.id != record.id { bail!("journal identifier mismatch"); }
+                Some(old.phase)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let valid = matches!(
+            (previous, record.phase),
+            (None, Phase::Prepared)
+                | (Some(Phase::Prepared), Phase::Running)
+                | (Some(Phase::Prepared), Phase::Failed)
+                | (Some(Phase::Running), Phase::Succeeded)
+                | (Some(Phase::Running), Phase::Failed)
+        );
+        if !valid {
+            bail!("invalid transaction phase transition: {:?} -> {:?}", previous, record.phase);
+        }
+        self.write(record)
+    }
+
     pub fn write(&self, record: &JournalRecord) -> Result<()> {
         if record.id.is_empty() || !record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             bail!("invalid transaction identifier");
@@ -150,6 +190,31 @@ mod tests {
         drop(first);
         rx.recv_timeout(Duration::from_secs(3)).unwrap();
         handle.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checked_transitions_reject_skips_restarts_and_missing_diagnostics() {
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        let mut record = JournalRecord { id: "tx-state".into(), phase: Phase::Running, error: None };
+        assert!(journal.advance(&record).is_err());
+        record.phase = Phase::Prepared;
+        journal.advance(&record).unwrap();
+        assert!(journal.advance(&record).is_err());
+        record.phase = Phase::Succeeded;
+        assert!(journal.advance(&record).is_err());
+        record.phase = Phase::Running;
+        journal.advance(&record).unwrap();
+        record.phase = Phase::Failed;
+        assert!(journal.advance(&record).is_err());
+        record.error = Some("fixture failure".into());
+        journal.advance(&record).unwrap();
+        record.phase = Phase::Running;
+        record.error = None;
+        assert!(journal.advance(&record).is_err());
+        drop(journal);
+        assert!(Journal::open(&dir).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
 
