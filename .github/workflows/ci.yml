@@ -84,6 +84,10 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/journal-crash-fixtures.sh ./target/debug/rpt-transaction-dry-run ./target/debug/rpt-journal-inspect
+      - name: Transaction JSONL events (unprivileged)
+        run: |
+          set -euo pipefail
+          bash tests/transaction-json-events.sh ./target/debug/rpt-transaction-dry-run
       - name: Release build
         run: cargo build --release --locked
   arm64-native:
