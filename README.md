@@ -401,3 +401,11 @@ The read-only native dependency solver now uses exact `(name, architecture)` key
 ### Read-only `Replaces` ownership safety
 
 RPT now preserves the Debian `Replaces` control field from repository metadata and installed dpkg status. When a planned binary declares a matching versioned or unversioned `Replaces` relationship with another installed (including foreign-architecture) or simultaneously staged binary, or a reverse installed relationship exists, dependency planning refuses that unsafe file-ownership transfer. Unsupported `Replaces` syntax also fails closed. Full dpkg file ownership checks (`/var/lib/dpkg/info/*.list`), `Conflicts` + `Replaces` transitions, overwrite rules and actual package transactions are **not implemented**; this guard prevents claiming an unsafe plan is installable.
+
+## Primary goal: full APT behavioral replacement
+
+The release gate is defined in [APT replacement acceptance criteria](docs/apt-parity-acceptance.md).
+**Do not replace /usr/bin/apt** until APT CLI/config, candidate policy, dependency
+resolution, signed acquisition, actual dpkg transactions and recovery pass
+their differential acceptance suites on isolated Ubuntu VMs. Performance
+optimization follows compatibility, not the reverse.
