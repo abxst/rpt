@@ -100,7 +100,7 @@ fn emit_event(json: bool, id: &str, event: &str, error: Option<&str>) {
 async fn main() -> ExitCode {
     match execute(Args::parse()).await {
         Ok(code) => ExitCode::from(code),
-        Err(error) => { eprintln!("rpt: {error:#}"); ExitCode::FAILURE },
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
