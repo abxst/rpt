@@ -171,13 +171,21 @@ pub fn choose_default_candidate(
     let mut selected: Option<&str> = None;
     for version_str in versions {
         version::compare(version_str, version_str)?;
-        if selected.is_none_or(|current| version::compare(version_str, current).unwrap_or(Ordering::Less) == Ordering::Greater) {
+        let is_newer = match selected {
+            Some(current) => version::compare(version_str, current)? == Ordering::Greater,
+            None => true,
+        };
+        if is_newer {
             selected = Some(version_str);
         }
     }
     if let Some(value) = installed {
         version::compare(value, value)?;
-        if selected.is_none_or(|current| version::compare(value, current).unwrap_or(Ordering::Less) == Ordering::Greater) {
+        let installed_is_newer = match selected {
+            Some(current) => version::compare(value, current)? == Ordering::Greater,
+            None => true,
+        };
+        if installed_is_newer {
             // No default-priority repository can cause a downgrade.
             return Ok(Some(value.to_owned()));
         }
@@ -206,6 +214,8 @@ mod tests {
         assert_eq!(choose_default_candidate(&[], Some("3.0")).unwrap().as_deref(), Some("3.0"));
         assert_eq!(choose_default_candidate(&available, None).unwrap().as_deref(), Some("2.0"));
         assert!(choose_default_candidate(&["invalid".to_string()], None).is_err());
+        assert!(choose_default_candidate(&["1.0".to_string(), "invalid".to_string()], None).is_err());
+        assert!(choose_default_candidate(&["1.0".to_string()], Some("invalid")).is_err());
     }
     #[test]
     fn refuses_pin_preferences() {
