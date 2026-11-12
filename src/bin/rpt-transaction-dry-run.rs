@@ -15,6 +15,9 @@ struct Args {
     simulate_failure: Option<String>,
     #[arg(long, default_value_t = 16)]
     queue_capacity: usize,
+    /// Emit machine-readable JSON lines to stderr.
+    #[arg(long)]
+    json: bool,
 }
 
 async fn execute(args: Args) -> Result<()> {
@@ -27,14 +30,29 @@ async fn execute(args: Args) -> Result<()> {
         bail!("simulated failure message cannot be empty");
     }
     let executor = DryRunExecutor::new(args.journal_dir.clone(), args.queue_capacity)?;
-    eprintln!("rpt: dry-run transaction {} queued", args.id);
+    emit_event(args.json, &args.id, "queued", None);
     let id = args.id.clone();
     let result = executor.submit(args.id, args.simulate_failure).await;
     match &result {
-        Ok(()) => eprintln!("rpt: dry-run transaction {id} succeeded; journal: {}", args.journal_dir.display()),
-        Err(error) => eprintln!("rpt: dry-run transaction {id} failed: {error:#}; journal: {}", args.journal_dir.display()),
+        Ok(()) => emit_event(args.json, &id, "succeeded", None),
+        Err(error) => emit_event(args.json, &id, "failed", Some(&format!("{error:#}"))),
     }
     result
+}
+
+fn emit_event(json: bool, id: &str, event: &str, error: Option<&str>) {
+    if json {
+        eprintln!("{}", serde_json::json!({
+            "transaction_id": id,
+            "event": event,
+            "mode": "dry_run",
+            "error": error,
+        }));
+    } else if let Some(error) = error {
+        eprintln!("rpt: dry-run transaction {id} {event}: {error}");
+    } else {
+        eprintln!("rpt: dry-run transaction {id} {event}");
+    }
 }
 
 #[tokio::main]
