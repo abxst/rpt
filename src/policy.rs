@@ -317,6 +317,29 @@ mod tests {
         assert!(choose_priority_candidate(&[("bad version".into(), 500)], None).is_err());
     }
     #[test]
+    fn candidate_priority_matrix_covers_ties_and_installed_state() {
+        type CandidateCase<'a> = (&'a [(&'a str, i32)], Option<&'a str>, Option<&'a str>);
+        let cases: &[CandidateCase<'_>] = &[
+            (&[("1.0", 500), ("2.0", 500)], None, Some("2.0")),
+            (&[("1.0", 990), ("2.0", 500)], None, Some("1.0")),
+            (&[("1.0", -1), ("2.0", 0)], None, None),
+            (&[("1.0", 1000)], Some("2.0"), Some("2.0")),
+            (&[("1.0", 1001)], Some("2.0"), Some("1.0")),
+            (&[("2.0", 500)], Some("1.0"), Some("2.0")),
+            (&[("1.0", 500)], Some("2.0"), Some("2.0")),
+            (&[("2.0~rc1", 500), ("2.0", 500)], None, Some("2.0")),
+            (&[], Some("1.0"), Some("1.0")),
+            (&[], None, None),
+        ];
+        for (available, installed, expected) in cases {
+            let owned: Vec<(String, i32)> = available.iter()
+                .map(|(version, priority)| ((*version).to_owned(), *priority))
+                .collect();
+            let actual = choose_priority_candidate(&owned, *installed).unwrap();
+            assert_eq!(actual.as_deref(), *expected, "available={available:?} installed={installed:?}");
+        }
+    }
+    #[test]
     fn exact_pin_candidate_prefers_explicit_priority() {
         let records = crate::apt_preferences::parse(
             "Package: app\nPin: version 1.0\nPin-Priority: 990\n",
