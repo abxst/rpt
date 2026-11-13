@@ -526,6 +526,26 @@ pub fn prepare_exact(
 mod tests {
     use super::*;
     #[test]
+    fn exact_manifest_validates_architecture_identity_and_duplicate_roots() {
+        let mk = |arch: &str| crate::install_plan::PlanStep {
+            package: "testpkg".into(), architecture: arch.into(),
+            version: "1".into(), installed: None,
+        };
+        assert!(prepare_exact(Path::new("/not-needed"), &[mk("arm64")], "amd64").is_err());
+        assert!(prepare_exact(Path::new("/not-needed"), &[mk("amd64"), mk("amd64")], "amd64").is_err());
+    }
+    #[test]
+    fn already_installed_exact_version_needs_no_download() {
+        let step = crate::install_plan::PlanStep {
+            package: "testpkg".into(), architecture: "amd64".into(),
+            version: "1".into(), installed: Some("1".into()),
+        };
+        let manifest = prepare_exact(Path::new("/not-needed"), &[step], "amd64").unwrap();
+        assert!(manifest.packages.is_empty());
+        assert!(!manifest.executable);
+    }
+
+    #[test]
     fn filename_and_hash_are_strict() {
         assert!(!safe_path("../../etc/passwd"));
         assert!(!safe_path("pool/%2e%2e/deb.deb"));
