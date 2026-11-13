@@ -36,6 +36,19 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Resolver and policy regression milestone
+
+The isolated `apt-cache policy` fixture exercises priority 999/1000/1001
+against RPT's read-only candidate diagnostic. The in-process resolver matrix
+additionally checks alternative backtracking, versioned conflicts, versioned
+virtual Provides, Pre-Depends ordering and dependency-cycle refusal.
+
+**These are not yet end-to-end APT resolver differential tests.** The
+in-process catalog does not reproduce the complete `apt-get -s` transaction
+semantics, and no real dpkg mutation is authorized. Gate C and Gate D
+remain **NOT MET** until matched APT/RPT fixtures cover the full policy and
+dependency graph with negative cases.
+
 ## Current implemented commands
 
 `sources`, `version-compare`, `inspect-index`, `index-versions`, `update`, `cache-versions`, `installed-version`, `policy-preview`, `show`, `search`, `list`, `depends`, `rdepends`, `plan-install`, `prepare-download`, `fetch`.
