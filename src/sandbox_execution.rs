@@ -30,7 +30,7 @@ pub struct SandboxInstall {
 }
 
 // Verify embedded .deb identity inside Docker before any dpkg mutation.
-const DPKG_CHECK_SCRIPT: &str = r#"set -eu
+pub(crate) const DPKG_CHECK_SCRIPT: &str = r#"set -eu
 tab="$(printf '\t')"
 while IFS="$tab" read -r archive expected_name expected_version expected_arch; do
     actual_name="$(dpkg-deb -f "/rpt-input/$archive" Package)"
@@ -44,7 +44,7 @@ while IFS="$tab" read -r archive expected_name expected_version expected_arch; d
     fi
 done < /rpt-input/expected.tsv
 "#;
-const DPKG_INSTALL_SCRIPT: &str = r#"dpkg --install -- "$@"
+pub(crate) const DPKG_INSTALL_SCRIPT: &str = r#"dpkg --install -- "$@"
 dpkg --configure --pending
 dpkg --triggers-only --pending
 if [ -n "$(dpkg --audit)" ]; then
@@ -69,11 +69,11 @@ dpkg --purge -- "$@"
 dpkg --audit
 "#;
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-fn valid_image(image: &str) -> bool {
+pub(crate) fn valid_image(image: &str) -> bool {
     !image.is_empty() && image.len() <= 255 && !image.starts_with('-')
         && image.bytes().all(|b| b.is_ascii_alphanumeric()
             || matches!(b, b'/' | b':' | b'@' | b'.' | b'-' | b'_'))
@@ -119,7 +119,7 @@ fn docker_args(image: &str, name: &str, stage: &Path, files: &[String], lifecycl
 
 // The immutable-looking staging view is private and populated from fully
 // rehashed copies, never a direct bind of the caller's download tree.
-fn stage_artifacts(stage: &Path, artifacts: &Path, manifest: &ExactManifest) -> Result<Vec<String>> {
+pub(crate) fn stage_artifacts(stage: &Path, artifacts: &Path, manifest: &ExactManifest) -> Result<Vec<String>> {
     let root = fs::canonicalize(artifacts)?;
     if !root.is_dir() { bail!("artifact root is not a directory"); }
     let mut staged = Vec::new();
