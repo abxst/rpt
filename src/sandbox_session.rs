@@ -15,7 +15,9 @@ use tokio::process::Command;
 
 mod bound_execution;
 mod session_lock;
+mod snapshot;
 pub use bound_execution::{apply_bound, BoundApply};
+pub use snapshot::{restore as restore_snapshot, verify as verify_snapshot};
 
 const SESSION_LABEL: &str = "org.rpt.sandbox=true";
 const INSPECT_TEMPLATE: &str = r#"{{index .Config.Labels "org.rpt.sandbox"}}|{{.State.Running}}"#;
@@ -121,6 +123,11 @@ async fn run_command(
     let container = verify_session(session, true).await?;
     if !sandbox_execution::valid_id(id) { bail!("invalid transaction ID"); }
     if !(10..=3600).contains(&seconds) { bail!("timeout must be 10..=3600 seconds"); }
+    fs::create_dir_all(journal)?;
+    // Before any dpkg mutation, persist and independently verify a Docker
+    // image of this exact sandbox state. A SIGKILL after this point leaves
+    // recoverable evidence even if the supervised journal stays Running.
+    let _checkpoint = snapshot::capture_locked(session, id, &container, journal).await?;
     let queue = DryRunExecutor::new(journal.to_path_buf(), 1)?;
     let outcome = queue.submit_command(
         id.to_owned(), program.to_owned(), args,
