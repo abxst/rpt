@@ -9,6 +9,14 @@ use std::{
     io::{Read, Write}, path::{Path, PathBuf}, time::Duration,
 };
 
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum SandboxLifecycle {
+    #[default]
+    Install,
+    InstallRemove,
+    InstallPurge,
+}
+
 pub struct SandboxInstall {
     pub manifest: PathBuf,
     pub artifacts: PathBuf,
@@ -18,17 +26,47 @@ pub struct SandboxInstall {
     pub architecture: String,
     pub image: String,
     pub timeout_seconds: u64,
+    pub lifecycle: SandboxLifecycle,
 }
 
-// File names are passed as positional arguments, never interpolated into shell.
-const DPKG_INSTALL_SCRIPT: &str = r#"set -eu
-dpkg --install -- "$@"
+// Verify embedded .deb identity inside Docker before any dpkg mutation.
+const DPKG_CHECK_SCRIPT: &str = r#"set -eu
+tab="$(printf '\t')"
+while IFS="$tab" read -r archive expected_name expected_version expected_arch; do
+    actual_name="$(dpkg-deb -f "/rpt-input/$archive" Package)"
+    actual_version="$(dpkg-deb -f "/rpt-input/$archive" Version)"
+    actual_arch="$(dpkg-deb -f "/rpt-input/$archive" Architecture)"
+    if [ "$actual_name" != "$expected_name" ] ||
+       [ "$actual_version" != "$expected_version" ] ||
+       [ "$actual_arch" != "$expected_arch" ]; then
+        echo "Signed manifest disagrees with Debian control fields: $archive" >&2
+        exit 1
+    fi
+done < /rpt-input/expected.tsv
+"#;
+const DPKG_INSTALL_SCRIPT: &str = r#"dpkg --install -- "$@"
 dpkg --configure --pending
 dpkg --triggers-only --pending
 if [ -n "$(dpkg --audit)" ]; then
     dpkg --audit >&2
     exit 1
 fi
+"#;
+const DPKG_REMOVE_SCRIPT: &str = r#"set --
+for archive in /rpt-input/*.deb; do
+    pkg="$(dpkg-deb -f "$archive" Package)"
+    set -- "$@" "$pkg"
+done
+dpkg --remove -- "$@"
+dpkg --audit
+"#;
+const DPKG_PURGE_SCRIPT: &str = r#"set --
+for archive in /rpt-input/*.deb; do
+    pkg="$(dpkg-deb -f "$archive" Package)"
+    set -- "$@" "$pkg"
+done
+dpkg --purge -- "$@"
+dpkg --audit
 "#;
 
 fn valid_id(id: &str) -> bool {
@@ -41,7 +79,7 @@ fn valid_image(image: &str) -> bool {
             || matches!(b, b'/' | b':' | b'@' | b'.' | b'-' | b'_'))
 }
 
-fn docker_args(image: &str, name: &str, stage: &Path, files: &[String]) -> Result<Vec<String>> {
+fn docker_args(image: &str, name: &str, stage: &Path, files: &[String], lifecycle: SandboxLifecycle) -> Result<Vec<String>> {
     if !valid_image(image) || !name.starts_with("rpt-sbx-") {
         bail!("invalid sandbox image or name");
     }
@@ -61,7 +99,13 @@ fn docker_args(image: &str, name: &str, stage: &Path, files: &[String]) -> Resul
         "--name", name, "--mount",
     ].iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
     args.push(format!("type=bind,src={path},dst=/rpt-input,readonly"));
-    args.extend(["--entrypoint", "/bin/sh", image, "-euc", DPKG_INSTALL_SCRIPT, "rpt-sandbox"]
+    let mut script = format!("{DPKG_CHECK_SCRIPT}\n{DPKG_INSTALL_SCRIPT}");
+    match lifecycle {
+        SandboxLifecycle::Install => {}
+        SandboxLifecycle::InstallRemove => script.push_str(DPKG_REMOVE_SCRIPT),
+        SandboxLifecycle::InstallPurge => script.push_str(DPKG_PURGE_SCRIPT),
+    }
+    args.extend(["--entrypoint", "/bin/sh", image, "-euc", &script, "rpt-sandbox"]
         .iter().map(|x| (*x).to_owned()));
     for file in files {
         if file.contains('/') || !file.ends_with(".deb")
@@ -155,7 +199,7 @@ pub async fn install(opts: SandboxInstall) -> Result<()> {
     let _guard = StageGuard(stage.clone());
     let staged = stage_artifacts(&stage, &opts.artifacts, &manifest)?;
     let name = format!("rpt-sbx-{}", opts.id);
-    let args = docker_args(&opts.image, &name, &stage, &staged)?;
+    let args = docker_args(&opts.image, &name, &stage, &staged, opts.lifecycle)?;
 
     let executor = DryRunExecutor::new(journal_dir, 1)?;
     let outcome = executor.submit_command(
@@ -186,7 +230,7 @@ mod tests {
         assert!(!valid_image("debian:latest --net host"));
         assert!(!valid_id("../root"));
         let args = docker_args("debian:bookworm-slim", "rpt-sbx-test", &std::env::temp_dir(),
-            &["00000.deb".into()]).unwrap();
+            &["00000.deb".into()], SandboxLifecycle::Install).unwrap();
         assert!(args.contains(&"--network=none".to_owned()));
         assert!(args.contains(&"--cap-drop=ALL".to_owned()));
         assert!(args.contains(&"--security-opt=no-new-privileges".to_owned()));
@@ -195,6 +239,6 @@ mod tests {
     }
     #[test]
     fn cannot_run_without_artifacts() {
-        assert!(docker_args("debian:bookworm-slim","rpt-sbx-test",&std::env::temp_dir(),&[]).is_err());
+        assert!(docker_args("debian:bookworm-slim","rpt-sbx-test",&std::env::temp_dir(),&[],SandboxLifecycle::Install).is_err());
     }
 }
