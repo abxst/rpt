@@ -105,6 +105,8 @@ jobs:
             echo "Malformed pinning unexpectedly accepted" >&2
             exit 1
           fi
+      - name: Signed APT/RPT dependency plan differential (read-only)
+        run: bash tests/signed-plan-differential.sh
       - name: Isolated APT candidate policy fixture
         run: |
           set -euo pipefail
