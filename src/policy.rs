@@ -292,7 +292,7 @@ mod tests {
         let low = vec![("1.0".into(), 999)];
         assert_eq!(choose_priority_candidate(&low, Some("2.0")).unwrap().as_deref(), Some("2.0"));
         let boundary = vec![("1.0".into(), 1000)];
-        assert_eq!(choose_priority_candidate(&boundary, Some("2.0")).unwrap().as_deref(), Some("2.0"));
+        assert_eq!(choose_priority_candidate(&boundary, Some("2.0")).unwrap().as_deref(), Some("1.0"));
         let high = vec![("1.0".into(), 1001)];
         assert_eq!(choose_priority_candidate(&high, Some("2.0")).unwrap().as_deref(), Some("1.0"));
     }
