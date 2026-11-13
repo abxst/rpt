@@ -2231,6 +2231,89 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
     }
 
     #[test]
+    fn resolver_alternative_and_conflict_matrix() {
+        struct Case {
+            dependency: &'static str,
+            bad_conflict: &'static str,
+            good_version: &'static str,
+            expected: &'static [&'static str],
+        }
+        for case in [
+            Case { dependency: "bad | good", bad_conflict: "legacy", good_version: "1", expected: &["good", "app"] },
+            Case { dependency: "bad (>= 2) | good", bad_conflict: "", good_version: "1", expected: &["good", "app"] },
+            Case { dependency: "bad | good (>= 2)", bad_conflict: "legacy", good_version: "1", expected: &[] },
+            Case { dependency: "bad | good (>= 2)", bad_conflict: "legacy", good_version: "2", expected: &["good", "app"] },
+        ] {
+            let mut bad = item("bad", "1", "");
+            bad.conflicts = case.bad_conflict.into();
+            let catalog = BTreeMap::from([
+                ("app".into(), item("app", "1", case.dependency)),
+                ("bad".into(), bad),
+                ("good".into(), item("good", case.good_version, "")),
+            ]);
+            let installed = BTreeMap::from([("legacy".into(), "1".into())]);
+            let result = solve(&catalog, &installed, "app");
+            if case.expected.is_empty() {
+                assert!(result.is_err(), "expected refusal for {}", case.dependency);
+            } else {
+                let plan = result.unwrap();
+                assert_eq!(
+                    plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+                    case.expected,
+                    "dependency: {}", case.dependency,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolver_versioned_provides_matrix() {
+        for (provided, required, accepted) in [
+            ("virtual-api (= 3)", "virtual-api (>= 2)", true),
+            ("virtual-api (= 2)", "virtual-api (>= 3)", false),
+            ("virtual-api (= 3)", "virtual-api (= 3)", true),
+            ("virtual-api (= 3)", "virtual-api (>> 3)", false),
+            ("virtual-api (= 3)", "virtual-api (<< 4)", true),
+        ] {
+            let mut provider = item("provider", "99", "");
+            provider.provides = provided.into();
+            let catalog = BTreeMap::from([
+                ("app".into(), item("app", "1", required)),
+                ("provider".into(), provider),
+            ]);
+            let result = solve(&catalog, &BTreeMap::new(), "app");
+            assert_eq!(result.is_ok(), accepted, "provided={provided}, required={required}");
+            if accepted {
+                assert_eq!(
+                    result.unwrap().iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+                    ["provider", "app"],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolver_predepends_and_cycles_fail_closed_or_ordered() {
+        let mut app = item("app", "1", "");
+        app.pre_depends = "foundation (>= 2)".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), app.clone()),
+            ("foundation".into(), item("foundation", "2", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(
+            plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["foundation", "app"],
+        );
+        let mut too_old = catalog.clone();
+        too_old.insert("foundation".into(), item("foundation", "1", ""));
+        assert!(solve(&too_old, &BTreeMap::new(), "app").is_err());
+        let mut cycle = catalog;
+        cycle.insert("foundation".into(), item("foundation", "2", "app"));
+        assert!(solve(&cycle, &BTreeMap::new(), "app").is_err());
+    }
+
+    #[test]
     fn multiple_equally_valid_versioned_virtual_providers_fail_closed() {
         let mut first = item("first", "1", "");
         first.provides = "virtual-api (= 3)".into();
