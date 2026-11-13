@@ -9,6 +9,9 @@ rpt prepare-download-plan \
   --architecture amd64 --max-packages 200 \
   --output ./locked-manifest.json curl git
 rpt fetch --manifest ./locked-manifest.json --output ./rpt-artifacts
+rpt verify-download-plan \
+  --manifest ./locked-manifest.json \
+  --artifacts ./rpt-artifacts --cache ./rpt-lists --architecture amd64
 ```
 
 The planner first selects an authenticated policy candidate for every staged dependency, then **revalidates** GPG signature, Release freshness, index hashes, filename and artifact SHA256 for the exact selected `(package, architecture, version)` tuple. It never substitutes a newest available package for a pinned candidate.
@@ -17,4 +20,4 @@ The output packages contain `name`, `url`, `sha256`, `size`, `filename`, `versio
 
 The export refuses conflicting same-identity signed payloads, duplicate planned identities, foreign architecture items, colliding output filenames and missing exact archives. A no-op plan emits an empty manifest.
 
-**Boundary:** An authenticated artifact is not equivalent to a safe install. This command does not evaluate maintainer scripts, dpkg triggers, live filesystem safety or recovery. The JSON contains `executable: false`; no dpkg mutation is permitted. APT solver, pinning and phased rollout parity remain incomplete. Use RPT's existing `fetch` only to acquire and verify artifacts.
+The optional verify command rechecks the current signed provenance and streams each downloaded file to verify its SHA-256 and exact byte count. It does not modify package state.\n\n**Boundary:** An authenticated artifact is not equivalent to a safe install. This command does not evaluate maintainer scripts, dpkg triggers, live filesystem safety or recovery. The JSON contains `executable: false`; no dpkg mutation is permitted. APT solver, pinning and phased rollout parity remain incomplete. Use RPT's existing `fetch` only to acquire and verify artifacts.
