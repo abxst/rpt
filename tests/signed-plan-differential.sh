@@ -320,15 +320,49 @@ grep -Fq 'Signed manifest disagrees with Debian control fields' "$root/mismatch-
 ./target/debug/rpt sandbox-session-inspect --session "$session" \
   | grep -Fq rpt-sandbox-demo
 grep -Fq '"phase": "succeeded"' "$root/session-journal/session-install.json"
-./target/debug/rpt sandbox-session-remove \
+./target/debug/rpt sandbox-session-plan-remove \
+  --session "$session" --architecture "$arch" rpt-sandbox-demo > "$root/plan-remove.json"
+python3 - "$root/plan-remove.json" <<'PY'
+import json,sys
+plan=json.load(open(sys.argv[1]))
+assert plan['removable'] and not plan['executable']
+assert plan['remove'] == ['rpt-sandbox-demo:all']
+PY
+./target/debug/rpt sandbox-session-remove-planned \
   --session "$session" --id session-remove --journal-dir "$root/session-journal" \
-  --timeout-seconds 180 rpt-sandbox-demo
+  --architecture "$arch" --timeout-seconds 180 rpt-sandbox-demo
 if ./target/debug/rpt sandbox-session-inspect --session "$session" | grep -Fq rpt-sandbox-demo; then
   echo "Package still present after sandbox removal" >&2
   exit 1
 fi
 ./target/debug/rpt sandbox-session-install \
   --session "$session" --id session-reinstall \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --journal-dir "$root/session-journal" \
+  --architecture "$arch" --timeout-seconds 180
+# Mark our fixture as auto-installed inside the sandbox; the installed
+# Debian base packages remain manual roots.
+cat > "$root/sandbox-auto-states" <<'EOF'
+Package: rpt-sandbox-demo
+Architecture: all
+Auto-Installed: 1
+
+EOF
+docker exec "rpt-session-$session" mkdir -p /var/lib/apt
+docker cp "$root/sandbox-auto-states" "rpt-session-$session:/var/lib/apt/extended_states"
+./target/debug/rpt sandbox-session-plan-autoremove \
+  --session "$session" --architecture "$arch" > "$root/plan-autoremove.json"
+python3 - "$root/plan-autoremove.json" <<'PY'
+import json,sys
+plan=json.load(open(sys.argv[1]))
+assert plan['removable'] and not plan['executable']
+assert plan['remove'] == ['rpt-sandbox-demo:all']
+PY
+./target/debug/rpt sandbox-session-autoremove-planned \
+  --session "$session" --id session-auto --journal-dir "$root/session-journal" \
+  --architecture "$arch" --timeout-seconds 180
+./target/debug/rpt sandbox-session-install \
+  --session "$session" --id session-postauto-install \
   --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
   --cache "$root/rpt-cache" --journal-dir "$root/session-journal" \
   --architecture "$arch" --timeout-seconds 180

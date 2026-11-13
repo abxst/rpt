@@ -143,12 +143,11 @@ fn satisfiers(
     }
     Ok(hits)
 }
-fn read_installed(status: &Path) -> Result<BTreeMap<InstalledKey, InstalledPackage>> {
-    let verified = cache_query::installed_catalog_by_arch(status)?;
-    let data = fs::read(status)?;
+fn read_installed_bytes(data: &[u8]) -> Result<BTreeMap<InstalledKey, InstalledPackage>> {
+    let verified = cache_query::installed_catalog_from_bytes(data)?;
     if data.len() > 64 * 1024 * 1024 { bail!("dpkg status exceeds 64 MiB"); }
     let mut installed = BTreeMap::new();
-    for record in package_index::parse(std::str::from_utf8(&data)?)? {
+    for record in package_index::parse(std::str::from_utf8(data)?)? {
         if !record.field("Status").is_some_and(cache_query::is_installed_status) { continue; }
         let key = InstalledKey {
             name: record.field("Package").context("missing package name")?.into(),
@@ -238,9 +237,15 @@ fn result(mode: &str, removed: &BTreeSet<InstalledKey>, blockers: BTreeSet<Strin
 
 /// Plan explicit removals. With cascade, compute reverse-dependent fixed point.
 pub fn remove(status: &Path, native: &str, requested: &[String], cascade: bool) -> Result<RemovalPlan> {
+    remove_snapshot(&fs::read(status)?, native, requested, cascade)
+}
+
+/// Plan against an exact dpkg status snapshot from an isolated container.
+/// No host temporary status files are created.
+pub fn remove_snapshot(status: &[u8], native: &str, requested: &[String], cascade: bool) -> Result<RemovalPlan> {
     checked_arch(native)?;
     if requested.is_empty() || requested.len() > 128 { bail!("expected 1..=128 packages"); }
-    let installed = read_installed(status)?;
+    let installed = read_installed_bytes(status)?;
     ensure_initial_dependencies(&installed, native)?;
     let mut removed = BTreeSet::new();
     for request in requested {
@@ -281,12 +286,11 @@ pub fn remove(status: &Path, native: &str, requested: &[String], cascade: bool) 
     }
     Ok(result("remove", &removed, removal_blockers(&installed, &removed, native)?))
 }
-fn auto_marks(path: &Path, installed: &BTreeMap<InstalledKey, InstalledPackage>) -> Result<BTreeSet<InstalledKey>> {
-    let bytes = fs::read(path).with_context(|| format!("reading APT extended states: {}", path.display()))?;
+fn auto_marks_from_bytes(bytes: &[u8], installed: &BTreeMap<InstalledKey, InstalledPackage>) -> Result<BTreeSet<InstalledKey>> {
     if bytes.len() > 64 * 1024 * 1024 { bail!("APT extended states exceed 64 MiB"); }
     let mut auto = BTreeSet::new();
     let mut seen = BTreeSet::new();
-    for record in package_index::parse(std::str::from_utf8(&bytes)?)? {
+    for record in package_index::parse(std::str::from_utf8(bytes)?)? {
         let name = record.field("Package").context("APT state entry without Package")?;
         checked_name(name)?;
         let arch = match record.field("Architecture") {
@@ -312,10 +316,16 @@ fn auto_marks(path: &Path, installed: &BTreeMap<InstalledKey, InstalledPackage>)
 /// Conservative autoremove: mark all satisfiers reachable from manual roots,
 /// essential/held packages and foreign architecture packages.
 pub fn autoremove(status: &Path, extended_states: &Path, native: &str) -> Result<RemovalPlan> {
+    autoremove_snapshot(&fs::read(status)?, &fs::read(extended_states)?, native)
+}
+
+/// Conservatively derive orphan candidates from an exact status and APT
+/// extended_states snapshot, without writes to either file.
+pub fn autoremove_snapshot(status: &[u8], extended_states: &[u8], native: &str) -> Result<RemovalPlan> {
     checked_arch(native)?;
-    let installed = read_installed(status)?;
+    let installed = read_installed_bytes(status)?;
     ensure_initial_dependencies(&installed, native)?;
-    let auto = auto_marks(extended_states, &installed)?;
+    let auto = auto_marks_from_bytes(extended_states, &installed)?;
     let mut keep = BTreeSet::new();
     let mut queue = VecDeque::new();
     for (key, entry) in &installed {
@@ -346,6 +356,18 @@ mod tests {
         fs::write(&path, contents).unwrap();
         path
     }
+    #[test]
+    fn snapshots_and_file_plans_match() {
+        let status = b"Package: rootpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\nPackage: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let marked = b"Package: libpkg\nArchitecture: amd64\nAuto-Installed: 1\n\n";
+        let snapshot = remove_snapshot(status, "amd64", &["libpkg".into()], false).unwrap();
+        assert!(!snapshot.removable);
+        assert_eq!(snapshot.remove, ["libpkg:amd64".to_owned()]);
+        let autoremove = autoremove_snapshot(status, marked, "amd64").unwrap();
+        assert!(autoremove.remove.is_empty());
+        assert!(autoremove.removable);
+    }
+
     #[test]
     fn alternatives_allow_removing_one_provider() {
         let status = fixture("alt", "Package: apppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: firstpkg | secondpkg\n\nPackage: firstpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\nPackage: secondpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n");

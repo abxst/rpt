@@ -346,6 +346,36 @@ enum Command {
         #[arg(long, default_value_t = false)] purge: bool,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Preview dependency-checked removal against live sandbox dpkg status.
+    SandboxSessionPlanRemove {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Preview orphan candidates using live sandbox dpkg/apt auto-manual state.
+    SandboxSessionPlanAutoremove {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "amd64")] architecture: String,
+    },
+    /// Execute a freshly checked removal plan only inside the Docker sandbox.
+    SandboxSessionRemovePlanned {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Execute freshly checked orphan cleanup only in the Docker sandbox.
+    SandboxSessionAutoremovePlanned {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
     /// Execute signed plan artifacts only inside an ephemeral, network-isolated Docker container.
     SandboxInstall {
         #[arg(long)] manifest: PathBuf,
@@ -750,6 +780,28 @@ async fn execute(cli: Cli) -> Result<()> {
                 &session, &journal_dir, &id, &packages, purge, timeout_seconds,
             ).await.context(ErrorCategory::System)?;
             println!("Sandbox dpkg removal transaction completed; host dpkg unchanged.");
+        }
+        Command::SandboxSessionPlanRemove { session, architecture, cascade, packages } => {
+            let plan = rpt::sandbox_session::plan_remove(&session, &architecture, &packages, cascade)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::SandboxSessionPlanAutoremove { session, architecture } => {
+            let plan = rpt::sandbox_session::plan_autoremove(&session, &architecture)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::SandboxSessionRemovePlanned { session, id, journal_dir, architecture, cascade, timeout_seconds, packages } => {
+            let plan = rpt::sandbox_session::remove_planned(&session, &journal_dir, &id,
+                &architecture, &packages, cascade, timeout_seconds)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::SandboxSessionAutoremovePlanned { session, id, journal_dir, architecture, timeout_seconds } => {
+            let plan = rpt::sandbox_session::autoremove_planned(&session, &journal_dir, &id,
+                &architecture, timeout_seconds)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
             rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {
