@@ -150,6 +150,50 @@ jobs:
           # guaranteed here is the installed version, regardless of the pin.
           # Do not claim that this fixture exercises repository downgrade.
 
+      - name: Local APT repository downgrade boundary (unprivileged)
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/rpt-apt-local-repo"
+          mkdir -p "$root/repo" "$root/lists/partial" "$root/cache/archives/partial" "$root/etc/preferences.d"
+          cat > "$root/status" <<'EOF'
+          Package: rpt-fixture
+          Status: install ok installed
+          Architecture: all
+          Version: 2.0
+
+          EOF
+          cat > "$root/repo/Packages" <<'EOF'
+          Package: rpt-fixture
+          Version: 1.0
+          Architecture: all
+          Filename: pool/rpt-fixture_1.0_all.deb
+          Size: 1
+          Description: local repository policy fixture
+
+          EOF
+          printf 'deb [trusted=yes] file:%s/repo ./\\n' "$root" > "$root/etc/sources.list"
+          apt_opts=(
+            -o "Dir::State::status=$root/status"
+            -o "Dir::State::lists=$root/lists"
+            -o "Dir::Cache=$root/cache"
+            -o "Dir::Etc::sourcelist=$root/etc/sources.list"
+            -o "Dir::Etc::sourceparts=$root/etc/empty-sources"
+            -o "Dir::Etc::preferences=$root/etc/preferences"
+            -o "Dir::Etc::preferencesparts=$root/etc/preferences.d"
+            -o "APT::Get::List-Cleanup=0"
+          )
+          mkdir -p "$root/etc/empty-sources"
+          apt-get "${apt_opts[@]}" update
+          for priority in 999 1000 1001; do
+            printf 'Package: rpt-fixture\\nPin: version 1.0\\nPin-Priority: %s\\n' "$priority" > "$root/etc/preferences"
+            apt-cache "${apt_opts[@]}" policy rpt-fixture > "$root/policy-$priority.txt"
+            grep -Fxq '  Installed: 2.0' "$root/policy-$priority.txt"
+            if [[ "$priority" == 1001 ]]; then expected=1.0; else expected=2.0; fi
+            grep -Fxq "  Candidate: $expected" "$root/policy-$priority.txt" || {
+              cat "$root/policy-$priority.txt"
+              exit 1
+            }
+          done
       - name: Dry-run transaction CLI end-to-end (unprivileged)
         run: |
           set -euo pipefail
