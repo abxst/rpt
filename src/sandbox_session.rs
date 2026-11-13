@@ -14,6 +14,7 @@ use std::{fs, io::Write, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 
 mod bound_execution;
+mod session_lock;
 pub use bound_execution::{apply_bound, BoundApply};
 
 const SESSION_LABEL: &str = "org.rpt.sandbox=true";
@@ -80,6 +81,7 @@ async fn verify_session(session: &str, require_running: bool) -> Result<String> 
     Ok(container)
 }
 pub async fn create(session: &str, image: &str) -> Result<String> {
+    let _session_lock = session_lock::acquire(session)?;
     let container = name(session)?;
     if !sandbox_execution::valid_image(image) { bail!("invalid Docker image identifier"); }
     let args = [
@@ -99,6 +101,7 @@ pub async fn inspect(session: &str) -> Result<String> {
     ]).await?, "reading sandbox package state")
 }
 pub async fn destroy(session: &str) -> Result<()> {
+    let _session_lock = session_lock::acquire(session)?;
     let container = verify_session(session, false).await?;
     success(docker(&[
         "rm".into(), "--force".into(), container,
@@ -112,6 +115,9 @@ async fn run_command(
     session: &str, journal: &Path, id: &str, program: &str,
     args: Vec<String>, seconds: u64,
 ) -> Result<()> {
+    // Cross-process per-session lock spans the entire supervised execution,
+    // even when competing RPT invocations use different journal directories.
+    let _session_lock = session_lock::acquire(session)?;
     let container = verify_session(session, true).await?;
     if !sandbox_execution::valid_id(id) { bail!("invalid transaction ID"); }
     if !(10..=3600).contains(&seconds) { bail!("timeout must be 10..=3600 seconds"); }

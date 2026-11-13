@@ -3,8 +3,10 @@
 set -euo pipefail
 root="$(mktemp -d)"
 server_pid=""
+upgrade_pid=""
 session="ci-test"
 cleanup() {
+  if [[ -n "$upgrade_pid" ]]; then kill "$upgrade_pid" 2>/dev/null || :; wait "$upgrade_pid" 2>/dev/null || :; fi
   docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
   rm -rf "$root"
@@ -471,6 +473,13 @@ CONTROL
 mkdir -p "$root/helper-v1/usr/share/rpt-test" "$root/demo-v2/usr/share/rpt-test"
 printf 'helper 1\n' > "$root/helper-v1/usr/share/rpt-test/helper.txt"
 printf 'demo 2\n' > "$root/demo-v2/usr/share/rpt-test/installed.txt"
+# Deliberately keep the upgrade transaction open for cross-process locking tests.
+cat > "$root/demo-v2/DEBIAN/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+sleep 3
+POSTINST
+chmod 0755 "$root/demo-v2/DEBIAN/postinst"
 dpkg-deb --build --root-owner-group "$root/helper-v1" \
   "$root/www/pool/rpt-sandbox-helper_1.0_all.deb" >/dev/null
 dpkg-deb --build --root-owner-group "$root/demo-v2" \
@@ -542,7 +551,27 @@ PY
 ./target/debug/rpt sandbox-session-apply-transaction \
   --session "$session" --id upgrade-v2 --transaction "$root/bound-upgrade.json" \
   --artifacts "$root/upgrade-artifacts" --cache "$root/rpt-cache-v2" \
-  --apt-root "$root/rpt-apt" --journal-dir "$root/upgrade-journal" --timeout-seconds 180
+  --apt-root "$root/rpt-apt" --journal-dir "$root/upgrade-journal" --timeout-seconds 180 \
+  >"$root/upgrade-run.log" 2>&1 &
+upgrade_pid="$!"
+for _ in {1..100}; do
+  if grep -Fq '"phase": "running"' "$root/upgrade-journal/upgrade-v2.json" 2>/dev/null; then break; fi
+  sleep .05
+done
+if ! grep -Fq '"phase": "running"' "$root/upgrade-journal/upgrade-v2.json"; then
+  cat "$root/upgrade-run.log" >&2
+  echo "Upgrade never acquired the transaction journal" >&2; exit 1
+fi
+# Even with a DIFFERENT journal directory, a second RPT process must not
+# run dpkg in the same container while upgrade-v2 owns its session lease.
+if ./target/debug/rpt sandbox-session-remove \
+  --session "$session" --id concurrent-delete --journal-dir "$root/other-journal" \
+  --timeout-seconds 120 rpt-sandbox-demo >"$root/parallel-out.log" 2>"$root/parallel-err.log"; then
+  echo "Concurrent sandbox mutation wrongly acquired the session lock" >&2; exit 1
+fi
+grep -Fq 'another RPT operation owns this Docker sandbox session' "$root/parallel-err.log"
+wait "$upgrade_pid"
+upgrade_pid=""
 grep -Fq '"phase": "succeeded"' "$root/upgrade-journal/upgrade-v2.json"
 test "$(docker exec "rpt-session-$session" dpkg-query -W -f='${Version}' rpt-sandbox-demo)" = "2.0"
 test "$(docker exec "rpt-session-$session" dpkg-query -W -f='${Status}' rpt-sandbox-helper)" = "install ok installed"
