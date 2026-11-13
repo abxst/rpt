@@ -112,11 +112,13 @@ impl DryRunExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
     fn fixture() -> PathBuf {
-        std::env::temp_dir().join(format!("rpt-dry-run-{}-{}",
-            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()))
+        std::env::temp_dir().join(format!("rpt-dry-run-{}-{}-{}",
+            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(), NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)))
     }
 
     #[tokio::test]
