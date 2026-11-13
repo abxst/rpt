@@ -4,9 +4,13 @@ set -euo pipefail
 root="$(mktemp -d)"
 server_pid=""
 upgrade_pid=""
+crash_pid=""
 session="ci-test"
+recovery_session="ci-recovery"
 cleanup() {
+  if [[ -n "$crash_pid" ]]; then kill "$crash_pid" 2>/dev/null || :; wait "$crash_pid" 2>/dev/null || :; fi
   if [[ -n "$upgrade_pid" ]]; then kill "$upgrade_pid" 2>/dev/null || :; wait "$upgrade_pid" 2>/dev/null || :; fi
+  docker rm -f "rpt-session-$recovery_session" "rpt-recovery-$recovery_session-crash-upgrade" >/dev/null 2>&1 || :
   docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
   rm -rf "$root"
@@ -477,7 +481,7 @@ printf 'demo 2\n' > "$root/demo-v2/usr/share/rpt-test/installed.txt"
 cat > "$root/demo-v2/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -e
-sleep 3
+sleep 8
 POSTINST
 chmod 0755 "$root/demo-v2/DEBIAN/postinst"
 dpkg-deb --build --root-owner-group "$root/helper-v1" \
@@ -585,3 +589,84 @@ fi
 grep -Fq 'stale sandbox transaction' "$root/replay-err.log"
 ./target/debug/rpt sandbox-session-destroy --session "$session"
 echo "PASS authenticated bound install+upgrade 1.0 to 2.0 and stale/replay refusal"
+
+# Real hard-crash recovery: kill RPT with SIGKILL during a dpkg upgrade.
+# The supervised docker exec can outlive its CLI owner; explicitly quiesce
+# the sandbox before inspecting or restoring its pre-transaction checkpoint.
+./target/debug/rpt sandbox-session-create --session "$recovery_session" \
+  --image debian:bookworm-slim
+./target/debug/rpt sandbox-session-install \
+  --session "$recovery_session" --id recovery-seed-v1 \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --journal-dir "$root/recovery-journal" \
+  --architecture "$arch" --timeout-seconds 180
+./target/debug/rpt sandbox-session-prepare-transaction \
+  --session "$recovery_session" --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/recovery-bound.json" rpt-sandbox-demo
+./target/debug/rpt sandbox-session-apply-transaction \
+  --session "$recovery_session" --id crash-upgrade --transaction "$root/recovery-bound.json" \
+  --artifacts "$root/upgrade-artifacts" --cache "$root/rpt-cache-v2" \
+  --apt-root "$root/rpt-apt" --journal-dir "$root/recovery-journal" --timeout-seconds 180 \
+  >"$root/crash-run.log" 2>&1 &
+crash_pid="$!"
+for _ in {1..160}; do
+  if [[ -f "$root/recovery-journal/crash-upgrade.json" ]] &&
+     grep -Fq '"phase": "running"' "$root/recovery-journal/crash-upgrade.json" &&
+     [[ "$(docker exec "rpt-session-$recovery_session" dpkg-query -W -f='${Version}' rpt-sandbox-demo 2>/dev/null || :)" == "2.0" ]]; then
+    break
+  fi
+  sleep .05
+done
+if ! grep -Fq '"phase": "running"' "$root/recovery-journal/crash-upgrade.json" ||
+   [[ "$(docker exec "rpt-session-$recovery_session" dpkg-query -W -f='${Version}' rpt-sandbox-demo 2>/dev/null || :)" != "2.0" ]]; then
+  cat "$root/crash-run.log" >&2
+  echo "Crash fixture failed to reach running, partially upgraded state" >&2
+  exit 1
+fi
+kill -KILL "$crash_pid"
+wait "$crash_pid" 2>/dev/null || :
+crash_pid=""
+grep -Fq '"phase": "running"' "$root/recovery-journal/crash-upgrade.json"
+# Refuse restoration while the daemon-owned container may still be active.
+if ./target/debug/rpt sandbox-session-recovery-restore \
+  --session "$recovery_session" --id crash-upgrade \
+  --journal-dir "$root/recovery-journal" >"$root/restore-too-early.log" 2>&1; then
+  echo "Recovery incorrectly allowed restoration into a running container" >&2; exit 1
+fi
+docker stop --time 1 "rpt-session-$recovery_session" >/dev/null
+./target/debug/rpt sandbox-session-recovery-inspect \
+  --session "$recovery_session" --id crash-upgrade \
+  --journal-dir "$root/recovery-journal" >"$root/recovery-inspect.json"
+python3 - "$root/recovery-inspect.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert x['journal_phase'] == 'running'
+assert x['can_restore'] and x['original_container_matches']
+assert x['snapshot_present'] and x['journal_gate_remains_locked']
+assert not x['container_running']
+PY
+./target/debug/rpt sandbox-session-recovery-restore \
+  --session "$recovery_session" --id crash-upgrade \
+  --journal-dir "$root/recovery-journal" >"$root/recovered.json"
+test "$(docker exec "rpt-session-$recovery_session" dpkg-query -W -f='${Version}' rpt-sandbox-demo)" = "1.0"
+test "$(docker exec "rpt-session-$recovery_session" dpkg-query -W -f='${Status}' rpt-sandbox-demo)" = "install ok installed"
+docker exec "rpt-session-$recovery_session" dpkg --audit | grep -q '^$'
+python3 - "$root/recovered.json" <<'PY'
+import json,sys
+lines=open(sys.argv[1]).read().splitlines()
+# The CLI emits JSON followed by a short operator-facing summary.
+x=json.loads('\n'.join(lines[:next(i for i,v in enumerate(lines) if v=='}')+1]))
+assert x['already_restored'] and x['journal_gate_remains_locked']
+assert not x['can_restore'] and not x['original_container_matches']
+PY
+grep -Fq '"phase": "running"' "$root/recovery-journal/crash-upgrade.json"
+docker container inspect "rpt-recovery-$recovery_session-crash-upgrade" >/dev/null
+# Cleanup is explicit: retain forensic artifacts until verified.
+./target/debug/rpt sandbox-session-destroy --session "$recovery_session"
+docker rm -f "rpt-recovery-$recovery_session-crash-upgrade" >/dev/null
+python3 - "$root/recovery-journal/sandbox-checkpoints/$recovery_session--crash-upgrade.json" >"$root/recovery-image" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['image_id'])
+PY
+docker image rm "$(cat "$root/recovery-image")" >/dev/null
+echo "PASS SIGKILL recovery: immutable pre-upgrade snapshot, stopped-container gate, dpkg verified rollback, journal preserved"
