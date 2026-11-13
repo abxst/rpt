@@ -60,6 +60,29 @@ Provides: rpt-virtual-api (= 2)
 Filename: pool/rpt-provider_1.0_all.deb
 Size: 1
 Description: versioned virtual provider fixture
+Package: rpt-pre-app
+Version: 1.0
+Architecture: all
+Pre-Depends: rpt-foundation (>= 2)
+Filename: pool/rpt-pre-app_1.0_all.deb
+Size: 1
+Description: pre-dependency fixture
+
+Package: rpt-foundation
+Version: 2.0
+Architecture: all
+Filename: pool/rpt-foundation_2.0_all.deb
+Size: 1
+Description: pre-dependency foundation
+
+Package: rpt-version-mismatch
+Version: 1.0
+Architecture: all
+Depends: rpt-lib (>= 3)
+Filename: pool/rpt-version-mismatch_1.0_all.deb
+Size: 1
+Description: version mismatch fixture
+
 PACKAGES
 printf 'deb [trusted=yes] file:%s/repo ./\n' "$root" > "$root/etc/sources.list"
 opts=(
@@ -89,6 +112,11 @@ out="$(simulate rpt-app)"
 assert_installs basic "$out" rpt-lib rpt-app
 out="$(simulate rpt-alternative)"
 assert_installs alternatives "$out" rpt-lib rpt-alternative
+out="$(simulate rpt-pre-app)"
+assert_installs predepends "$out" rpt-foundation rpt-pre-app
+if simulate rpt-version-mismatch >"$root/version-mismatch.log"; then
+  echo "APT unexpectedly accepted unsatisfied dependency version" >&2; exit 1
+fi
 out="$(simulate rpt-virtual-app)"
 assert_installs provides "$out" rpt-provider rpt-virtual-app
 if simulate rpt-broken >"$root/broken.log"; then
@@ -97,4 +125,4 @@ fi
 if simulate rpt-app rpt-conflict >"$root/conflict.log"; then
   echo "APT unexpectedly accepted conflicting packages" >&2; exit 1
 fi
-echo "PASS independent APT simulation oracle: dependencies, alternatives, versioned Provides, unsatisfied dependency and Conflicts"
+echo "PASS independent APT simulation oracle: dependencies, alternatives, versioned Provides, unsatisfied dependency, Pre-Depends, version mismatch and Conflicts"
