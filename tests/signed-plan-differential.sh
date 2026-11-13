@@ -182,7 +182,6 @@ SHA256: $demo_hash
 Size: $demo_size
 Description: real sandbox dpkg package
 
-# This intentionally signed metadata does not match its actual .deb control.
 Package: rpt-lie
 Version: 1.0
 Architecture: all
