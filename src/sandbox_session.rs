@@ -8,9 +8,13 @@ use crate::{
     sandbox_execution::{self, DPKG_CHECK_SCRIPT, DPKG_INSTALL_SCRIPT},
 };
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
+
+mod bound_execution;
+pub use bound_execution::{apply_bound, BoundApply};
 
 const SESSION_LABEL: &str = "org.rpt.sandbox=true";
 const INSPECT_TEMPLATE: &str = r#"{{index .Config.Labels "org.rpt.sandbox"}}|{{.State.Running}}"#;
@@ -260,9 +264,16 @@ pub async fn plan_install(
     max_packages: usize, packages: &[String],
 ) -> Result<Vec<PlanStep>> {
     let (_, status) = status_snapshot(session).await?;
+    plan_install_snapshot(&status, cache, apt_root, architecture, max_packages, packages)
+}
+
+fn plan_install_snapshot(
+    status: &[u8], cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String],
+) -> Result<Vec<PlanStep>> {
     let mut temporary = tempfile::NamedTempFile::new()
         .context("creating private sandbox status snapshot")?;
-    temporary.write_all(&status)?;
+    temporary.write_all(status)?;
     temporary.flush()?;
     install_plan::preview_many_with_policy(
         cache, temporary.path(), apt_root, packages, architecture, max_packages,
@@ -278,6 +289,62 @@ pub async fn prepare_download_plan(
     let steps = plan_install(session, cache, apt_root, architecture, max_packages, packages).await?;
     package_provenance::prepare_exact(cache, &steps, architecture)
 }
+
+/// Bound, read-only transaction intent using one exact container dpkg snapshot.
+/// Its top-level packages field remains consumable by the existing fetch CLI.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoundTransaction {
+    pub schema_version: u32,
+    pub session: String,
+    pub architecture: String,
+    pub status_sha256: String,
+    pub requested: Vec<String>,
+    pub max_packages: usize,
+    pub steps: Vec<PlanStep>,
+    #[serde(flatten)]
+    pub manifest: ExactManifest,
+}
+
+/// Plan with signed metadata against the same status snapshot recorded here.
+pub async fn prepare_bound(
+    session: &str, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String],
+) -> Result<BoundTransaction> {
+    let (_, status) = status_snapshot(session).await?;
+    let steps = plan_install_snapshot(
+        &status, cache, apt_root, architecture, max_packages, packages,
+    )?;
+    let manifest = package_provenance::prepare_exact(cache, &steps, architecture)?;
+    Ok(BoundTransaction {
+        schema_version: 1, session: session.into(), architecture: architecture.into(),
+        status_sha256: hex::encode(Sha256::digest(&status)),
+        requested: packages.to_vec(), max_packages, steps, manifest,
+    })
+}
+
+/// This script runs inside Docker, after verified archives have been copied.
+/// Checking status within the guest catches stale plans immediately before dpkg.
+const BOUND_GUEST_PREFLIGHT: &str = r#"set -eu
+expected_status="$1"; shift
+actual_status="$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)"
+if [ "$actual_status" != "$expected_status" ]; then
+  echo "stale sandbox transaction: dpkg status changed before execution" >&2
+  exit 1
+fi
+"#;
+const BOUND_GUEST_POSTFLIGHT: &str = r#"tab="$(printf '\t')"
+while IFS="$tab" read -r archive name expected_version expected_arch; do
+  actual="$(dpkg-query -W -f='${Status}|${Version}|${Architecture}' "$name")"
+  if [ "$actual" != "install ok installed|$expected_version|$expected_arch" ]; then
+    echo "postcondition failed for $name: $actual" >&2
+    exit 1
+  fi
+done < /rpt-input/expected.tsv
+if [ -n "$(dpkg --audit)" ]; then
+  dpkg --audit >&2
+  exit 1
+fi
+"#;
 
 /// Preview removal using the container's installed database, never host dpkg.
 pub async fn plan_remove(

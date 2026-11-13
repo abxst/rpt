@@ -6,7 +6,7 @@ use crate::{cache_query, metadata_query::{self, PackageKey, PackageSummary}, ver
 use anyhow::{bail, Context, Result};
 use std::{cell::Cell, cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path, rc::Rc};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanStep {
     pub package: String,
     pub architecture: String,

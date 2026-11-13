@@ -449,3 +449,110 @@ fi
 # RPT's public CLI currently accepts one root package, so do not pretend
 # that its single-root preview validates a multi-root conflict.
 echo "PASS signed APT/RPT versioned plan differential: Depends, Pre-Depends, alternatives, Provides, Conflicts, Breaks, missing/version constraints; APT multi-root Conflicts"
+
+# Upgrade milestone: add two real packages to signed repository after
+# all original APT/RPT differential fixtures have completed.
+mkdir -p "$root/helper-v1/DEBIAN" "$root/demo-v2/DEBIAN"
+cat > "$root/helper-v1/DEBIAN/control" <<'CONTROL'
+Package: rpt-sandbox-helper
+Version: 1.0
+Architecture: all
+Maintainer: RPT CI <rpt-test@example.invalid>
+Description: helper for predependency upgrade
+CONTROL
+cat > "$root/demo-v2/DEBIAN/control" <<'CONTROL'
+Package: rpt-sandbox-demo
+Version: 2.0
+Architecture: all
+Pre-Depends: rpt-sandbox-helper (>= 1.0)
+Maintainer: RPT CI <rpt-test@example.invalid>
+Description: real dpkg upgrade with predependency
+CONTROL
+mkdir -p "$root/helper-v1/usr/share/rpt-test" "$root/demo-v2/usr/share/rpt-test"
+printf 'helper 1\n' > "$root/helper-v1/usr/share/rpt-test/helper.txt"
+printf 'demo 2\n' > "$root/demo-v2/usr/share/rpt-test/installed.txt"
+dpkg-deb --build --root-owner-group "$root/helper-v1" \
+  "$root/www/pool/rpt-sandbox-helper_1.0_all.deb" >/dev/null
+dpkg-deb --build --root-owner-group "$root/demo-v2" \
+  "$root/www/pool/rpt-sandbox-demo_2.0_all.deb" >/dev/null
+for spec in rpt-sandbox-helper:1.0 rpt-sandbox-demo:2.0; do
+  name="$(printf '%s' "$spec" | cut -d: -f1)"
+  ver="$(printf '%s' "$spec" | cut -d: -f2)"
+  file="pool/$name"_"$ver"_all.deb
+  checksum="$(sha256sum "$root/www/$file" | cut -d' ' -f1)"
+  length="$(wc -c < "$root/www/$file" | tr -d ' ')"
+  printf 'Package: %s\nVersion: %s\nArchitecture: all\nFilename: %s\nSHA256: %s\nSize: %s\n' \
+    "$name" "$ver" "$file" "$checksum" "$length" >>"$index"
+  if [[ "$name" == "rpt-sandbox-demo" ]]; then
+    printf 'Pre-Depends: rpt-sandbox-helper (>= 1.0)\n' >>"$index"
+  fi
+  printf 'Description: signed upgrade artifact\n\n' >>"$index"
+done
+hash="$(sha256sum "$index" | cut -d' ' -f1)"
+size="$(wc -c < "$index" | tr -d ' ')"
+cat > "$release" <<EOF
+Origin: RPT Differential
+Label: RPT Differential
+Suite: fixture
+Codename: fixture
+Date: $(LC_ALL=C date -Ru)
+Architectures: $arch
+Components: main
+SHA256:
+ $hash $size main/binary-$arch/Packages
+EOF
+gpg --homedir "$root/gnupg" --batch --yes --pinentry-mode loopback --passphrase '' \
+  --clearsign --digest-algo SHA256 --output "$root/www/dists/fixture/InRelease" "$release"
+./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache-v2" \
+  --no-progress >"$root/rpt-v2-update.log"
+
+# Seed v1 in a new persistent sandbox; reject an intent created before seeding.
+./target/debug/rpt sandbox-session-create --session "$session" --image debian:bookworm-slim
+./target/debug/rpt sandbox-session-prepare-transaction \
+  --session "$session" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/bound-v1.json" rpt-sandbox-demo
+./target/debug/rpt sandbox-session-install \
+  --session "$session" --id upgrade-seed-v1 \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --journal-dir "$root/upgrade-journal" \
+  --architecture "$arch" --timeout-seconds 180
+if ./target/debug/rpt sandbox-session-apply-transaction \
+  --session "$session" --id stale-v1 --transaction "$root/bound-v1.json" \
+  --artifacts "$root/sandbox-artifacts" --cache "$root/rpt-cache" \
+  --apt-root "$root/rpt-apt" --journal-dir "$root/upgrade-journal" \
+  --timeout-seconds 180 >"$root/stale-out.log" 2>"$root/stale-err.log"; then
+  echo "Stale dpkg status intent was accepted" >&2; exit 1
+fi
+grep -Fq 'stale sandbox transaction' "$root/stale-err.log"
+
+./target/debug/rpt sandbox-session-prepare-transaction \
+  --session "$session" --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/bound-upgrade.json" rpt-sandbox-demo
+python3 - "$root/bound-upgrade.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert x['schema_version']==1 and x['session']=='ci-test' and not x['executable']
+assert [(p['name'],p['version']) for p in x['packages']] == [
+  ('rpt-sandbox-helper','1.0'),('rpt-sandbox-demo','2.0')]
+assert [(p['package'],p['installed'],p['version']) for p in x['steps']] == [
+  ('rpt-sandbox-helper',None,'1.0'),('rpt-sandbox-demo','1.0','2.0')]
+PY
+./target/debug/rpt fetch --manifest "$root/bound-upgrade.json" \
+  --output "$root/upgrade-artifacts" --workers 2 --segments 1 >"$root/upgrade-fetch.log"
+./target/debug/rpt sandbox-session-apply-transaction \
+  --session "$session" --id upgrade-v2 --transaction "$root/bound-upgrade.json" \
+  --artifacts "$root/upgrade-artifacts" --cache "$root/rpt-cache-v2" \
+  --apt-root "$root/rpt-apt" --journal-dir "$root/upgrade-journal" --timeout-seconds 180
+grep -Fq '"phase": "succeeded"' "$root/upgrade-journal/upgrade-v2.json"
+test "$(docker exec "rpt-session-$session" dpkg-query -W -f='${Version}' rpt-sandbox-demo)" = "2.0"
+test "$(docker exec "rpt-session-$session" dpkg-query -W -f='${Status}' rpt-sandbox-helper)" = "install ok installed"
+if ./target/debug/rpt sandbox-session-apply-transaction \
+  --session "$session" --id upgrade-replay --transaction "$root/bound-upgrade.json" \
+  --artifacts "$root/upgrade-artifacts" --cache "$root/rpt-cache-v2" \
+  --apt-root "$root/rpt-apt" --journal-dir "$root/upgrade-journal" \
+  --timeout-seconds 180 >"$root/replay-out.log" 2>"$root/replay-err.log"; then
+  echo "Replayed upgrade intent was accepted" >&2; exit 1
+fi
+grep -Fq 'stale sandbox transaction' "$root/replay-err.log"
+./target/debug/rpt sandbox-session-destroy --session "$session"
+echo "PASS authenticated bound install+upgrade 1.0 to 2.0 and stale/replay refusal"

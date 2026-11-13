@@ -395,6 +395,27 @@ enum Command {
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Create a signed download intent bound to this sandbox dpkg status snapshot.
+    SandboxSessionPrepareTransaction {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long)] output: PathBuf,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Apply a previously bound, authenticated install/upgrade only inside Docker.
+    SandboxSessionApplyTransaction {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long)] transaction: PathBuf,
+        #[arg(long, default_value = "./rpt-artifacts")] artifacts: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
     /// Execute signed plan artifacts only inside an ephemeral, network-isolated Docker container.
     SandboxInstall {
         #[arg(long)] manifest: PathBuf,
@@ -838,6 +859,23 @@ async fn execute(cli: Cli) -> Result<()> {
             tokio::fs::write(&output, data).await
                 .context("writing session-specific exact download manifest")?;
             println!("Sandbox session exact manifest: {} artifacts; no dpkg changes", ready.packages.len());
+        }
+        Command::SandboxSessionPrepareTransaction { session, cache, apt_root, architecture, max_packages, output, packages } => {
+            let intent = rpt::sandbox_session::prepare_bound(
+                &session, &cache, &apt_root, &architecture, max_packages, &packages,
+            ).await.context(ErrorCategory::System)?;
+            let count = intent.manifest.packages.len();
+            tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
+                .context("writing status-bound sandbox transaction intent")?;
+            println!("Bound sandbox transaction: {count} authenticated artifacts; no dpkg changes");
+        }
+        Command::SandboxSessionApplyTransaction { session, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds } => {
+            rpt::sandbox_session::apply_bound(rpt::sandbox_session::BoundApply {
+                session: &session, transaction: &transaction, artifacts: &artifacts,
+                cache: &cache, apt_root: &apt_root, journal: &journal_dir,
+                id: &id, timeout_seconds,
+            }).await.context(ErrorCategory::System)?;
+            println!("Bound sandbox transaction verified, applied and audited; host dpkg unchanged.");
         }
         Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
             rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {
