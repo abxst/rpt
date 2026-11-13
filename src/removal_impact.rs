@@ -19,8 +19,18 @@ fn dependency_names(raw: &str) -> Result<Vec<String>> {
     if raw.trim().is_empty() { return Ok(Vec::new()); }
     let mut names = Vec::new();
     for group in raw.split(',') {
-        if group.contains(['|', '[', ']', '<', '>', '!']) {
+        if group.contains(['|', '[', ']', '!']) {
             bail!("complex dependency syntax requires full APT resolver: {group}");
+        }
+        if let Some((_, suffix)) = group.split_once('(') {
+            if !suffix.trim().ends_with(')') {
+                bail!("unterminated dependency version constraint: {group}");
+            }
+            let parts = suffix.trim().trim_end_matches(')').split_whitespace().collect::<Vec<_>>();
+            if parts.len() != 2 || !matches!(parts[0], "<<" | "<=" | "=" | ">=" | ">>") {
+                bail!("unsupported dependency version constraint: {group}");
+            }
+            crate::version::compare(parts[1], parts[1])?;
         }
         let name = group.trim().split_once('(').map_or(group.trim(), |(n, _)| n.trim());
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'.' | b'-' | b':')) {
