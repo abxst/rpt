@@ -3,7 +3,7 @@
 set -euo pipefail
 root="$(mktemp -d)"
 server_pid=""
-session="ci-$"
+session="ci-test"
 cleanup() {
   docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
