@@ -173,8 +173,17 @@ if cmp -s "$root/InRelease.original" "$root/repo/InRelease"; then
   echo "InRelease tamper fixture did not modify signed content" >&2
   exit 1
 fi
-if apt-get "${opts[@]}" update >"$root/tampered-release.log" 2>&1; then
-  echo "APT accepted an altered InRelease" >&2
+# APT can return zero while retaining previously verified indexes and warning
+# about a failed refresh. Verify the cryptographic failure directly, then
+# require a fresh isolated lists directory to reject the repository.
+if gpgv --keyring "$root/fixture-keyring.gpg" "$root/repo/InRelease" >"$root/gpgv-tampered.log" 2>&1; then
+  echo "gpgv accepted a modified clearsigned InRelease" >&2
+  exit 1
+fi
+mkdir -p "$root/tampered-lists/partial"
+if apt-get "${opts[@]}" -o "Dir::State::lists=$root/tampered-lists" update >"$root/tampered-release.log" 2>&1; then
+  echo "APT accepted an altered InRelease with empty index cache" >&2
+  cat "$root/tampered-release.log" >&2
   exit 1
 fi
 mv "$root/InRelease.original" "$root/repo/InRelease"
