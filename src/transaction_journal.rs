@@ -106,11 +106,11 @@ impl Journal {
         {
             bail!("invalid transaction identifier");
         }
-        if record.phase == Phase::Failed && record.error.as_deref().is_none_or(str::is_empty) {
-            bail!("failed transaction requires a diagnostic error");
+        if matches!(record.phase, Phase::Failed | Phase::Interrupted) && record.error.as_deref().is_none_or(str::is_empty) {
+            bail!("failed or interrupted transaction requires a diagnostic error");
         }
-        if record.phase != Phase::Failed && record.error.is_some() {
-            bail!("only failed transactions may contain an error");
+        if !matches!(record.phase, Phase::Failed | Phase::Interrupted) && record.error.is_some() {
+            bail!("only failed or interrupted transactions may contain an error");
         }
         let path = self.dir.join(format!("{}.json", record.id));
         if let Ok(meta) = fs::symlink_metadata(&path) {
@@ -135,6 +135,7 @@ impl Journal {
                 | (Some(Phase::Prepared), Phase::Failed)
                 | (Some(Phase::Running), Phase::Succeeded)
                 | (Some(Phase::Running), Phase::Failed)
+                | (Some(Phase::Running), Phase::Interrupted)
         );
         if !valid {
             bail!("invalid transaction phase transition: {:?} -> {:?}", previous, record.phase);
@@ -269,6 +270,38 @@ mod tests {
             }).is_err());
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn interrupted_transition_requires_diagnostic_and_blocks_reopen() {
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        let id = "interrupted-test".to_string();
+        journal.advance(&JournalRecord { id: id.clone(), phase: Phase::Prepared, error: None }).unwrap();
+        journal.advance(&JournalRecord { id: id.clone(), phase: Phase::Running, error: None }).unwrap();
+        assert!(journal.advance(&JournalRecord { id: id.clone(), phase: Phase::Interrupted, error: None }).is_err());
+        journal.advance(&JournalRecord {
+            id: id.clone(), phase: Phase::Interrupted,
+            error: Some("SIGTERM: process group reaped; filesystem state unverified".into()),
+        }).unwrap();
+        assert!(journal.advance(&JournalRecord { id, phase: Phase::Succeeded, error: None }).is_err());
+        drop(journal);
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_cannot_be_written_from_prepared_state() {
+        let dir = temp_dir();
+        let journal = Journal::open(&dir).unwrap();
+        journal.advance(&JournalRecord { id: "tx".into(), phase: Phase::Prepared, error: None }).unwrap();
+        assert!(journal.advance(&JournalRecord {
+            id: "tx".into(), phase: Phase::Interrupted,
+            error: Some("interrupted".into()),
+        }).is_err());
+        drop(journal);
+        assert!(Journal::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
