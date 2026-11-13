@@ -3,7 +3,7 @@
 //! in the failed container or automatically clears the transaction journal.
 use super::*;
 use crate::transaction_journal::Journal;
-use std::{fs::OpenOptions, io::Write};
+use std::{fs::{File, OpenOptions}, io::Write};
 
 const IMAGE_INSPECT: &str = r#"{{index .Config.Labels "org.rpt.snapshot"}}|{{index .Config.Labels "org.rpt.source_session"}}|{{.Id}}"#;
 const SNAPSHOT_VERIFY_SCRIPT: &str =
