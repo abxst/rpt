@@ -109,10 +109,11 @@ fn relation_matches(version_string: &str, relation: &Option<(String, String)>) -
 }
 fn accepted_arch(req: &Requirement, source_arch: &str, candidate_arch: &str, native: &str,
                  candidate: &InstalledPackage) -> bool {
+    let effective_source = if source_arch == "all" { native } else { source_arch };
     match req.arch.as_deref() {
         Some("native") => candidate_arch == native || candidate_arch == "all",
         Some(exact) => candidate_arch == exact,
-        None => candidate_arch == source_arch || candidate_arch == "all"
+        None => candidate_arch == effective_source || candidate_arch == "all"
             || (candidate.multi_arch == "foreign" && candidate_arch == native),
     }
 }
@@ -359,7 +360,7 @@ mod tests {
     fn cascade_removes_reverse_dependencies() {
         let status = fixture("cascade", "Package: apppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\nPackage: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n");
         let report = remove(&status, "amd64", &["libpkg".into()], true).unwrap();
-        assert_eq!(report.remove, ["apppkg:amd64", "libpkg:amd64"]);
+        assert_eq!(report.remove, vec!["apppkg:amd64".to_owned(), "libpkg:amd64".to_owned()]);
         assert!(report.removable);
         fs::remove_file(status).unwrap();
     }
@@ -368,7 +369,7 @@ mod tests {
         let status = fixture("auto-status", "Package: apppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\nPackage: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\nPackage: orphanpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n");
         let states = fixture("auto-marks", "Package: libpkg\nArchitecture: amd64\nAuto-Installed: 1\n\nPackage: orphanpkg\nArchitecture: amd64\nAuto-Installed: 1\n\n");
         let plan = autoremove(&status, &states, "amd64").unwrap();
-        assert_eq!(plan.remove, ["orphanpkg:amd64"]);
+        assert_eq!(plan.remove, vec!["orphanpkg:amd64".to_owned()]);
         assert!(plan.removable);
         assert!(!plan.executable);
         fs::remove_file(status).unwrap(); fs::remove_file(states).unwrap();
