@@ -416,6 +416,18 @@ enum Command {
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
     },
+    /// Inspect an immutable Docker checkpoint and unfinished transaction journal.
+    SandboxSessionRecoveryInspect {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+    },
+    /// Explicitly restore a stopped sandbox from its pre-transaction image.
+    SandboxSessionRecoveryRestore {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+    },
     /// Execute signed plan artifacts only inside an ephemeral, network-isolated Docker container.
     SandboxInstall {
         #[arg(long)] manifest: PathBuf,
@@ -876,6 +888,17 @@ async fn execute(cli: Cli) -> Result<()> {
                 id: &id, timeout_seconds,
             }).await.context(ErrorCategory::System)?;
             println!("Bound sandbox transaction verified, applied and audited; host dpkg unchanged.");
+        }
+        Command::SandboxSessionRecoveryInspect { session, id, journal_dir } => {
+            let report = rpt::sandbox_session::inspect_checkpoint(&session, &id, &journal_dir)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::SandboxSessionRecoveryRestore { session, id, journal_dir } => {
+            let report = rpt::sandbox_session::restore_checkpoint(&session, &id, &journal_dir)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            println!("Sandbox rootfs restored; original failure quarantined; journal recovery gate preserved.");
         }
         Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
             rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {
