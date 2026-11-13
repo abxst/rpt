@@ -392,9 +392,159 @@ pub fn prepare(cache:&Path, names:&[String],arch:&str)->Result<Manifest> {
     }
     Ok(Manifest{packages})
 }
+/// SHA256-locked artifact corresponding to one exact candidate-policy plan step.
+/// Extra fields are intentionally ignored by the legacy Manifest downloader;
+/// SHA256 and size still bind the fetched bytes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExactArtifact {
+    #[serde(flatten)]
+    pub artifact: Package,
+    pub version: String,
+    pub architecture: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExactManifest {
+    pub packages: Vec<ExactArtifact>,
+    pub executable: bool,
+    pub warning: String,
+}
+
+/// Revalidate signed metadata and select exact (name, architecture, version)
+/// artifacts from a policy-selected plan. Never substitute "latest".
+pub fn prepare_exact(
+    cache: &Path, steps: &[crate::install_plan::PlanStep], native_arch: &str,
+) -> Result<ExactManifest> {
+    if steps.len() > 5000 { bail!("plan exceeds 5000 packages"); }
+    if native_arch.is_empty() || !native_arch.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        bail!("invalid native architecture");
+    }
+    let mut requested = BTreeMap::<(String, String), String>::new();
+    for step in steps {
+        if step.package.len() < 2 || !step.package.bytes().all(|b|
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')) {
+            bail!("invalid planned binary name");
+        }
+        if step.architecture != native_arch && step.architecture != "all" {
+            bail!("unsupported foreign-architecture download: {}:{}", step.package, step.architecture);
+        }
+        version::compare(&step.version, &step.version)?;
+        let key = (step.package.clone(), step.architecture.clone());
+        if requested.insert(key, step.version.clone()).is_some() {
+            bail!("duplicate planned package identity: {}:{}", step.package, step.architecture);
+        }
+    }
+    let mut desired = BTreeMap::new();
+    for step in steps {
+        // An exact already-installed version does not require artifact download.
+        if step.installed.as_deref() == Some(step.version.as_str()) { continue; }
+        desired.insert((step.package.clone(), step.architecture.clone()), step.version.clone());
+    }
+    if desired.is_empty() {
+        return Ok(ExactManifest {
+            packages: Vec::new(), executable: false,
+            warning: "Verified download manifest only; no dpkg execution.".into(),
+        });
+    }
+    let mut dirs = Vec::<PathBuf>::new();
+    for entry in fs::read_dir(cache).with_context(|| format!("reading {}", cache.display()))? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_dir() && name.len() == 24 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                bail!("symlink repository directory rejected");
+            }
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    if dirs.is_empty() { bail!("no signed cache; run rpt update first"); }
+    let mut found = BTreeMap::<(String, String), ExactArtifact>::new();
+    for dir in dirs {
+        let meta: RepositoryProvenance = serde_json::from_slice(
+            &fs::read(dir.join("provenance.json"))
+                .context("missing signed provenance: run rpt update first")?,
+        )?;
+        validate_repo(&dir, &meta)?;
+        for index in &meta.indexes {
+            scan_index(&dir.join(&index.local_file), |field| {
+                let key = (field.name.clone(), field.arch.clone());
+                let Some(wanted_version) = desired.get(&key) else { return Ok(()); };
+                if &field.version != wanted_version { return Ok(()); }
+                if !safe_path(&field.filename) || !field.filename.ends_with(".deb")
+                    || !hash_valid(&field.sha256) {
+                    bail!("invalid signed package Filename/SHA256 for {}", field.name);
+                }
+                let size = field.size.parse::<u64>()?;
+                if size == 0 { bail!("zero-length signed package artifact"); }
+                let pkg = Package {
+                    name: field.name.clone(),
+                    url: format!("{}/{}", meta.uri.trim_end_matches('/'), field.filename),
+                    sha256: field.sha256.to_ascii_lowercase(),
+                    size, filename: field.filename.clone(),
+                };
+                crate::validate_package(&pkg)?;
+                if let Some(previous) = found.get(&key) {
+                    if previous.artifact.sha256 != pkg.sha256
+                        || previous.artifact.size != pkg.size
+                        || previous.artifact.filename != pkg.filename {
+                        bail!("ambiguous signed artifact for {}:{} {}", field.name, field.arch, field.version);
+                    }
+                } else {
+                    found.insert(key, ExactArtifact {
+                        artifact: pkg,
+                        version: field.version.clone(),
+                        architecture: field.arch.clone(),
+                    });
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let mut artifacts = Vec::new();
+    let mut filenames = BTreeSet::new();
+    for step in steps {
+        if step.installed.as_deref() == Some(step.version.as_str()) { continue; }
+        let key = (step.package.clone(), step.architecture.clone());
+        let item = found.remove(&key).with_context(|| format!(
+            "verified artifact unavailable for {}:{} version {}",
+            step.package, step.architecture, step.version,
+        ))?;
+        if !filenames.insert(item.artifact.filename.clone()) {
+            bail!("colliding output filenames in locked manifest");
+        }
+        artifacts.push(item);
+    }
+    Ok(ExactManifest {
+        packages: artifacts,
+        executable: false,
+        warning: "Exact signed artifacts selected for the read-only policy plan. No dpkg execution.".into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_manifest_validates_architecture_identity_and_duplicate_roots() {
+        let mk = |arch: &str| crate::install_plan::PlanStep {
+            package: "testpkg".into(), architecture: arch.into(),
+            version: "1".into(), installed: None,
+        };
+        assert!(prepare_exact(Path::new("/not-needed"), &[mk("arm64")], "amd64").is_err());
+        assert!(prepare_exact(Path::new("/not-needed"), &[mk("amd64"), mk("amd64")], "amd64").is_err());
+    }
+    #[test]
+    fn already_installed_exact_version_needs_no_download() {
+        let step = crate::install_plan::PlanStep {
+            package: "testpkg".into(), architecture: "amd64".into(),
+            version: "1".into(), installed: Some("1".into()),
+        };
+        let manifest = prepare_exact(Path::new("/not-needed"), &[step], "amd64").unwrap();
+        assert!(manifest.packages.is_empty());
+        assert!(!manifest.executable);
+    }
+
     #[test]
     fn filename_and_hash_are_strict() {
         assert!(!safe_path("../../etc/passwd"));
