@@ -32,8 +32,7 @@ pub struct Journal {
 impl Journal {
     pub fn open(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
-        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
-            .open(dir.join(".rpt-transaction.lock"))?;
+        let lock = Self::open_lock(dir)?;
         lock.try_lock_exclusive().context("another RPT transaction owns the journal lock")?;
         Self::inspect_locked(dir, lock)
     }
@@ -43,8 +42,7 @@ impl Journal {
     /// Call from a blocking thread; use `wait_async` in Tokio applications.
     pub fn wait(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
-        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
-            .open(dir.join(".rpt-transaction.lock"))?;
+        let lock = Self::open_lock(dir)?;
         lock.lock_exclusive().context("waiting for RPT transaction lock")?;
         Self::inspect_locked(dir, lock)
     }
@@ -52,6 +50,23 @@ impl Journal {
     /// Wait without blocking a Tokio runtime worker.
     pub async fn wait_async(dir: PathBuf) -> Result<Self> {
         tokio::task::spawn_blocking(move || Self::wait(&dir)).await?
+    }
+
+    fn open_lock(dir: &Path) -> Result<File> {
+        let path = dir.join(".rpt-transaction.lock");
+        // Do not follow a planted symlink or open an existing FIFO/device.
+        // The lock inode must remain stable across cooperating processes.
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if !meta.file_type().is_file() {
+                bail!("journal lock is not a regular file: {}", path.display());
+            }
+        }
+        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
+            .open(&path)?;
+        if !lock.metadata()?.is_file() {
+            bail!("journal lock is not a regular file: {}", path.display());
+        }
+        Ok(lock)
     }
 
     fn inspect_locked(dir: &Path, lock: File) -> Result<Self> {
@@ -307,6 +322,22 @@ mod tests {
         fs::write(dir.join("wrong.json"), r#"{"id":"right","phase":"succeeded","error":null}"#).unwrap();
         assert!(Journal::open(&dir).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_lock_file() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let outside = temp_dir();
+        fs::write(&outside, "untouched").unwrap();
+        symlink(&outside, dir.join(".rpt-transaction.lock")).unwrap();
+        assert!(Journal::open(&dir).is_err());
+        assert!(Journal::wait(&dir).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_file(outside).unwrap();
     }
 
     #[cfg(unix)]
