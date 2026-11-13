@@ -2342,9 +2342,20 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         let mut too_old = catalog.clone();
         too_old.insert("foundation".into(), item("foundation", "1", ""));
         assert!(solve(&too_old, &BTreeMap::new(), "app").is_err());
-        let mut cycle = catalog;
-        cycle.insert("foundation".into(), item("foundation", "2", "app"));
-        assert!(solve(&cycle, &BTreeMap::new(), "app").is_err());
+        // A Depends-only cycle has a finite read-only package set.
+        let depends_cycle = BTreeMap::from([
+            ("app".into(), item("app", "1", "foundation")),
+            ("foundation".into(), item("foundation", "2", "app")),
+        ]);
+        let cycle_plan = solve(&depends_cycle, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(cycle_plan.len(), 2);
+        // A direct Pre-Depends back-edge still fails closed: unpack/configure
+        // ordering cannot be inferred from a package-set preview.
+        let mut pre_cycle = catalog;
+        let mut foundation = item("foundation", "2", "");
+        foundation.pre_depends = "app".into();
+        pre_cycle.insert("foundation".into(), foundation);
+        assert!(solve(&pre_cycle, &BTreeMap::new(), "app").is_err());
     }
 
     #[test]
