@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 
+mod bound_execution;
+pub use bound_execution::apply_bound;
+
 const SESSION_LABEL: &str = "org.rpt.sandbox=true";
 const INSPECT_TEMPLATE: &str = r#"{{index .Config.Labels "org.rpt.sandbox"}}|{{.State.Running}}"#;
 const HOST_INSTALL_SCRIPT: &str = r#"set -eu
