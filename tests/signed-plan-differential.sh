@@ -182,6 +182,14 @@ SHA256: $demo_hash
 Size: $demo_size
 Description: real sandbox dpkg package
 
+Package: rpt-lie
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-sandbox-demo_1.0_all.deb
+SHA256: $demo_hash
+Size: $demo_size
+Description: intentionally inconsistent archive control fixture
+
 EOF
 gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback --passphrase '' \
   --quick-generate-key 'RPT differential <rpt-diff@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
@@ -275,6 +283,29 @@ docker pull debian:bookworm-slim >/dev/null
   --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
   --journal-dir "$root/sandbox-journal" --id sandbox-ci --timeout-seconds 180
 grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-ci.json"
+# Install/remove and install/purge exercise actual dpkg operations in the
+# same isolated container; different journals and disposable roots each time.
+for action in install-remove install-purge; do
+  ./target/debug/rpt sandbox-install \
+    --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+    --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
+    --journal-dir "$root/sandbox-journal" --id "sandbox-$action" \
+    --timeout-seconds 180 --lifecycle "$action"
+  grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-$action.json"
+done
+./target/debug/rpt prepare-download-plan \
+  --cache "$root/rpt-cache" --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/mismatch-manifest.json" rpt-lie
+if ./target/debug/rpt sandbox-install \
+  --manifest "$root/mismatch-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
+  --journal-dir "$root/mismatch-journal" --id sandbox-mismatch \
+  --timeout-seconds 180 >"$root/mismatch-stdout.log" 2>"$root/mismatch-stderr.log"; then
+  echo "Sandbox unexpectedly accepted signed metadata disagreeing with .deb control" >&2
+  exit 1
+fi
+grep -Fq 'Signed manifest disagrees with Debian control fields' "$root/mismatch-stderr.log"
+
 test ! -s "$root/apt/status"
 if dpkg-query -W rpt-sandbox-demo >/dev/null 2>&1; then
   echo "Unexpected host dpkg mutation from sandbox installation" >&2

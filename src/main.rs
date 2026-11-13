@@ -323,6 +323,8 @@ enum Command {
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value = "debian:bookworm-slim")] image: String,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(long, value_enum, default_value_t = rpt::sandbox_execution::SandboxLifecycle::Install)]
+        lifecycle: rpt::sandbox_execution::SandboxLifecycle,
     },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
@@ -688,10 +690,10 @@ async fn execute(cli: Cli) -> Result<()> {
                 println!("{source}\n");
             }
         }
-        Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds } => {
+        Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
             rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {
                 manifest, artifacts, signed_cache: cache, journal_dir, id, architecture,
-                image, timeout_seconds,
+                image, timeout_seconds, lifecycle,
             }).await.context(ErrorCategory::System)?;
             println!("Ephemeral container transaction finished; host dpkg unchanged.");
         }
