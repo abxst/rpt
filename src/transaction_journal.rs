@@ -156,11 +156,13 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static NEXT_JOURNAL_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("rpt-journal-test-{}-{}",
-            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()))
+        std::env::temp_dir().join(format!("rpt-journal-test-{}-{}-{}",
+            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(), NEXT_JOURNAL_FIXTURE.fetch_add(1, Ordering::Relaxed)))
     }
 
     #[test]
@@ -231,6 +233,62 @@ mod tests {
         assert!(journal.advance(&record).is_err());
         drop(journal);
         assert!(Journal::open(&dir).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_transaction_ids_cannot_be_reused() {
+        for terminal in [Phase::Succeeded, Phase::Failed] {
+            let dir = temp_dir();
+            let journal = Journal::open(&dir).unwrap();
+            journal.advance(&JournalRecord { id: "reused".into(), phase: Phase::Prepared, error: None }).unwrap();
+            journal.advance(&JournalRecord { id: "reused".into(), phase: Phase::Running, error: None }).unwrap();
+            journal.advance(&JournalRecord {
+                id: "reused".into(), phase: terminal,
+                error: if terminal == Phase::Failed { Some("test failure".into()) } else { None },
+            }).unwrap();
+            drop(journal);
+            let reopened = Journal::open(&dir).unwrap();
+            assert!(reopened.advance(&JournalRecord {
+                id: "reused".into(), phase: Phase::Prepared, error: None,
+            }).is_err());
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn incomplete_and_corrupt_journals_fail_closed() {
+        for (filename, data) in [
+            ("broken.json", "{not-json"),
+            (".interrupted.tmp", "partial"),
+            ("unfinished.json", r#"{"id":"unfinished","phase":"running","error":null}"#),
+        ] {
+            let dir = temp_dir();
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(filename), data).unwrap();
+            assert!(Journal::open(&dir).is_err(), "accepted {filename}");
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn many_sequential_transactions_keep_durable_terminal_records() {
+        let dir = temp_dir();
+        for n in 0..32 {
+            let journal = Journal::wait(&dir).unwrap();
+            let id = format!("batch-{n}");
+            journal.advance(&JournalRecord { id: id.clone(), phase: Phase::Prepared, error: None }).unwrap();
+            journal.advance(&JournalRecord { id: id.clone(), phase: Phase::Running, error: None }).unwrap();
+            journal.advance(&JournalRecord { id: id.clone(), phase: Phase::Succeeded, error: None }).unwrap();
+        }
+        let journal = Journal::open(&dir).unwrap();
+        for n in 0..32 {
+            let record: JournalRecord = serde_json::from_slice(
+                &fs::read(dir.join(format!("batch-{n}.json"))).unwrap(),
+            ).unwrap();
+            assert_eq!(record.phase, Phase::Succeeded);
+        }
+        drop(journal);
         fs::remove_dir_all(dir).unwrap();
     }
 
