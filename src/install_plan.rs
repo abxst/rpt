@@ -2413,4 +2413,34 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         ]);
         assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
     }
+    #[test]
+    fn joint_roots_share_dependencies_without_duplicates() {
+        let catalog = BTreeMap::from([
+            ("appone".into(), item("appone", "1", "shared")),
+            ("apptwo".into(), item("apptwo", "1", "shared")),
+            ("shared".into(), item("shared", "1", "")),
+        ]);
+        let keyed = catalog.into_iter().map(|(name, value)| (
+            PackageKey { name, architecture: "amd64".into() }, value
+        )).collect();
+        let roots = vec!["appone".into(), "apptwo".into()];
+        let plan = solve_catalog_many(&keyed, &BTreeMap::new(), &BTreeMap::new(),
+            &roots, 10, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+            ["shared", "appone", "apptwo"]);
+    }
+
+    #[test]
+    fn joint_roots_reject_mutually_conflicting_packages() {
+        let mut left = item("leftpkg", "1", "");
+        left.conflicts = "rightpkg".into();
+        let keyed = BTreeMap::from([
+            (PackageKey { name: "leftpkg".into(), architecture: "amd64".into() }, left),
+            (PackageKey { name: "rightpkg".into(), architecture: "amd64".into() }, item("rightpkg", "1", "")),
+        ]);
+        let roots = vec!["leftpkg".into(), "rightpkg".into()];
+        assert!(solve_catalog_many(&keyed, &BTreeMap::new(), &BTreeMap::new(),
+            &roots, 10, "amd64").is_err());
+    }
+
 }
