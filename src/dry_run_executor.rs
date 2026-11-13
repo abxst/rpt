@@ -62,6 +62,7 @@ impl DryRunExecutor {
                 Exited(std::process::ExitStatus),
                 Interrupted(&'static str),
             }
+            #[cfg(unix)]
             let outcome = {
                 let wait = supervisor.wait();
                 tokio::pin!(wait);
@@ -69,8 +70,17 @@ impl DryRunExecutor {
                     result = &mut wait => WaitResult::Exited(result.context("waiting for supervised command")?),
                     _ = tokio::time::sleep(timeout) => WaitResult::Interrupted("timeout"),
                     _ = tokio::signal::ctrl_c() => WaitResult::Interrupted("SIGINT"),
-                    #[cfg(unix)]
                     _ = terminate.recv() => WaitResult::Interrupted("SIGTERM"),
+                }
+            };
+            #[cfg(not(unix))]
+            let outcome = {
+                let wait = supervisor.wait();
+                tokio::pin!(wait);
+                tokio::select! {
+                    result = &mut wait => WaitResult::Exited(result.context("waiting for supervised command")?),
+                    _ = tokio::time::sleep(timeout) => WaitResult::Interrupted("timeout"),
+                    _ = tokio::signal::ctrl_c() => WaitResult::Interrupted("SIGINT"),
                 }
             };
             let status = match outcome {
