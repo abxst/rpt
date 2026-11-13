@@ -3,7 +3,9 @@
 set -euo pipefail
 root="$(mktemp -d)"
 server_pid=""
+session="ci-test"
 cleanup() {
+  docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
   rm -rf "$root"
 }
@@ -305,6 +307,41 @@ if ./target/debug/rpt sandbox-install \
   exit 1
 fi
 grep -Fq 'Signed manifest disagrees with Debian control fields' "$root/mismatch-stderr.log"
+
+# A persistent, isolated container keeps its own dpkg database across RPT
+# install/remove/purge commands. None of this state is reflected on the host.
+./target/debug/rpt sandbox-session-create \
+  --session "$session" --image debian:bookworm-slim
+./target/debug/rpt sandbox-session-install \
+  --session "$session" --id session-install \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --journal-dir "$root/session-journal" \
+  --architecture "$arch" --timeout-seconds 180
+./target/debug/rpt sandbox-session-inspect --session "$session" \
+  | grep -Fq rpt-sandbox-demo
+grep -Fq '"phase": "succeeded"' "$root/session-journal/session-install.json"
+./target/debug/rpt sandbox-session-remove \
+  --session "$session" --id session-remove --journal-dir "$root/session-journal" \
+  --timeout-seconds 180 rpt-sandbox-demo
+if ./target/debug/rpt sandbox-session-inspect --session "$session" | grep -Fq rpt-sandbox-demo; then
+  echo "Package still present after sandbox removal" >&2
+  exit 1
+fi
+./target/debug/rpt sandbox-session-install \
+  --session "$session" --id session-reinstall \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --journal-dir "$root/session-journal" \
+  --architecture "$arch" --timeout-seconds 180
+./target/debug/rpt sandbox-session-remove \
+  --session "$session" --id session-purge --journal-dir "$root/session-journal" \
+  --timeout-seconds 180 --purge rpt-sandbox-demo
+./target/debug/rpt sandbox-session-destroy --session "$session"
+if docker container inspect "rpt-session-$session" >/dev/null 2>&1; then
+  echo "Docker sandbox survived explicit destroy" >&2
+  exit 1
+fi
+echo "PASS persistent isolated dpkg install/remove/reinstall/purge"
+
 
 test ! -s "$root/apt/status"
 if dpkg-query -W rpt-sandbox-demo >/dev/null 2>&1; then
