@@ -171,7 +171,7 @@ jobs:
           Description: local repository policy fixture
 
           EOF
-          printf 'deb [trusted=yes] file:%s/repo ./\\n' "$root" > "$root/etc/sources.list"
+          printf 'deb [trusted=yes] file:%s/repo ./\n' "$root" > "$root/etc/sources.list"
           apt_opts=(
             -o "Dir::State::status=$root/status"
             -o "Dir::State::lists=$root/lists"
@@ -185,7 +185,7 @@ jobs:
           mkdir -p "$root/etc/empty-sources"
           apt-get "${apt_opts[@]}" update
           for priority in 999 1000 1001; do
-            printf 'Package: rpt-fixture\\nPin: version 1.0\\nPin-Priority: %s\\n' "$priority" > "$root/etc/preferences"
+            printf 'Package: rpt-fixture\nPin: version 1.0\nPin-Priority: %s\n' "$priority" > "$root/etc/preferences"
             apt-cache "${apt_opts[@]}" policy rpt-fixture > "$root/policy-$priority.txt"
             grep -Fxq '  Installed: 2.0' "$root/policy-$priority.txt"
             if [[ "$priority" == 1001 ]]; then expected=1.0; else expected=2.0; fi
