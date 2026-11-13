@@ -56,6 +56,63 @@ Filename: pool/rpt-broken_1.0_all.deb
 Size: 1
 Description: signed differential unsatisfiable package
 
+
+Package: rpt-alternative
+Version: 1.0
+Architecture: all
+Depends: rpt-nonexistent | rpt-lib (>= 2)
+Filename: pool/rpt-alternative_1.0_all.deb
+Size: 1
+Description: fallback alternative
+
+Package: rpt-provider
+Version: 1.0
+Architecture: all
+Provides: rpt-virtual-api (= 2)
+Filename: pool/rpt-provider_1.0_all.deb
+Size: 1
+Description: versioned virtual provider
+
+Package: rpt-virtual-app
+Version: 1.0
+Architecture: all
+Depends: rpt-virtual-api (>= 2)
+Filename: pool/rpt-virtual-app_1.0_all.deb
+Size: 1
+Description: versioned virtual dependency
+
+Package: rpt-conflict
+Version: 1.0
+Architecture: all
+Conflicts: rpt-lib
+Filename: pool/rpt-conflict_1.0_all.deb
+Size: 1
+Description: conflicts with library
+
+Package: rpt-version-mismatch
+Version: 1.0
+Architecture: all
+Depends: rpt-lib (>= 3)
+Filename: pool/rpt-version-mismatch_1.0_all.deb
+Size: 1
+Description: unsatisfied version constraint
+
+Package: rpt-cycle-a
+Version: 1.0
+Architecture: all
+Depends: rpt-cycle-b
+Filename: pool/rpt-cycle-a_1.0_all.deb
+Size: 1
+Description: cycle first node
+
+Package: rpt-cycle-b
+Version: 1.0
+Architecture: all
+Depends: rpt-cycle-a
+Filename: pool/rpt-cycle-b_1.0_all.deb
+Size: 1
+Description: cycle second node
+
 PACKAGES
 gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback --passphrase '' \
   --quick-generate-key 'RPT differential <rpt-diff@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
@@ -111,23 +168,43 @@ opts=(
 )
 apt-get "${opts[@]}" update >"$root/apt-update.log"
 ./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache" --no-progress >"$root/rpt-update.log"
-for pkg in rpt-app rpt-pre-app; do
+# Compare exact package/version selections, not just package names.
+# APT's Inst lines carry versions in parentheses; RPT emits the version as
+# its second field. Keep the parsers independent and assert nonempty plans.
+compare_plan() {
+  local pkg="$1"
   apt-get "${opts[@]}" -s -y install "$pkg" >"$root/apt-plan"
   ./target/debug/rpt plan-install --cache "$root/rpt-cache" --status "$root/apt/status" \
     --apt-root "$root/rpt-apt" --architecture "$arch" "$pkg" >"$root/rpt-plan"
-  sed -n 's/^Inst \([^ ]*\) .*/\1/p' "$root/apt-plan" | LC_ALL=C sort -u >"$root/apt-names"
-  sed -n 's/^  \([^ ]*\) [^ ]* (installed: .*)$/\1/p' "$root/rpt-plan" | LC_ALL=C sort -u >"$root/rpt-names"
-  if ! diff -u "$root/apt-names" "$root/rpt-names"; then
-    echo "APT/RPT dependency plan differs for $pkg" >&2
+  sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-plan" | LC_ALL=C sort -u >"$root/apt-versions"
+  sed -nE 's/^  ([^ ]+) ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-plan" | LC_ALL=C sort -u >"$root/rpt-versions"
+  if [[ ! -s "$root/apt-versions" || ! -s "$root/rpt-versions" ]] || \
+      ! diff -u "$root/apt-versions" "$root/rpt-versions"; then
+    echo "APT/RPT package/version plan mismatch for $pkg" >&2
     cat "$root/apt-plan" "$root/rpt-plan" >&2
     exit 1
   fi
+}
+reject_plan() {
+  local pkg="$1"
+  if apt-get "${opts[@]}" -s -y install "$pkg" >"$root/apt-reject" 2>&1; then
+    echo "APT unexpectedly accepted $pkg" >&2; exit 1
+  fi
+  if ./target/debug/rpt plan-install --cache "$root/rpt-cache" --status "$root/apt/status" \
+    --apt-root "$root/rpt-apt" --architecture "$arch" "$pkg" >"$root/rpt-reject" 2>&1; then
+    echo "RPT unexpectedly accepted $pkg" >&2; exit 1
+  fi
+}
+for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app; do
+  compare_plan "$pkg"
 done
-if apt-get "${opts[@]}" -s -y install rpt-broken >"$root/apt-broken" 2>&1; then
-  echo "APT unexpectedly accepted unsatisfiable fixture" >&2; exit 1
+for pkg in rpt-broken rpt-version-mismatch; do
+  reject_plan "$pkg"
+done
+# Conflicts must be rejected when both packages are explicitly requested.
+if apt-get "${opts[@]}" -s -y install rpt-app rpt-conflict >"$root/apt-conflict" 2>&1; then
+  echo "APT accepted incompatible package pair" >&2; exit 1
 fi
-if ./target/debug/rpt plan-install --cache "$root/rpt-cache" --status "$root/apt/status" \
-  --apt-root "$root/rpt-apt" --architecture "$arch" rpt-broken >"$root/rpt-broken" 2>&1; then
-  echo "RPT unexpectedly accepted unsatisfiable fixture" >&2; exit 1
-fi
-echo "PASS signed APT/RPT plan differential: Depends, Pre-Depends, missing dependency"
+# RPT's public CLI currently accepts one root package, so do not pretend
+# that its single-root preview validates a multi-root conflict.
+echo "PASS signed APT/RPT versioned plan differential: Depends, Pre-Depends, alternatives, Provides, missing/version constraints; APT multi-root Conflicts"
