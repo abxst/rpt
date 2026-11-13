@@ -277,6 +277,12 @@ enum Command {
         #[arg(long, default_value_t = 200)] max_packages: usize,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Read-only conservative reverse-dependency and protected-package removal audit.
+    RemovalImpact {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -578,6 +584,11 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)? {
                 println!("{} {}", item.name, item.version);
             }
+        }
+        Command::RemovalImpact { status, architecture, packages } => {
+            let report = rpt::removal_impact::inspect(&status, &architecture, &packages)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::PlanTransactionAudit { cache, status, apt_root, architecture, max_packages, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy(
