@@ -19,6 +19,9 @@ pub struct BoundApply<'a> {
 pub async fn apply_bound(opts: BoundApply<'_>) -> Result<()> {
     let BoundApply { session, transaction, artifacts, cache, apt_root, journal,
         id, timeout_seconds } = opts;
+    // Hold one session lease across plan validation, image checkpoint and
+    // execution. A competing RPT transaction must not slip into this gap.
+    let _session_lease = session_lock::acquire(session)?;
     if !sandbox_execution::valid_id(id) {
         bail!("invalid sandbox transaction identifier");
     }
@@ -83,7 +86,11 @@ pub async fn apply_bound(opts: BoundApply<'_>) -> Result<()> {
         stage_str, &guest_script, "rpt-session-dpkg", &bound.status_sha256,
     ].iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
     args.extend(staged.into_iter().map(|file| format!("/rpt-input/{file}")));
-    run_command(session, journal, id, "/bin/sh", args, timeout_seconds).await
+    // Persist the complete Docker rootfs checkpoint BEFORE allowing dpkg to
+    // mutate the container. An Interrupted/Running journal plus this record
+    // makes recovery inspectable after a hard crash.
+    snapshot_recovery::checkpoint_locked(session, id, journal, &bound.status_sha256).await?;
+    run_command_locked(session, journal, id, "/bin/sh", args, timeout_seconds).await
 }
 
 #[cfg(test)]
