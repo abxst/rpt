@@ -134,13 +134,13 @@ jobs:
           Pin: version 1.0
           Pin-Priority: 1001
           EOF
-          apt-cache -o Dir::State::status="$root/status" \\
-            -o Dir::State::lists="$root/lists" \\
-            -o Dir::Cache="$root/cache" \\
-            -o Dir::Etc::sourcelist=/dev/null \\
-            -o Dir::Etc::sourceparts=/dev/null \\
-            -o Dir::Etc::preferences="$root/etc/preferences" \\
-            -o Dir::Etc::preferencesparts="$root/etc/preferences.d" \\
+          apt-cache -o Dir::State::status="$root/status" \
+            -o Dir::State::lists="$root/lists" \
+            -o Dir::Cache="$root/cache" \
+            -o Dir::Etc::sourcelist=/dev/null \
+            -o Dir::Etc::sourceparts=/dev/null \
+            -o Dir::Etc::preferences="$root/etc/preferences" \
+            -o Dir::Etc::preferencesparts="$root/etc/preferences.d" \
             policy rpt-fixture > "$root/policy.txt"
           grep -q 'Installed: 2.0' "$root/policy.txt"
           cat "$root/policy.txt"
