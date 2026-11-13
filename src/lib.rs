@@ -5,6 +5,8 @@ pub mod cache_query;
 pub mod metadata_query;
 pub mod install_plan;
 pub mod transaction_plan_audit;
+pub mod removal_impact;
+pub mod removal_planner;
 pub mod policy;
 pub mod apt_preferences;
 pub mod apt_pin_eval;

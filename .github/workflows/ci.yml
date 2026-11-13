@@ -220,6 +220,8 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/transaction-json-events.sh ./target/debug/rpt-transaction-dry-run
+      - name: Removal planner CLI end-to-end (unprivileged)
+        run: bash tests/removal-planner-e2e.sh ./target/debug/rpt
       - name: Release build
         run: cargo build --release --locked
   arm64-native:
