@@ -166,7 +166,13 @@ if apt-get "${opts[@]}" update >"$root/tampered-index.log" 2>&1; then
 fi
 mv "$root/Packages.original" "$root/repo/Packages"
 cp "$root/repo/InRelease" "$root/InRelease.original"
-printf '\\n# altered signed metadata\\n' >> "$root/repo/InRelease"
+# Mutate a byte inside the clearsigned payload, not after its signature block.
+# This preserves the InRelease envelope while invalidating its signature.
+sed -i 's/^Origin: RPT CI$/Origin: RPT Cx/' "$root/repo/InRelease"
+if cmp -s "$root/InRelease.original" "$root/repo/InRelease"; then
+  echo "InRelease tamper fixture did not modify signed content" >&2
+  exit 1
+fi
 if apt-get "${opts[@]}" update >"$root/tampered-release.log" 2>&1; then
   echo "APT accepted an altered InRelease" >&2
   exit 1
