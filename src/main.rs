@@ -274,6 +274,11 @@ enum Command {
         #[arg(long)]
         fail_message: Option<String>,
     },
+    /// Inspect transaction journals without changing or clearing recovery state.
+    RecoveryInspect {
+        #[arg(long)]
+        journal_dir: PathBuf,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -312,6 +317,10 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli) -> Result<()> {
     let format = cli.log_format;
     match cli.command {
+        Command::RecoveryInspect { journal_dir } => {
+            let report = rpt::recovery_inspector::inspect(&journal_dir)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::CandidatePriorityDiagnostic { installed, available, priority } => {
             let candidate = rpt::policy::choose_priority_candidate(
                 &[(available, priority)], Some(&installed),
