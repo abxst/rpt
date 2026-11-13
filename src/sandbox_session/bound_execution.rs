@@ -2,13 +2,23 @@
 //! session. Never executes dpkg on the host or mounts the host root.
 use super::*;
 
-/// Reject stale plans before staging; repeat SHA256 preflight *inside* the
-/// container immediately before dpkg. Postconditions are checked in the same
-/// journal-supervised process, before a Succeeded phase may be persisted.
-pub async fn apply_bound(
-    session: &str, transaction: &Path, artifacts: &Path, cache: &Path,
-    apt_root: &Path, journal: &Path, id: &str, timeout_seconds: u64,
-) -> Result<()> {
+/// Validated session-only execution parameters.
+pub struct BoundApply<'a> {
+    pub session: &'a str,
+    pub transaction: &'a Path,
+    pub artifacts: &'a Path,
+    pub cache: &'a Path,
+    pub apt_root: &'a Path,
+    pub journal: &'a Path,
+    pub id: &'a str,
+    pub timeout_seconds: u64,
+}
+
+/// Reject stale plans before staging; repeat SHA256 preflight *inside* Docker.
+/// Postconditions finish before the journal can record Succeeded.
+pub async fn apply_bound(opts: BoundApply<'_>) -> Result<()> {
+    let BoundApply { session, transaction, artifacts, cache, apt_root, journal,
+        id, timeout_seconds } = opts;
     if !sandbox_execution::valid_id(id) {
         bail!("invalid sandbox transaction identifier");
     }
