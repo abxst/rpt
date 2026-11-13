@@ -283,6 +283,19 @@ enum Command {
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Plan explicit removals against installed dependency graph; no dpkg execution.
+    PlanRemove {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Plan orphan auto-package removals from APT extended_states; read-only.
+    PlanAutoremove {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/var/lib/apt/extended_states")] extended_states: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -584,6 +597,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)? {
                 println!("{} {}", item.name, item.version);
             }
+        }
+        Command::PlanRemove { status, architecture, cascade, packages } => {
+            let plan = rpt::removal_planner::remove(&status, &architecture, &packages, cascade)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::PlanAutoremove { status, extended_states, architecture } => {
+            let plan = rpt::removal_planner::autoremove(&status, &extended_states, &architecture)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         Command::RemovalImpact { status, architecture, packages } => {
             let report = rpt::removal_impact::inspect(&status, &architecture, &packages)
