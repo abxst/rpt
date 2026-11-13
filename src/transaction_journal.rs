@@ -42,8 +42,7 @@ impl Journal {
     /// Call from a blocking thread; use `wait_async` in Tokio applications.
     pub fn wait(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
-        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
-            .open(dir.join(".rpt-transaction.lock"))?;
+        let lock = Self::open_lock(dir)?;
         lock.lock_exclusive().context("waiting for RPT transaction lock")?;
         Self::inspect_locked(dir, lock)
     }
