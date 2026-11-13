@@ -46,6 +46,21 @@ pub fn inspect(dir: &Path) -> Result<RecoveryReport> {
                 .with_context(|| format!("parsing journal {}", path.display())));
         match record {
             Ok(record) => {
+                let valid_id = !record.id.is_empty()
+                    && record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                if !valid_id {
+                    report.warnings.push(format!("invalid transaction identifier: {name}"));
+                    report.requires_manual_recovery = true;
+                }
+                let valid_diagnostic = match record.phase {
+                    Phase::Failed | Phase::Interrupted =>
+                        record.error.as_deref().is_some_and(|message| !message.is_empty()),
+                    _ => record.error.is_none(),
+                };
+                if !valid_diagnostic {
+                    report.warnings.push(format!("invalid phase diagnostic: {name}"));
+                    report.requires_manual_recovery = true;
+                }
                 if path.file_stem().and_then(|stem| stem.to_str()) != Some(record.id.as_str()) {
                     report.warnings.push(format!("journal filename/id mismatch: {name}"));
                     report.requires_manual_recovery = true;
@@ -84,6 +99,20 @@ mod tests {
         assert_eq!(report.records[0].phase, Phase::Interrupted);
         assert_eq!(report.warnings.len(), 2);
         assert_eq!(fs::read(path).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn detects_semantically_invalid_records_even_when_json_is_valid() {
+        let dir = std::env::temp_dir().join(format!("rpt-inspect-invalid-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("failed.json"), r#"{"id":"failed","phase":"failed","error":null}"#).unwrap();
+        fs::write(dir.join("ok.json"), r#"{"id":"ok","phase":"succeeded","error":"unexpected"}"#).unwrap();
+        fs::write(dir.join("bad.id.json"), r#"{"id":"bad.id","phase":"succeeded","error":null}"#).unwrap();
+        let report = inspect(&dir).unwrap();
+        assert!(report.requires_manual_recovery);
+        assert_eq!(report.records.len(), 3);
+        assert_eq!(report.warnings.len(), 3);
         fs::remove_dir_all(dir).unwrap();
     }
 }
