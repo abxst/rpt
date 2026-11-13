@@ -46,7 +46,13 @@ pub fn attest(dir: &Path, id: &str, operator: &str, reason: &str, evidence: &str
     let before = fs::read(&journal_path)?;
     let digest = hex::encode(Sha256::digest(&before));
     let audit_dir = dir.join("recovery-audit");
-    fs::create_dir_all(&audit_dir)?;
+    if audit_dir.exists() || fs::symlink_metadata(&audit_dir).is_ok() {
+        if !fs::symlink_metadata(&audit_dir)?.file_type().is_dir() {
+            bail!("audit directory is not a real directory");
+        }
+    } else {
+        fs::create_dir(&audit_dir)?;
+    }
     if !fs::symlink_metadata(&audit_dir)?.file_type().is_dir() {
         bail!("audit directory is not a real directory");
     }
