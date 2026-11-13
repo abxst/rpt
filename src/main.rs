@@ -279,6 +279,14 @@ enum Command {
         #[arg(long)]
         journal_dir: PathBuf,
     },
+    /// Record operator evidence for a blocked transaction; NEVER unlocks the journal.
+    RecoveryAttest {
+        #[arg(long)] journal_dir: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long)] operator: String,
+        #[arg(long)] reason: String,
+        #[arg(long)] evidence: String,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -317,6 +325,10 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli) -> Result<()> {
     let format = cli.log_format;
     match cli.command {
+        Command::RecoveryAttest { journal_dir, id, operator, reason, evidence } => {
+            let record = rpt::recovery_audit::attest(&journal_dir, &id, &operator, &reason, &evidence)?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+        }
         Command::RecoveryInspect { journal_dir } => {
             let report = rpt::recovery_inspector::inspect(&journal_dir)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
