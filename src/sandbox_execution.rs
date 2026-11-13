@@ -165,7 +165,7 @@ fn stage_artifacts(stage: &Path, artifacts: &Path, manifest: &ExactManifest) -> 
                 bail!("unsafe signed identity field in execution manifest");
             }
         }
-        writeln!(expected, "{name}\\t{}\\t{}\\t{}",
+        writeln!(expected, "{name}\t{}\t{}\t{}",
             pkg.artifact.name, pkg.version, pkg.architecture)?;
     }
     expected.sync_all()?;
