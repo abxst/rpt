@@ -323,7 +323,7 @@ pub fn autoremove(status: &Path, extended_states: &Path, native: &str) -> Result
 /// extended_states snapshot, without writes to either file.
 pub fn autoremove_snapshot(status: &[u8], extended_states: &[u8], native: &str) -> Result<RemovalPlan> {
     checked_arch(native)?;
-    let installed = read_installed(status)?;
+    let installed = read_installed_bytes(status)?;
     ensure_initial_dependencies(&installed, native)?;
     let auto = auto_marks_from_bytes(extended_states, &installed)?;
     let mut keep = BTreeSet::new();
