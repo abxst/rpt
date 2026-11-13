@@ -313,6 +313,15 @@ enum Command {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
     },
+    /// Check provenance and immutable image identity of a sandbox checkpoint.
+    SandboxSnapshotVerify {
+        #[arg(long)] receipt: PathBuf,
+    },
+    /// Restore a checkpoint into a NEW isolated Docker session, preserving evidence.
+    SandboxSnapshotRestore {
+        #[arg(long)] receipt: PathBuf,
+        #[arg(long)] new_session: String,
+    },
     /// Create a persistent, fully isolated Docker dpkg test root (no host mounts).
     SandboxSessionCreate {
         #[arg(long)] session: String,
@@ -792,6 +801,16 @@ async fn execute(cli: Cli) -> Result<()> {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
             }
+        }
+        Command::SandboxSnapshotVerify { receipt } => {
+            let snapshot = rpt::sandbox_session::verify_snapshot(&receipt).await
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        Command::SandboxSnapshotRestore { receipt, new_session } => {
+            let container = rpt::sandbox_session::restore_snapshot(&receipt, &new_session).await
+                .context(ErrorCategory::System)?;
+            println!("Recovered sandbox in {container}; original evidence and journal preserved.");
         }
         Command::SandboxSessionCreate { session, image } => {
             let container = rpt::sandbox_session::create(&session, &image).await
