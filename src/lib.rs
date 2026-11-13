@@ -18,6 +18,7 @@ pub mod sources;
 pub mod transaction;
 pub mod transaction_journal;
 pub mod recovery_inspector;
+pub mod recovery_audit;
 pub mod process_supervisor;
 pub mod dry_run_executor;
 pub mod overlay_stage;
