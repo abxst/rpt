@@ -156,4 +156,20 @@ fi
 if simulate rpt-app rpt-conflict >"$root/conflict.log"; then
   echo "APT unexpectedly accepted conflicting packages" >&2; exit 1
 fi
+# Negative trust-chain fixtures: altered index and altered signed metadata
+# must fail before any simulated dependency resolution is considered valid.
+cp "$root/repo/Packages" "$root/Packages.original"
+printf '\\n# tampered after signing\\n' >> "$root/repo/Packages"
+if apt-get "${opts[@]}" update >"$root/tampered-index.log" 2>&1; then
+  echo "APT accepted a Packages index modified after Release signing" >&2
+  exit 1
+fi
+mv "$root/Packages.original" "$root/repo/Packages"
+cp "$root/repo/InRelease" "$root/InRelease.original"
+printf '\\n# altered signed metadata\\n' >> "$root/repo/InRelease"
+if apt-get "${opts[@]}" update >"$root/tampered-release.log" 2>&1; then
+  echo "APT accepted an altered InRelease" >&2
+  exit 1
+fi
+mv "$root/InRelease.original" "$root/repo/InRelease"
 echo "PASS independent APT simulation oracle: dependencies, alternatives, versioned Provides, unsatisfied dependency, Pre-Depends, version mismatch and Conflicts"
