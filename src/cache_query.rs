@@ -142,7 +142,7 @@ pub fn installed_catalog_from_bytes(
     if bytes.len() > 64 * 1024 * 1024 {
         bail!("dpkg status file exceeds safe size");
     }
-    let raw = std::str::from_utf8(&bytes)?;
+    let raw = std::str::from_utf8(bytes)?;
     let mut result = BTreeMap::new();
     for entry in crate::package_index::parse(raw)? {
         let Some(status) = entry.field("Status") else { continue };
