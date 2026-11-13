@@ -85,7 +85,37 @@ Size: 1
 Description: version mismatch fixture
 
 PACKAGES
-printf 'deb [trusted=yes] file:%s/repo ./\n' "$root" > "$root/etc/sources.list"
+# Generate a disposable signing identity, scoped entirely to this fixture.
+# Both APT and future RPT differential runs can verify the same InRelease.
+command -v gpg >/dev/null
+command -v gpgv >/dev/null
+mkdir -m 700 "$root/gnupg"
+gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback \
+  --passphrase '' --quick-generate-key \
+  'RPT CI fixture <rpt-fixture@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
+gpg --homedir "$root/gnupg" --batch --export \
+  'RPT CI fixture <rpt-fixture@example.invalid>' > "$root/fixture-keyring.gpg"
+test -s "$root/fixture-keyring.gpg"
+index_hash="$(sha256sum "$root/repo/Packages" | awk '{print $1}')"
+index_size="$(wc -c < "$root/repo/Packages" | tr -d ' ')"
+cat > "$root/repo/Release" <<RELEASE
+Origin: RPT CI
+Label: RPT CI
+Suite: fixture
+Codename: fixture
+Date: $(LC_ALL=C date -Ru)
+Architectures: all amd64 arm64
+Components: main
+Description: Ephemeral signed resolver oracle
+SHA256:
+ $index_hash $index_size Packages
+RELEASE
+gpg --homedir "$root/gnupg" --batch --yes --pinentry-mode loopback \
+  --passphrase '' --clearsign --digest-algo SHA256 \
+  --output "$root/repo/InRelease" "$root/repo/Release"
+gpgv --keyring "$root/fixture-keyring.gpg" "$root/repo/InRelease" >/dev/null 2>&1
+printf 'deb [signed-by=%s] file:%s/repo ./\\n' \
+  "$root/fixture-keyring.gpg" "$root" > "$root/etc/sources.list"
 opts=(
   -o "Dir::State::status=$root/status"
   -o "Dir::State::lists=$root/lists"
