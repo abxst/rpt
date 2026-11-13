@@ -306,6 +306,13 @@ enum Command {
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Audit downloaded artifacts against the current signed exact-version manifest.
+    VerifyDownloadPlan {
+        #[arg(long)] manifest: PathBuf,
+        #[arg(long, default_value = "./rpt-artifacts")] artifacts: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -669,6 +676,11 @@ async fn execute(cli: Cli) -> Result<()> {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
             }
+        }
+        Command::VerifyDownloadPlan { manifest, artifacts, cache, architecture } => {
+            let verified = rpt::artifact_store::verify(&manifest, &artifacts, &cache, &architecture)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&verified)?);
         }
         Command::PrepareDownloadPlan { cache, status, apt_root, architecture, max_packages, output, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy(
