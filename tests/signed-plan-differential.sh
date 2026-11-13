@@ -312,6 +312,17 @@ grep -Fq 'Signed manifest disagrees with Debian control fields' "$root/mismatch-
 # install/remove/purge commands. None of this state is reflected on the host.
 ./target/debug/rpt sandbox-session-create \
   --session "$session" --image debian:bookworm-slim
+# Candidate selection must use installed dpkg status from THIS container.
+./target/debug/rpt sandbox-session-prepare-download-plan \
+  --session "$session" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/session-before.json" rpt-sandbox-demo
+python3 - "$root/session-before.json" <<'PY'
+import json,sys
+manifest=json.load(open(sys.argv[1]))
+assert not manifest['executable']
+assert [(p['name'],p['version']) for p in manifest['packages']] == [('rpt-sandbox-demo','1.0')]
+PY
+
 ./target/debug/rpt sandbox-session-install \
   --session "$session" --id session-install \
   --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
@@ -320,6 +331,20 @@ grep -Fq 'Signed manifest disagrees with Debian control fields' "$root/mismatch-
 ./target/debug/rpt sandbox-session-inspect --session "$session" \
   | grep -Fq rpt-sandbox-demo
 grep -Fq '"phase": "succeeded"' "$root/session-journal/session-install.json"
+./target/debug/rpt sandbox-session-plan-install \
+  --session "$session" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" rpt-sandbox-demo > "$root/session-replan.json"
+./target/debug/rpt sandbox-session-prepare-download-plan \
+  --session "$session" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/session-after.json" rpt-sandbox-demo
+python3 - "$root/session-after.json" "$root/session-replan.json" <<'PY'
+import json,sys
+manifest=json.load(open(sys.argv[1]))
+plan=json.load(open(sys.argv[2]))
+assert manifest['packages'] == [] and not manifest['executable']
+assert plan['changes'][0]['from'] == '1.0'
+PY
+
 ./target/debug/rpt sandbox-session-plan-remove \
   --session "$session" --architecture "$arch" rpt-sandbox-demo > "$root/plan-remove.json"
 python3 - "$root/plan-remove.json" <<'PY'
