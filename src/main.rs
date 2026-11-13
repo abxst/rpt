@@ -313,6 +313,17 @@ enum Command {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
     },
+    /// Execute signed plan artifacts only inside an ephemeral, network-isolated Docker container.
+    SandboxInstall {
+        #[arg(long)] manifest: PathBuf,
+        #[arg(long, default_value = "./rpt-artifacts")] artifacts: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value = "debian:bookworm-slim")] image: String,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -676,6 +687,13 @@ async fn execute(cli: Cli) -> Result<()> {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
             }
+        }
+        Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds } => {
+            rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {
+                manifest, artifacts, signed_cache: cache, journal_dir, id, architecture,
+                image, timeout_seconds,
+            }).await.context(ErrorCategory::System)?;
+            println!("Ephemeral container transaction finished; host dpkg unchanged.");
         }
         Command::VerifyDownloadPlan { manifest, artifacts, cache, architecture } => {
             let verified = rpt::artifact_store::verify(&manifest, &artifacts, &cache, &architecture)
