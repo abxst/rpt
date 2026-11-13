@@ -268,6 +268,15 @@ enum Command {
         #[arg(long, default_value_t = 200)] max_packages: usize,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// JSON audit of a policy-verified multi-root plan; never executes packages.
+    PlanTransactionAudit {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -569,6 +578,14 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)? {
                 println!("{} {}", item.name, item.version);
             }
+        }
+        Command::PlanTransactionAudit { cache, status, apt_root, architecture, max_packages, packages } => {
+            let steps = rpt::install_plan::preview_many_with_policy(
+                &cache, &status, &apt_root, &packages, &architecture, max_packages
+            ).context(ErrorCategory::System)?;
+            let report = rpt::transaction_plan_audit::classify(&steps)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy(
