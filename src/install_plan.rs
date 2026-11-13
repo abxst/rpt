@@ -1058,6 +1058,37 @@ pub fn preview(cache: &Path, status: &Path, package: &str, architecture: &str, m
     Ok(plan)
 }
 
+/// Joint multi-root plan: a single solver state, never a union of individually
+/// valid plans. Candidate policy parity is not established; no execution.
+pub fn preview_many(
+    cache: &Path, status: &Path, packages: &[String],
+    architecture: &str, max_packages: usize,
+) -> Result<Vec<PlanStep>> {
+    if packages.is_empty() || packages.len() > 128 {
+        bail!("expected 1..=128 requested packages");
+    }
+    if max_packages == 0 || max_packages > 5000 {
+        bail!("max_packages must be 1..=5000");
+    }
+    let mut roots = BTreeSet::new();
+    for package in packages {
+        let atom = parse_atom_for_arch(package, architecture)?;
+        if atom.constraint.is_some() || atom.any_arch || atom.requested_arch.is_some() {
+            bail!("batch roots must be unqualified binary package names");
+        }
+        if !roots.insert(package.clone()) { bail!("duplicate requested package: {package}"); }
+    }
+    let catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
+    let complete = cache_query::installed_catalog_by_arch(status)?;
+    let complete_relations = read_installed_relations_by_arch(status)?;
+    validate_installed_metadata(&complete, &complete_relations)?;
+    let installed = scoped_installed(&complete, architecture)?;
+    let relations = scoped_relations(&complete_relations, architecture)?;
+    let plan = solve_catalog_many(&catalog, &installed, &relations, &roots.into_iter().collect::<Vec<_>>(), max_packages, architecture)?;
+    reject_foreign_negative_relations(&catalog, &complete_relations, &plan, architecture)?;
+    Ok(plan)
+}
+
 /// Shared read-only solver used both for ordinary previews and candidate
 /// metadata selection. No transaction state or dpkg writes.
 fn solve_catalog(
@@ -1066,13 +1097,24 @@ fn solve_catalog(
     installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
     package: &str, max_packages: usize, architecture: &str,
 ) -> Result<Vec<PlanStep>> {
+    solve_catalog_many(catalog, installed, installed_relations, &[package.to_owned()], max_packages, architecture)
+}
+
+fn solve_catalog_many(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    installed: &BTreeMap<PackageKey, String>,
+    installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
+    packages: &[String], max_packages: usize, architecture: &str,
+) -> Result<Vec<PlanStep>> {
     let mut solver = Solver {
         catalog, installed, installed_relations, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         architecture: architecture.to_owned(),
         branch_budget: Rc::new(Cell::new(4096)),
     };
-    solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
+    for package in packages {
+        solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
+    }
     // Validate the entire staged set before exposing a read-only plan.
     // This does not authorize foreign-architecture package installation.
     validate_multiarch_plan(catalog, &solver.plan)?;
