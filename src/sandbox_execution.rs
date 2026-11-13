@@ -57,7 +57,7 @@ fn docker_args(image: &str, name: &str, stage: &Path, files: &[String]) -> Resul
         "run", "--rm", "--pull=never", "--network=none",
         "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--pids-limit=128", "--memory=1g", "--cpus=2",
-        "--ipc=private", "--pid=private",
+        "--ipc=private",
         "--name", name, "--mount",
     ].iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
     args.push(format!("type=bind,src={path},dst=/rpt-input,readonly"));
