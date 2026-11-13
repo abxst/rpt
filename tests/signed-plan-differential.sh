@@ -151,6 +151,13 @@ Size: 1
 Description: must backtrack to nonbreaking alternative
 
 PACKAGES
+# Each synthetic pool artifact contains one byte; sign the real digest in Packages.
+payload_sha="$(printf 'x' | sha256sum | cut -d' ' -f1)"
+sed -i "/^Size: 1$/a SHA256: $payload_sha" "$index"
+while IFS= read -r filename; do
+  mkdir -p "$root/www/$(dirname "$filename")"
+  printf 'x' > "$root/www/$filename"
+done < <(sed -n 's/^Filename: //p' "$index")
 gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback --passphrase '' \
   --quick-generate-key 'RPT differential <rpt-diff@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
 gpg --homedir "$root/gnupg" --batch --export 'RPT differential <rpt-diff@example.invalid>' > "$root/keyring.gpg"
@@ -205,6 +212,23 @@ opts=(
 )
 apt-get "${opts[@]}" update >"$root/apt-update.log"
 ./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache" --no-progress >"$root/rpt-update.log"
+# Verify the policy-selected dependency closure maps to exact signed bytes.
+./target/debug/rpt prepare-download-plan \
+  --cache "$root/rpt-cache" --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/locked-manifest.json" rpt-app
+python3 - "$root/locked-manifest.json" "$payload_sha" <<'PY'
+import json, sys
+plan=json.load(open(sys.argv[1]))
+assert not plan['executable']
+assert [(p['name'], p['version'], p['architecture']) for p in plan['packages']] == [
+    ('rpt-lib','2.0','all'), ('rpt-app','1.0','all')]
+assert all(p['sha256'] == sys.argv[2] and p['size'] == 1 for p in plan['packages'])
+PY
+./target/debug/rpt fetch --manifest "$root/locked-manifest.json" \
+  --output "$root/downloaded" --workers 2 --segments 1 >"$root/rpt-fetch.log"
+test "$(sha256sum "$root/downloaded/pool/rpt-lib_2.0_all.deb" | cut -d' ' -f1)" = "$payload_sha"
+test "$(sha256sum "$root/downloaded/pool/rpt-app_1.0_all.deb" | cut -d' ' -f1)" = "$payload_sha"
+
 # Compare exact package/version selections, not just package names.
 # APT's Inst lines carry versions in parentheses; RPT emits the version as
 # its second field. Keep the parsers independent and assert nonempty plans.
