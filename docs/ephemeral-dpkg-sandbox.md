@@ -27,6 +27,11 @@ rpt sandbox-install \
 - Uses a disposable Docker container with no network, dropped capabilities,
   no-new-privileges, memory/PID/CPU limits and **only a read-only archive mount**.
   Host dpkg, /etc, /usr, /var and the Docker socket are not mounted.
+- First compares Package/Version/Architecture fields embedded in each .deb
+  with the exact signed plan identity; any mismatch fails before dpkg install.
+- Optional --lifecycle install-remove or --lifecycle install-purge tests dpkg
+  removal/purge of the newly installed packages in that SAME disposable container.
+  This does not execute an arbitrary removal plan or modify a persistent root.
 - Runs dpkg install, pending configure, pending triggers and dpkg audit inside
   the container. The container's writable filesystem is discarded on exit.
 - Uses the existing single-writer transaction journal and supervised timeout/
@@ -34,6 +39,22 @@ rpt sandbox-install \
   runner explicitly attempts to remove any daemon-owned container.
 - Fails closed on missing/unverified artifacts, unsupported architecture and
   journal recovery warnings.
+
+## Lifecycle smoke tests
+
+Run either operation using the same verified manifest and a new transaction ID:
+
+```sh
+rpt sandbox-install --manifest ./locked-manifest.json \
+  --artifacts ./rpt-artifacts --cache ./rpt-lists \
+  --journal-dir ./rpt-journal --id smoke-remove \
+  --lifecycle install-remove
+
+rpt sandbox-install --manifest ./locked-manifest.json \
+  --artifacts ./rpt-artifacts --cache ./rpt-lists \
+  --journal-dir ./rpt-journal --id smoke-purge \
+  --lifecycle install-purge
+```
 
 ## Limitations
 
