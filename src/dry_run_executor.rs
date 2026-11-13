@@ -288,6 +288,79 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigint_records_interrupted_and_blocks_recovery() {
+        use std::process::{Command as StdCommand, Stdio};
+        unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+        let dir = fixture();
+        let exe = std::env::current_exe().unwrap();
+        let mut child = StdCommand::new(exe)
+            .arg("--exact")
+            .arg("dry_run_executor::tests::signal_test_subprocess_target")
+            .env("RPT_SIGNAL_TEST_DIR", &dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap();
+        let path = dir.join("signal-target.json");
+        let ready = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(record) = serde_json::from_slice::<JournalRecord>(&bytes) {
+                        if record.phase == Phase::Running { break; }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        if ready.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("SIGINT target never reached Running");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(unsafe { kill(child.id() as i32, 2) }, 0);
+        let waited = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(status) = child.try_wait().unwrap() { break status; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        if waited.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("SIGINT target did not exit");
+        }
+        assert!(waited.unwrap().success());
+        let record: JournalRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record.phase, Phase::Interrupted);
+        assert!(record.error.unwrap().contains("SIGINT"));
+        assert!(DryRunExecutor::new(dir.clone(), 1).unwrap()
+            .submit("blocked-after-int".into(), None).await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ignored_sigterm_escalates_to_sigkill_and_blocks_recovery() {
+        let dir = fixture();
+        let executor = DryRunExecutor::new(dir.clone(), 1).unwrap();
+        // exec ensures the command itself ignores SIGTERM, requiring SIGKILL.
+        let result = executor.submit_command(
+            "kill-escalation".into(), "sh".into(),
+            vec!["-c".into(), "trap '' TERM; exec sleep 30".into()],
+            Duration::from_millis(300), Duration::from_millis(100),
+        ).await;
+        assert!(result.is_err());
+        let record: JournalRecord = serde_json::from_slice(
+            &std::fs::read(dir.join("kill-escalation.json")).unwrap()
+        ).unwrap();
+        assert_eq!(record.phase, Phase::Interrupted);
+        assert!(record.error.unwrap().contains("timeout"));
+        assert!(executor.submit("blocked-after-kill".into(), None).await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn two_executors_share_cross_process_lock() {
         let dir = fixture();
