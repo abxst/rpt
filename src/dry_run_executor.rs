@@ -21,7 +21,7 @@ impl DryRunExecutor {
     }
 
     /// Executes an unprivileged command under process-group supervision.
-    /// Timeout is a failed transaction only after shutdown has been verified.
+    /// Timeout or SIGINT/SIGTERM triggers verified process-group shutdown.
     /// An unverified shutdown deliberately leaves Running in the journal.
     pub async fn submit_command(
         &self,
@@ -53,22 +53,48 @@ impl DryRunExecutor {
                     return Err(error);
                 }
             };
-            let status = match tokio::time::timeout(timeout, supervisor.wait()).await {
-                Ok(result) => result.context("waiting for supervised command")?,
-                Err(_) => {
+            // Install signal listeners before waiting. Cancellation of the
+            // wait future must not drop the supervisor: stop() owns cleanup.
+            #[cfg(unix)]
+            let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("installing SIGTERM handler")?;
+            enum WaitResult {
+                Exited(std::process::ExitStatus),
+                Interrupted(&'static str),
+            }
+            #[cfg(unix)]
+            let outcome = {
+                let wait = supervisor.wait();
+                tokio::pin!(wait);
+                tokio::select! {
+                    result = &mut wait => WaitResult::Exited(result.context("waiting for supervised command")?),
+                    _ = tokio::time::sleep(timeout) => WaitResult::Interrupted("timeout"),
+                    _ = tokio::signal::ctrl_c() => WaitResult::Interrupted("SIGINT"),
+                    _ = terminate.recv() => WaitResult::Interrupted("SIGTERM"),
+                }
+            };
+            #[cfg(not(unix))]
+            let outcome = {
+                let wait = supervisor.wait();
+                tokio::pin!(wait);
+                tokio::select! {
+                    result = &mut wait => WaitResult::Exited(result.context("waiting for supervised command")?),
+                    _ = tokio::time::sleep(timeout) => WaitResult::Interrupted("timeout"),
+                    _ = tokio::signal::ctrl_c() => WaitResult::Interrupted("SIGINT"),
+                }
+            };
+            let status = match outcome {
+                WaitResult::Exited(status) => status,
+                WaitResult::Interrupted(reason) => {
                     let stopped = supervisor.stop(stop_grace).await
                         .context("shutdown unverified; journal left Running for manual recovery")?;
                     let detail = match stopped {
                         StopOutcome::Exited(status) | StopOutcome::Terminated(status) | StopOutcome::Killed(status) =>
-                            format!("command timed out; supervised process group stopped (status: {status})"),
+                            format!("command interrupted by {reason}; supervised process group stopped (status: {status}); filesystem state unverified"),
                     };
-                    // The process group is verified stopped, but that does
-                    // not prove filesystem or package state is safe to retry.
-                    // Preserve an operator recovery gate rather than
-                    // treating a timeout as an ordinary terminal failure.
                     record.phase = Phase::Interrupted;
                     record.error = Some(detail.clone());
-                    journal.advance(&record).context("recording interrupted timeout")?;
+                    journal.advance(&record).context("recording verified process shutdown as Interrupted")?;
                     bail!("{detail}");
                 }
             };
@@ -182,7 +208,7 @@ mod tests {
         assert!(result.is_err());
         let record: JournalRecord = serde_json::from_slice(&std::fs::read(dir.join("command-timeout.json")).unwrap()).unwrap();
         assert_eq!(record.phase, Phase::Interrupted);
-        assert!(record.error.unwrap().contains("timed out"));
+        assert!(record.error.unwrap().contains("timeout"));
         // A verified process-group stop is not sufficient to permit new
         // transactions without checking the filesystem and package state.
         assert!(executor.submit("after-timeout".into(), None).await.is_err());
