@@ -13,6 +13,7 @@ pub mod apt_pin_eval;
 pub mod apt_phasing;
 pub mod update;
 pub mod package_provenance;
+pub mod artifact_store;
 pub mod package_index;
 pub mod index_catalog;
 pub mod version;
