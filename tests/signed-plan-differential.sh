@@ -650,7 +650,7 @@ PY
   --journal-dir "$root/recovery-journal" >"$root/recovered.json"
 test "$(docker exec "rpt-session-$recovery_session" dpkg-query -W -f='${Version}' rpt-sandbox-demo)" = "1.0"
 test "$(docker exec "rpt-session-$recovery_session" dpkg-query -W -f='${Status}' rpt-sandbox-demo)" = "install ok installed"
-docker exec "rpt-session-$recovery_session" dpkg --audit | grep -q '^$'
+test -z "$(docker exec "rpt-session-$recovery_session" dpkg --audit)"
 python3 - "$root/recovered.json" <<'PY'
 import json,sys
 lines=open(sys.argv[1]).read().splitlines()
