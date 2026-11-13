@@ -870,10 +870,11 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Bound sandbox transaction: {count} authenticated artifacts; no dpkg changes");
         }
         Command::SandboxSessionApplyTransaction { session, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds } => {
-            rpt::sandbox_session::apply_bound(
-                &session, &transaction, &artifacts, &cache,
-                &apt_root, &journal_dir, &id, timeout_seconds,
-            ).await.context(ErrorCategory::System)?;
+            rpt::sandbox_session::apply_bound(rpt::sandbox_session::BoundApply {
+                session: &session, transaction: &transaction, artifacts: &artifacts,
+                cache: &cache, apt_root: &apt_root, journal: &journal_dir,
+                id: &id, timeout_seconds,
+            }).await.context(ErrorCategory::System)?;
             println!("Bound sandbox transaction verified, applied and audited; host dpkg unchanged.");
         }
         Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
