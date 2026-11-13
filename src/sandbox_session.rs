@@ -10,7 +10,6 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 
