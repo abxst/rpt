@@ -158,6 +158,31 @@ while IFS= read -r filename; do
   mkdir -p "$root/www/$(dirname "$filename")"
   printf 'x' > "$root/www/$filename"
 done < <(sed -n 's/^Filename: //p' "$index")
+# Build a real Debian archive, alongside one-byte download-only fixtures.
+mkdir -p "$root/sandbox-pkg/DEBIAN" "$root/sandbox-pkg/usr/share/rpt-test"
+cat > "$root/sandbox-pkg/DEBIAN/control" <<'CONTROL'
+Package: rpt-sandbox-demo
+Version: 1.0
+Architecture: all
+Maintainer: RPT CI <rpt-test@example.invalid>
+Description: isolated real dpkg installation fixture
+CONTROL
+printf 'sandbox install succeeded\n' > "$root/sandbox-pkg/usr/share/rpt-test/installed.txt"
+dpkg-deb --build --root-owner-group "$root/sandbox-pkg" \
+  "$root/www/pool/rpt-sandbox-demo_1.0_all.deb" >/dev/null
+demo_artifact="$root/www/pool/rpt-sandbox-demo_1.0_all.deb"
+demo_hash="$(sha256sum "$demo_artifact" | cut -d' ' -f1)"
+demo_size="$(wc -c < "$demo_artifact" | tr -d ' ')"
+cat >> "$index" <<EOF
+Package: rpt-sandbox-demo
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-sandbox-demo_1.0_all.deb
+SHA256: $demo_hash
+Size: $demo_size
+Description: real sandbox dpkg package
+
+EOF
 gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback --passphrase '' \
   --quick-generate-key 'RPT differential <rpt-diff@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
 gpg --homedir "$root/gnupg" --batch --export 'RPT differential <rpt-diff@example.invalid>' > "$root/keyring.gpg"
@@ -236,6 +261,26 @@ report=json.load(open(sys.argv[1]))
 assert report['verified'] == 2 and report['bytes'] == 2 and not report['executable']
 PY
 
+
+# Run a real dpkg transaction in a disposable isolated container.
+command -v docker >/dev/null
+docker pull debian:bookworm-slim >/dev/null
+./target/debug/rpt prepare-download-plan \
+  --cache "$root/rpt-cache" --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/sandbox-manifest.json" rpt-sandbox-demo
+./target/debug/rpt fetch --manifest "$root/sandbox-manifest.json" \
+  --output "$root/sandbox-artifacts" --workers 1 --segments 1 >"$root/sandbox-fetch.log"
+./target/debug/rpt sandbox-install \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
+  --journal-dir "$root/sandbox-journal" --id sandbox-ci --timeout-seconds 180
+grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-ci.json"
+test ! -s "$root/apt/status"
+if dpkg-query -W rpt-sandbox-demo >/dev/null 2>&1; then
+  echo "Unexpected host dpkg mutation from sandbox installation" >&2
+  exit 1
+fi
+echo "PASS signed plan to real isolated dpkg install (host unchanged)"
 
 # Compare exact package/version selections, not just package names.
 # APT's Inst lines carry versions in parentheses; RPT emits the version as
