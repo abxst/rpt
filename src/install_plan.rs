@@ -707,6 +707,21 @@ impl Solver<'_> {
         if !satisfies(&current.version, requested)? {
             bail!("repository version {} does not satisfy dependency {}", current.version, requested.name);
         }
+        // Ancestors are not yet in self.plan while resolving their dependencies.
+        // Reject incompatible branches here so alternative backtracking can
+        // select a viable sibling rather than reporting false ambiguity.
+        // Compare both directions; a visiting parent can itself forbid a child.
+        for ancestor_key in &self.visiting {
+            let ancestor = self.catalog.get(ancestor_key)
+                .context("visiting package missing verified metadata")?;
+            if relations_hit(&current.conflicts, &ancestor.name, &ancestor.version, &ancestor.provides)?
+                || relations_hit(&current.breaks, &ancestor.name, &ancestor.version, &ancestor.provides)?
+                || relations_hit(&ancestor.conflicts, &current.name, &current.version, &current.provides)?
+                || relations_hit(&ancestor.breaks, &current.name, &current.version, &current.provides)? {
+                bail!("Conflicts/Breaks between dependency {} and ancestor {}",
+                    current.name, ancestor.name);
+            }
+        }
         // Fail closed on unsupported Conflicts/Breaks syntax even if the
         // named conflicting package is not presently installed.
         negative_relations(&current.conflicts)?;
