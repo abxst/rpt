@@ -44,7 +44,12 @@ while IFS="$tab" read -r archive expected_name expected_version expected_arch; d
     fi
 done < /rpt-input/expected.tsv
 "#;
-pub(crate) const DPKG_INSTALL_SCRIPT: &str = r#"dpkg --install -- "$@"
+pub(crate) const DPKG_INSTALL_SCRIPT: &str = r#"# The resolver emits dependency-first order. Running one archive at a time
+# configures mandatory Pre-Depends before unpacking their dependents.
+# Unsupported dependency cycles fail closed, rather than ignoring dpkg errors.
+for archive in "$@"; do
+    dpkg --install -- "$archive"
+done
 dpkg --configure --pending
 dpkg --triggers-only --pending
 if [ -n "$(dpkg --audit)" ]; then
