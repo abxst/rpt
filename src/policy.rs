@@ -220,7 +220,7 @@ pub fn choose_priority_candidate(
             None => true,
             Some((current, priority)) => {
                 let order = version::compare(value, current)?;
-                (order == Ordering::Greater && priority <= 1000)
+                (order == Ordering::Greater && priority < 1000)
                     || (order == Ordering::Equal && priority < 100)
                     || (order == Ordering::Less && priority < 100)
             }
@@ -292,7 +292,7 @@ mod tests {
         let low = vec![("1.0".into(), 999)];
         assert_eq!(choose_priority_candidate(&low, Some("2.0")).unwrap().as_deref(), Some("2.0"));
         let boundary = vec![("1.0".into(), 1000)];
-        assert_eq!(choose_priority_candidate(&boundary, Some("2.0")).unwrap().as_deref(), Some("2.0"));
+        assert_eq!(choose_priority_candidate(&boundary, Some("2.0")).unwrap().as_deref(), Some("1.0"));
         let high = vec![("1.0".into(), 1001)];
         assert_eq!(choose_priority_candidate(&high, Some("2.0")).unwrap().as_deref(), Some("1.0"));
     }
@@ -323,7 +323,7 @@ mod tests {
             (&[("1.0", 500), ("2.0", 500)], None, Some("2.0")),
             (&[("1.0", 990), ("2.0", 500)], None, Some("1.0")),
             (&[("1.0", -1), ("2.0", 0)], None, None),
-            (&[("1.0", 1000)], Some("2.0"), Some("2.0")),
+            (&[("1.0", 1000)], Some("2.0"), Some("1.0")),
             (&[("1.0", 1001)], Some("2.0"), Some("1.0")),
             (&[("2.0", 500)], Some("1.0"), Some("2.0")),
             (&[("1.0", 500)], Some("2.0"), Some("2.0")),
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn exact_pin_candidate_respects_downgrade_boundary() {
         let versions = vec!["1.0".into()];
-        for (priority, expected) in [(999, "2.0"), (1000, "2.0"), (1001, "1.0")] {
+        for (priority, expected) in [(999, "2.0"), (1000, "1.0"), (1001, "1.0")] {
             let records = crate::apt_preferences::parse(&format!(
                 "Package: app\nPin: version 1.0\nPin-Priority: {priority}\n"
             )).unwrap();
