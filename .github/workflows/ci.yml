@@ -142,8 +142,14 @@ jobs:
             -o Dir::Etc::preferences="$root/etc/preferences" \
             -o Dir::Etc::preferencesparts="$root/etc/preferences.d" \
             policy rpt-fixture > "$root/policy.txt"
-          grep -q 'Installed: 2.0' "$root/policy.txt"
+          grep -Fxq '  Installed: 2.0' "$root/policy.txt"
+          grep -Fxq '  Candidate: 2.0' "$root/policy.txt"
           cat "$root/policy.txt"
+          # Without a configured repository source, the synthetic Packages file
+          # is not an authenticated/registered APT archive. The only candidate
+          # guaranteed here is the installed version, regardless of the pin.
+          # Do not claim that this fixture exercises repository downgrade.
+
       - name: Dry-run transaction CLI end-to-end (unprivileged)
         run: |
           set -euo pipefail
