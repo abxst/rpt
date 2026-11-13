@@ -147,7 +147,7 @@ fn read_installed_bytes(data: &[u8]) -> Result<BTreeMap<InstalledKey, InstalledP
     let verified = cache_query::installed_catalog_from_bytes(data)?;
     if data.len() > 64 * 1024 * 1024 { bail!("dpkg status exceeds 64 MiB"); }
     let mut installed = BTreeMap::new();
-    for record in package_index::parse(std::str::from_utf8(&data)?)? {
+    for record in package_index::parse(std::str::from_utf8(data)?;)? {
         if !record.field("Status").is_some_and(cache_query::is_installed_status) { continue; }
         let key = InstalledKey {
             name: record.field("Package").context("missing package name")?.into(),
@@ -290,7 +290,7 @@ fn auto_marks_from_bytes(bytes: &[u8], installed: &BTreeMap<InstalledKey, Instal
     if bytes.len() > 64 * 1024 * 1024 { bail!("APT extended states exceed 64 MiB"); }
     let mut auto = BTreeSet::new();
     let mut seen = BTreeSet::new();
-    for record in package_index::parse(std::str::from_utf8(&bytes)?)? {
+    for record in package_index::parse(std::str::from_utf8(bytes)?)? {
         let name = record.field("Package").context("APT state entry without Package")?;
         checked_name(name)?;
         let arch = match record.field("Architecture") {
