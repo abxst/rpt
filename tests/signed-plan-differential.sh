@@ -232,7 +232,7 @@ reject_plan() {
     echo "RPT unexpectedly accepted $pkg" >&2; exit 1
   fi
 }
-for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app rpt-alternative-conflict rpt-alternative-breaks; do
+for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app rpt-alternative-conflict rpt-alternative-breaks rpt-cycle-a; do
   compare_plan "$pkg"
 done
 for pkg in rpt-broken rpt-version-mismatch rpt-self-conflict rpt-self-breaks; do

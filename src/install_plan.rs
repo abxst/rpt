@@ -699,8 +699,14 @@ impl Solver<'_> {
             return Ok(());
         }
         if self.visiting.contains(key) {
-            // APT can resolve cycles, but this preview refuses them.
-            bail!("dependency cycle involving {}", requested.name);
+            // Read-only package-set preview: a Depends cycle does not require
+            // resolving the same binary twice. Never relax version constraints.
+            let current = self.catalog.get(key)
+                .context("visiting dependency missing verified metadata")?;
+            if !satisfies(&current.version, requested)? {
+                bail!("conflicting version requirements in dependency cycle for {}", requested.name);
+            }
+            return Ok(());
         }
         let current = self.catalog.get(key)
             .with_context(|| format!("unresolved dependency {} (virtual packages unsupported)", requested.name))?;
@@ -732,7 +738,20 @@ impl Solver<'_> {
         }
         self.visiting.insert(key.clone());
         let dependency_arch = if current.architecture == "all" { &self.architecture } else { &current.architecture };
-        let groups = parse_groups_for_arch(&current.pre_depends, dependency_arch)?.into_iter()
+        let pre_groups = parse_groups_for_arch(&current.pre_depends, dependency_arch)?;
+        // A Pre-Depends back-edge cannot be safely represented by a simple
+        // package set: configuring the target before unpacking the source
+        // requires an execution-order model.
+        for group in &pre_groups {
+            for dependency in group {
+                if let Some(target) = self.concrete(dependency)? {
+                    if self.visiting.contains(&target) {
+                        bail!("Pre-Depends cycle requires transaction ordering");
+                    }
+                }
+            }
+        }
+        let groups = pre_groups.into_iter()
             .chain(parse_groups_for_arch(&current.depends, dependency_arch)?).collect::<Vec<_>>();
         self.resolve_groups(&groups, 0)?;
         self.visiting.remove(key);
@@ -2323,9 +2342,20 @@ Package: docs\nArchitecture: all\nVersion: 4\nStatus: install ok installed\n\n")
         let mut too_old = catalog.clone();
         too_old.insert("foundation".into(), item("foundation", "1", ""));
         assert!(solve(&too_old, &BTreeMap::new(), "app").is_err());
-        let mut cycle = catalog;
-        cycle.insert("foundation".into(), item("foundation", "2", "app"));
-        assert!(solve(&cycle, &BTreeMap::new(), "app").is_err());
+        // A Depends-only cycle has a finite read-only package set.
+        let depends_cycle = BTreeMap::from([
+            ("app".into(), item("app", "1", "foundation")),
+            ("foundation".into(), item("foundation", "2", "app")),
+        ]);
+        let cycle_plan = solve(&depends_cycle, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(cycle_plan.len(), 2);
+        // A direct Pre-Depends back-edge still fails closed: unpack/configure
+        // ordering cannot be inferred from a package-set preview.
+        let mut pre_cycle = catalog;
+        let mut foundation = item("foundation", "2", "");
+        foundation.pre_depends = "app".into();
+        pre_cycle.insert("foundation".into(), foundation);
+        assert!(solve(&pre_cycle, &BTreeMap::new(), "app").is_err());
     }
 
     #[test]
