@@ -157,6 +157,18 @@ fn stage_artifacts(stage: &Path, artifacts: &Path, manifest: &ExactManifest) -> 
         }
         staged.push(name);
     }
+    let mut expected = OpenOptions::new().write(true).create_new(true)
+        .open(stage.join("expected.tsv"))?;
+    for (name, pkg) in staged.iter().zip(&manifest.packages) {
+        for value in [&pkg.artifact.name, &pkg.version, &pkg.architecture] {
+            if value.is_empty() || value.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+                bail!("unsafe signed identity field in execution manifest");
+            }
+        }
+        writeln!(expected, "{name}\\t{}\\t{}\\t{}",
+            pkg.artifact.name, pkg.version, pkg.architecture)?;
+    }
+    expected.sync_all()?;
     Ok(staged)
 }
 
