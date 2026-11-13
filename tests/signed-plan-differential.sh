@@ -4,8 +4,11 @@ set -euo pipefail
 root="$(mktemp -d)"
 server_pid=""
 upgrade_pid=""
+crash_pid=""
 session="ci-test"
 cleanup() {
+  if [[ -n "$crash_pid" ]]; then kill -9 "$crash_pid" 2>/dev/null || :; wait "$crash_pid" 2>/dev/null || :; fi
+  docker rm -f rpt-session-crash-ci rpt-session-restored-ci >/dev/null 2>&1 || :
   if [[ -n "$upgrade_pid" ]]; then kill "$upgrade_pid" 2>/dev/null || :; wait "$upgrade_pid" 2>/dev/null || :; fi
   docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
@@ -477,7 +480,8 @@ printf 'demo 2\n' > "$root/demo-v2/usr/share/rpt-test/installed.txt"
 cat > "$root/demo-v2/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -e
-sleep 3
+touch /tmp/rpt-upgrade-postinst-running
+sleep 4
 POSTINST
 chmod 0755 "$root/demo-v2/DEBIAN/postinst"
 dpkg-deb --build --root-owner-group "$root/helper-v1" \
@@ -585,3 +589,81 @@ fi
 grep -Fq 'stale sandbox transaction' "$root/replay-err.log"
 ./target/debug/rpt sandbox-session-destroy --session "$session"
 echo "PASS authenticated bound install+upgrade 1.0 to 2.0 and stale/replay refusal"
+
+# PR #130: crash an actual dpkg upgrade (SIGKILL) while a maintainer script
+# is running. RPT's automatic pre-transaction snapshot must remain usable,
+# the unfinished journal must remain Running and the original container
+# must be preserved for forensic inspection.
+./target/debug/rpt sandbox-session-create \
+  --session crash-ci --image debian:bookworm-slim
+./target/debug/rpt sandbox-session-install \
+  --session crash-ci --id crash-seed-v1 \
+  --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --journal-dir "$root/crash-seed-journal" \
+  --architecture "$arch" --timeout-seconds 180
+./target/debug/rpt sandbox-session-prepare-transaction \
+  --session crash-ci --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/crash-bound-v2.json" rpt-sandbox-demo
+./target/debug/rpt sandbox-session-apply-transaction \
+  --session crash-ci --id crash-upgrade --transaction "$root/crash-bound-v2.json" \
+  --artifacts "$root/upgrade-artifacts" --cache "$root/rpt-cache-v2" \
+  --apt-root "$root/rpt-apt" --journal-dir "$root/crash-journal" \
+  --timeout-seconds 180 >"$root/crash-run.log" 2>&1 &
+crash_pid="$!"
+# Wait for the real dpkg postinst marker, not just journal phase Running.
+postinst_started=0
+for _ in {1..200}; do
+  if docker exec rpt-session-crash-ci test -e /tmp/rpt-upgrade-postinst-running >/dev/null 2>&1; then
+    postinst_started=1
+    break
+  fi
+  if ! kill -0 "$crash_pid" 2>/dev/null; then break; fi
+  sleep .05
+done
+if [[ "$postinst_started" != 1 ]]; then
+  cat "$root/crash-run.log" >&2
+  echo "dpkg postinst did not start before SIGKILL fixture" >&2
+  exit 1
+fi
+kill -9 "$crash_pid" 2>/dev/null || :
+wait "$crash_pid" 2>/dev/null || :
+crash_pid=""
+docker stop --time 0 rpt-session-crash-ci >/dev/null
+receipt="$root/crash-journal/sandbox-snapshots/crash-ci--crash-upgrade.json"
+test -s "$receipt"
+grep -Fq '"phase": "running"' "$root/crash-journal/crash-upgrade.json"
+./target/debug/rpt sandbox-snapshot-verify \
+  --receipt "$receipt" >"$root/crash-snapshot.json"
+python3 - "$root/crash-snapshot.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert x['source_session']=='crash-ci' and x['transaction_id']=='crash-upgrade'
+assert len(x['status_sha256']) == 64 and x['image_id'].startswith('sha256:')
+PY
+if ./target/debug/rpt sandbox-snapshot-restore \
+  --receipt "$receipt" --new-session crash-ci >/dev/null 2>&1; then
+  echo "Unsafe restoration over original sandbox unexpectedly allowed" >&2
+  exit 1
+fi
+./target/debug/rpt sandbox-snapshot-restore \
+  --receipt "$receipt" --new-session restored-ci
+test "$(docker exec rpt-session-restored-ci dpkg-query -W -f='${Version}' rpt-sandbox-demo)" = "1.0"
+if docker exec rpt-session-restored-ci dpkg-query -W rpt-sandbox-helper >/dev/null 2>&1; then
+  echo "Restored snapshot wrongly includes post-crash dependency" >&2
+  exit 1
+fi
+test -z "$(docker exec rpt-session-restored-ci dpkg --audit)"
+docker container inspect rpt-session-crash-ci >/dev/null
+grep -Fq '"phase": "running"' "$root/crash-journal/crash-upgrade.json"
+# The crashed journal is not automatically cleared by restore.
+if ./target/debug/rpt sandbox-session-remove \
+  --session restored-ci --id blocked-after-crash \
+  --journal-dir "$root/crash-journal" rpt-sandbox-demo \
+  >"$root/blocked-out.log" 2>"$root/blocked-err.log"; then
+  echo "Unfinished journal gate was bypassed by restoration" >&2
+  exit 1
+fi
+grep -Fq 'unfinished transaction' "$root/blocked-err.log"
+./target/debug/rpt sandbox-session-destroy --session restored-ci
+docker rm -f rpt-session-crash-ci >/dev/null
+echo "PASS SIGKILL dpkg recovery: image receipt, clean separate restore, forensic journal preserved"
