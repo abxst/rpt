@@ -131,6 +131,14 @@ pub fn installed_catalog_by_arch(
 ) -> Result<BTreeMap<InstalledKey, Installed>> {
     let bytes = fs::read(status_file)
         .with_context(|| format!("opening {}", status_file.display()))?;
+    installed_catalog_from_bytes(&bytes)
+}
+
+/// Validate an in-memory dpkg status snapshot (e.g. from a sandbox container)
+/// without writing it to a host-side temporary file.
+pub fn installed_catalog_from_bytes(
+    bytes: &[u8],
+) -> Result<BTreeMap<InstalledKey, Installed>> {
     if bytes.len() > 64 * 1024 * 1024 {
         bail!("dpkg status file exceeds safe size");
     }
