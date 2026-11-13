@@ -3,9 +3,11 @@
 //! and root filesystem are never mounted or modified.
 use crate::{
     artifact_store, dry_run_executor::DryRunExecutor, package_provenance::ExactManifest,
+    removal_planner::{self, RemovalPlan},
     sandbox_execution::{self, DPKG_CHECK_SCRIPT, DPKG_INSTALL_SCRIPT},
 };
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::{fs, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 
@@ -197,6 +199,115 @@ pub async fn remove(
         .iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
     args.extend(packages.iter().cloned());
     run_command(session, journal, id, "docker", args, timeout_seconds).await
+}
+
+/// SHA256 preflight is repeated inside the container immediately before dpkg.
+/// Host cannot pass arbitrary dpkg --force flags.
+const REMOVE_SNAPSHOT_SCRIPT: &str = r#"set -eu
+expected="$1"; shift
+actual="$(sha256sum /var/lib/dpkg/status)"
+actual="${actual%% *}"
+if [ "$actual" != "$expected" ]; then
+    echo "Sandbox dpkg status changed since removal planning" >&2
+    exit 1
+fi
+dpkg --remove -- "$@"
+dpkg --audit
+"#;
+const AUTOREMOVE_SNAPSHOT_SCRIPT: &str = r#"set -eu
+expected="$1"; extended="$2"; shift 2
+actual="$(sha256sum /var/lib/dpkg/status)"
+actual="${actual%% *}"
+if [ "$actual" != "$expected" ]; then
+    echo "Sandbox dpkg status changed since autoremove planning" >&2
+    exit 1
+fi
+actual_auto="$(sha256sum /var/lib/apt/extended_states)"
+actual_auto="${actual_auto%% *}"
+if [ "$actual_auto" != "$extended" ]; then
+    echo "Sandbox auto/manual marks changed since autoremove planning" >&2
+    exit 1
+fi
+dpkg --remove -- "$@"
+dpkg --audit
+"#;
+
+async fn guest_file(container: &str, file: &str) -> Result<Vec<u8>> {
+    let result = docker(&[
+        "exec".to_owned(), container.to_owned(), "cat".to_owned(), file.to_owned(),
+    ]).await?;
+    if !result.status.success() {
+        bail!("reading sandbox state {file}: {}", String::from_utf8_lossy(&result.stderr));
+    }
+    if result.stdout.len() > 64 * 1024 * 1024 {
+        bail!("sandbox state exceeds maximum size");
+    }
+    Ok(result.stdout)
+}
+async fn status_snapshot(session: &str) -> Result<(String, Vec<u8>)> {
+    let container = verify_session(session, true).await?;
+    let status = guest_file(&container, "/var/lib/dpkg/status").await?;
+    Ok((container, status))
+}
+
+/// Preview removal using the container's installed database, never host dpkg.
+pub async fn plan_remove(
+    session: &str, architecture: &str, packages: &[String], cascade: bool,
+) -> Result<RemovalPlan> {
+    let (_, status) = status_snapshot(session).await?;
+    removal_planner::remove_snapshot(&status, architecture, packages, cascade)
+}
+
+/// Read true in-sandbox APT auto marks (missing marks fail closed).
+pub async fn plan_autoremove(session: &str, architecture: &str) -> Result<RemovalPlan> {
+    let (container, status) = status_snapshot(session).await?;
+    let marks = guest_file(&container, "/var/lib/apt/extended_states").await?;
+    removal_planner::autoremove_snapshot(&status, &marks, architecture)
+}
+
+pub async fn remove_planned(
+    session: &str, journal: &Path, id: &str, architecture: &str,
+    packages: &[String], cascade: bool, timeout_seconds: u64,
+) -> Result<RemovalPlan> {
+    let (container, status) = status_snapshot(session).await?;
+    let plan = removal_planner::remove_snapshot(&status, architecture, packages, cascade)?;
+    if !plan.removable {
+        bail!("removal denied by installed dependency plan: {}", plan.blockers.join("; "));
+    }
+    if plan.remove.is_empty() { bail!("removal planner returned no packages"); }
+    if plan.remove.len() > 128 { bail!("removal closure exceeds 128 packages"); }
+    let digest = hex::encode(Sha256::digest(&status));
+    let mut args = [
+        "exec".to_owned(), container, "/bin/sh".into(), "-euc".into(),
+        REMOVE_SNAPSHOT_SCRIPT.into(), "rpt-sandbox-remove".into(), digest,
+    ].to_vec();
+    args.extend(plan.remove.iter().cloned());
+    run_command(session, journal, id, "docker", args, timeout_seconds).await?;
+    Ok(plan)
+}
+
+pub async fn autoremove_planned(
+    session: &str, journal: &Path, id: &str, architecture: &str,
+    timeout_seconds: u64,
+) -> Result<RemovalPlan> {
+    let (container, status) = status_snapshot(session).await?;
+    let marks = guest_file(&container, "/var/lib/apt/extended_states").await?;
+    let plan = removal_planner::autoremove_snapshot(&status, &marks, architecture)?;
+    if !plan.removable {
+        bail!("autoremove denied by installed dependency plan: {}", plan.blockers.join("; "));
+    }
+    if plan.remove.is_empty() { return Ok(plan); }
+    if plan.remove.len() > 128 { bail!("autoremove closure exceeds 128 packages"); }
+    let status_digest = hex::encode(Sha256::digest(&status));
+    let marks_digest = hex::encode(Sha256::digest(&marks));
+    let mut args = [
+        "exec".to_owned(), container, "/bin/sh".into(), "-euc".into(),
+        AUTOREMOVE_SNAPSHOT_SCRIPT.into(), "rpt-sandbox-autoremove".into(),
+        status_digest, marks_digest,
+    ].to_vec();
+    args.extend(plan.remove.iter().cloned());
+    run_command(session, journal, id, "docker", args, timeout_seconds).await?;
+    Ok(plan)
 }
 
 #[cfg(test)]
