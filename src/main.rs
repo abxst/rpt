@@ -313,6 +313,39 @@ enum Command {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
     },
+    /// Create a persistent, fully isolated Docker dpkg test root (no host mounts).
+    SandboxSessionCreate {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "debian:bookworm-slim")] image: String,
+    },
+    /// Show installed packages inside an RPT-labeled isolated Docker root.
+    SandboxSessionInspect {
+        #[arg(long)] session: String,
+    },
+    /// Explicitly delete a persistent isolated Docker test root.
+    SandboxSessionDestroy {
+        #[arg(long)] session: String,
+    },
+    /// Apply signed exact-version archives into a persistent isolated Docker root.
+    SandboxSessionInstall {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long)] manifest: PathBuf,
+        #[arg(long, default_value = "./rpt-artifacts")] artifacts: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
+    /// Remove or purge packages only inside an existing RPT Docker sandbox.
+    SandboxSessionRemove {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(long, default_value_t = false)] purge: bool,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Execute signed plan artifacts only inside an ephemeral, network-isolated Docker container.
     SandboxInstall {
         #[arg(long)] manifest: PathBuf,
@@ -689,6 +722,34 @@ async fn execute(cli: Cli) -> Result<()> {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
             }
+        }
+        Command::SandboxSessionCreate { session, image } => {
+            let container = rpt::sandbox_session::create(&session, &image).await
+                .context(ErrorCategory::System)?;
+            println!("Created RPT isolated Docker session: {container}");
+        }
+        Command::SandboxSessionInspect { session } => {
+            let status = rpt::sandbox_session::inspect(&session).await
+                .context(ErrorCategory::System)?;
+            print!("{status}");
+        }
+        Command::SandboxSessionDestroy { session } => {
+            rpt::sandbox_session::destroy(&session).await
+                .context(ErrorCategory::System)?;
+            println!("Destroyed isolated RPT Docker session: {session}");
+        }
+        Command::SandboxSessionInstall { session, id, manifest, artifacts, cache, journal_dir, architecture, timeout_seconds } => {
+            rpt::sandbox_session::install(rpt::sandbox_session::SessionInstall {
+                session, id, journal_dir, manifest, artifacts, cache, architecture,
+                timeout_seconds,
+            }).await.context(ErrorCategory::System)?;
+            println!("Signed archives applied inside persistent Docker sandbox; host dpkg unchanged.");
+        }
+        Command::SandboxSessionRemove { session, id, journal_dir, timeout_seconds, purge, packages } => {
+            rpt::sandbox_session::remove(
+                &session, &journal_dir, &id, &packages, purge, timeout_seconds,
+            ).await.context(ErrorCategory::System)?;
+            println!("Sandbox dpkg removal transaction completed; host dpkg unchanged.");
         }
         Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
             rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {
