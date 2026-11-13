@@ -183,7 +183,7 @@ pub struct CandidatePreview {
 
 /// APT-style priority ordering for a restricted, fully validated set of pins.
 /// Higher priority wins, then newer Debian version. Downgrades are prohibited
-/// unless the candidate's effective priority is > 1000. Version 0 priority
+/// unless the candidate's effective priority is >= 1000. Version 0 priority
 /// is rejected, as its behavior is not defined by APT policy.
 pub fn preview_candidate(
     package: &str, origins: &[VerifiedVersionOrigin], records: &[PinRecord],
@@ -224,7 +224,7 @@ pub fn preview_candidate_with_phasing(
     for (version, priority) in &ordered {
         if *priority <= 0 { continue; }
         if let Some(current) = installed {
-            if crate::version::compare(version, current)? == Ordering::Less && *priority <= 1000 {
+            if crate::version::compare(version, current)? == Ordering::Less && *priority < 1000 {
                 continue;
             }
         }
@@ -413,7 +413,7 @@ mod tests {
         let stable = [PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 999 }];
         assert_eq!(preview_candidate("bash", &origins, &stable, Some("2.0")).unwrap().candidate.as_deref(), Some("3.0"));
         let threshold = [PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 1000 }];
-        assert_eq!(preview_candidate("bash", &origins, &threshold, Some("2.0")).unwrap().candidate.as_deref(), Some("3.0"));
+        assert_eq!(preview_candidate("bash", &origins, &threshold, Some("2.0")).unwrap().candidate.as_deref(), Some("1.0"));
         let forced = [PinRecord { package: "bash".into(), pin: "release a=stable".into(), priority: 1001 }];
         assert_eq!(preview_candidate("bash", &origins, &forced, Some("2.0")).unwrap().candidate.as_deref(), Some("1.0"));
         assert_eq!(preview_candidate("bash", &[], &[], Some("2.0")).unwrap().candidate.as_deref(), Some("2.0"));
