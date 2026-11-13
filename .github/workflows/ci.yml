@@ -192,6 +192,12 @@ jobs:
             # Keep this oracle independent of RPT's current >1000 rule until
             # a dedicated differential test resolves the discrepancy.
             if [[ "$priority" -ge 1000 ]]; then expected=1.0; else expected=2.0; fi
+            apt_candidate="$(sed -n 's/^  Candidate: //p' "$root/policy-$priority.txt")"
+            rpt_candidate="$(./target/debug/rpt candidate-priority-diagnostic --installed 2.0 --available 1.0 --priority "$priority" | sed -n 's/^Candidate: //p')"
+            if [[ -z "$apt_candidate" || "$rpt_candidate" != "$apt_candidate" ]]; then
+              echo "APT/RPT candidate mismatch at priority $priority: apt=$apt_candidate rpt=$rpt_candidate" >&2
+              exit 1
+            fi
             grep -Fxq "  Candidate: $expected" "$root/policy-$priority.txt" || {
               cat "$root/policy-$priority.txt"
               exit 1

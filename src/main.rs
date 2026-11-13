@@ -33,6 +33,16 @@ enum Command {
         #[arg(long, default_value = "auto")]
         driver: String,
     },
+    /// Read-only candidate selection for externally supplied, trusted priorities.
+    /// Diagnostic only: does not load APT repositories or authorize installation.
+    CandidatePriorityDiagnostic {
+        #[arg(long)]
+        installed: String,
+        #[arg(long)]
+        available: String,
+        #[arg(long)]
+        priority: i32,
+    },
     /// Inspect a local, uncompressed Packages index (NOT signature verification).
     InspectIndex {
         #[arg(long)] path: PathBuf,
@@ -302,6 +312,12 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli) -> Result<()> {
     let format = cli.log_format;
     match cli.command {
+        Command::CandidatePriorityDiagnostic { installed, available, priority } => {
+            let candidate = rpt::policy::choose_priority_candidate(
+                &[(available, priority)], Some(&installed),
+            )?;
+            println!("Candidate: {}", candidate.as_deref().unwrap_or("(none)"));
+        }
         Command::TransactionDryRun { journal_dir, id, fail_message } => {
             let executor = rpt::dry_run_executor::DryRunExecutor::new(journal_dir.clone(), 8)?;
             if format == LogFormat::Text {
