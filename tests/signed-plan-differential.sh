@@ -342,7 +342,7 @@ import json,sys
 manifest=json.load(open(sys.argv[1]))
 plan=json.load(open(sys.argv[2]))
 assert manifest['packages'] == [] and not manifest['executable']
-assert plan['changes'][0]['from'] == '1.0'
+assert plan['changes'] == []  # installed candidate already satisfied; no transaction
 PY
 
 ./target/debug/rpt sandbox-session-plan-remove \
