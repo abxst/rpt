@@ -251,6 +251,14 @@ enum Command {
         max_packages: usize,
         package: String,
     },
+    /// Joint read-only plan for multiple roots (experimental, NOT APT policy parity).
+    PlanInstallBatch {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -552,6 +560,17 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)? {
                 println!("{} {}", item.name, item.version);
             }
+        }
+        Command::PlanInstallBatch { cache, status, architecture, max_packages, packages } => {
+            let steps = rpt::install_plan::preview_many(
+                &cache, &status, &packages, &architecture, max_packages
+            ).context(ErrorCategory::System)?;
+            println!("RPT JOINT READ-ONLY PLAN (NOT APT POLICY PARITY)");
+            for step in &steps {
+                println!("  {}:{} {} (installed: {})", step.package, step.architecture,
+                    step.version, step.installed.as_deref().unwrap_or("none"));
+            }
+            println!("Plan preview: {} package(s); NO CHANGES MADE", steps.len());
         }
         Command::PlanInstall { driver, cache, status, apt_root, architecture, max_packages, package } => {
             let kind = resolve_driver(&driver)?;
