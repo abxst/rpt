@@ -62,9 +62,13 @@ impl DryRunExecutor {
                         StopOutcome::Exited(status) | StopOutcome::Terminated(status) | StopOutcome::Killed(status) =>
                             format!("command timed out; supervised process group stopped (status: {status})"),
                     };
-                    record.phase = Phase::Failed;
+                    // The process group is verified stopped, but that does
+                    // not prove filesystem or package state is safe to retry.
+                    // Preserve an operator recovery gate rather than
+                    // treating a timeout as an ordinary terminal failure.
+                    record.phase = Phase::Interrupted;
                     record.error = Some(detail.clone());
-                    journal.advance(&record).context("recording verified timeout")?;
+                    journal.advance(&record).context("recording interrupted timeout")?;
                     bail!("{detail}");
                 }
             };
@@ -177,8 +181,12 @@ mod tests {
             Duration::from_millis(100), Duration::from_secs(1)).await;
         assert!(result.is_err());
         let record: JournalRecord = serde_json::from_slice(&std::fs::read(dir.join("command-timeout.json")).unwrap()).unwrap();
-        assert_eq!(record.phase, Phase::Failed);
+        assert_eq!(record.phase, Phase::Interrupted);
         assert!(record.error.unwrap().contains("timed out"));
+        // A verified process-group stop is not sufficient to permit new
+        // transactions without checking the filesystem and package state.
+        assert!(executor.submit("after-timeout".into(), None).await.is_err());
+        assert!(!dir.join("after-timeout.json").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
