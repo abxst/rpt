@@ -296,6 +296,16 @@ enum Command {
         #[arg(long, default_value = "/var/lib/apt/extended_states")] extended_states: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
     },
+    /// Write a signed, exact-version manifest for a policy-verified dependency closure.
+    PrepareDownloadPlan {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long)] output: PathBuf,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Derive a GPG/SHA256-verified download manifest, without resolving dependencies.
     PrepareDownload {
         #[arg(long, default_value = "auto")]
@@ -659,6 +669,18 @@ async fn execute(cli: Cli) -> Result<()> {
             for source in list_sources(&root).context(ErrorCategory::System)? {
                 println!("{source}\n");
             }
+        }
+        Command::PrepareDownloadPlan { cache, status, apt_root, architecture, max_packages, output, packages } => {
+            let steps = rpt::install_plan::preview_many_with_policy(
+                &cache, &status, &apt_root, &packages, &architecture, max_packages
+            ).context(ErrorCategory::System)?;
+            let locked = rpt::package_provenance::prepare_exact(&cache, &steps, &architecture)
+                .context(ErrorCategory::System)?;
+            let count = locked.packages.len();
+            let data = serde_json::to_vec_pretty(&locked)?;
+            tokio::fs::write(&output, data).await
+                .context("writing exact-version signed download manifest")?;
+            println!("Locked download manifest: {count} package(s); no dpkg changes");
         }
         Command::PrepareDownload { driver, cache, architecture, manifest, packages } => {
             let kind = resolve_driver(&driver)?;
