@@ -228,6 +228,14 @@ PY
   --output "$root/downloaded" --workers 2 --segments 1 >"$root/rpt-fetch.log"
 test "$(sha256sum "$root/downloaded/pool/rpt-lib_2.0_all.deb" | cut -d' ' -f1)" = "$payload_sha"
 test "$(sha256sum "$root/downloaded/pool/rpt-app_1.0_all.deb" | cut -d' ' -f1)" = "$payload_sha"
+./target/debug/rpt verify-download-plan --manifest "$root/locked-manifest.json" \
+  --artifacts "$root/downloaded" --cache "$root/rpt-cache" --architecture "$arch" > "$root/verified.json"
+python3 - "$root/verified.json" <<'PY'
+import json,sys
+report=json.load(open(sys.argv[1]))
+assert report['verified'] == 2 and report['bytes'] == 2 and not report['executable']
+PY
+
 
 # Compare exact package/version selections, not just package names.
 # APT's Inst lines carry versions in parentheses; RPT emits the version as
