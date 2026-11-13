@@ -60,6 +60,7 @@ Provides: rpt-virtual-api (= 2)
 Filename: pool/rpt-provider_1.0_all.deb
 Size: 1
 Description: versioned virtual provider fixture
+
 Package: rpt-pre-app
 Version: 1.0
 Architecture: all
