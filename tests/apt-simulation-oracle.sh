@@ -114,7 +114,7 @@ gpg --homedir "$root/gnupg" --batch --yes --pinentry-mode loopback \
   --passphrase '' --clearsign --digest-algo SHA256 \
   --output "$root/repo/InRelease" "$root/repo/Release"
 gpgv --keyring "$root/fixture-keyring.gpg" "$root/repo/InRelease" >/dev/null 2>&1
-printf 'deb [signed-by=%s] file:%s/repo ./\\n' \
+printf 'deb [signed-by=%s] file:%s/repo ./\n' \
   "$root/fixture-keyring.gpg" "$root" > "$root/etc/sources.list"
 opts=(
   -o "Dir::State::status=$root/status"
