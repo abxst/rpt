@@ -203,6 +203,8 @@ jobs:
               exit 1
             }
           done
+      - name: Isolated apt-get simulation resolver oracle (unprivileged)
+        run: bash tests/apt-simulation-oracle.sh
       - name: Dry-run transaction CLI end-to-end (unprivileged)
         run: |
           set -euo pipefail
