@@ -376,6 +376,25 @@ enum Command {
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
     },
+    /// Preview APT candidate-policy install plan against this sandbox's dpkg state.
+    SandboxSessionPlanInstall {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Produce exact authenticated .deb download manifest using sandbox dpkg state.
+    SandboxSessionPrepareDownloadPlan {
+        #[arg(long)] session: String,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long)] output: PathBuf,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Execute signed plan artifacts only inside an ephemeral, network-isolated Docker container.
     SandboxInstall {
         #[arg(long)] manifest: PathBuf,
@@ -802,6 +821,23 @@ async fn execute(cli: Cli) -> Result<()> {
                 &architecture, timeout_seconds)
                 .await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::SandboxSessionPlanInstall { session, cache, apt_root, architecture, max_packages, packages } => {
+            let steps = rpt::sandbox_session::plan_install(
+                &session, &cache, &apt_root, &architecture, max_packages, &packages,
+            ).await.context(ErrorCategory::System)?;
+            let audit = rpt::transaction_plan_audit::classify(&steps)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&audit)?);
+        }
+        Command::SandboxSessionPrepareDownloadPlan { session, cache, apt_root, architecture, max_packages, output, packages } => {
+            let ready = rpt::sandbox_session::prepare_download_plan(
+                &session, &cache, &apt_root, &architecture, max_packages, &packages,
+            ).await.context(ErrorCategory::System)?;
+            let data = serde_json::to_vec_pretty(&ready)?;
+            tokio::fs::write(&output, data).await
+                .context("writing session-specific exact download manifest")?;
+            println!("Sandbox session exact manifest: {} artifacts; no dpkg changes", ready.packages.len());
         }
         Command::SandboxInstall { manifest, artifacts, cache, journal_dir, id, architecture, image, timeout_seconds, lifecycle } => {
             rpt::sandbox_execution::install(rpt::sandbox_execution::SandboxInstall {

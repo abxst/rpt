@@ -2,13 +2,14 @@
 //! Container root may persist across commands, but the host dpkg database
 //! and root filesystem are never mounted or modified.
 use crate::{
-    artifact_store, dry_run_executor::DryRunExecutor, package_provenance::ExactManifest,
+    artifact_store, dry_run_executor::DryRunExecutor,
+    install_plan::{self, PlanStep}, package_provenance::{self, ExactManifest},
     removal_planner::{self, RemovalPlan},
     sandbox_execution::{self, DPKG_CHECK_SCRIPT, DPKG_INSTALL_SCRIPT},
 };
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
-use std::{fs, path::{Path, PathBuf}, time::Duration};
+use std::{fs, io::Write, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 
 const SESSION_LABEL: &str = "org.rpt.sandbox=true";
@@ -248,6 +249,34 @@ async fn status_snapshot(session: &str) -> Result<(String, Vec<u8>)> {
     let container = verify_session(session, true).await?;
     let status = guest_file(&container, "/var/lib/dpkg/status").await?;
     Ok((container, status))
+}
+
+/// Resolve the exact candidate-policy install closure against the dpkg
+/// installed state of THIS session, never the host's package database.
+/// A private temporary file is used because the established solver API reads
+/// a status path; tempfile enforces unique mode-0600 creation and auto-cleanup.
+pub async fn plan_install(
+    session: &str, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String],
+) -> Result<Vec<PlanStep>> {
+    let (_, status) = status_snapshot(session).await?;
+    let mut temporary = tempfile::NamedTempFile::new()
+        .context("creating private sandbox status snapshot")?;
+    temporary.write_all(&status)?;
+    temporary.flush()?;
+    install_plan::preview_many_with_policy(
+        cache, temporary.path(), apt_root, packages, architecture, max_packages,
+    )
+}
+
+/// Select exact GPG/SHA256-proven .deb files using the sandbox's own dpkg
+/// status and the existing APT candidate-policy resolver.
+pub async fn prepare_download_plan(
+    session: &str, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String],
+) -> Result<ExactManifest> {
+    let steps = plan_install(session, cache, apt_root, architecture, max_packages, packages).await?;
+    package_provenance::prepare_exact(cache, &steps, architecture)
 }
 
 /// Preview removal using the container's installed database, never host dpkg.
