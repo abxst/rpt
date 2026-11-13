@@ -395,7 +395,7 @@ pub fn prepare(cache:&Path, names:&[String],arch:&str)->Result<Manifest> {
 /// SHA256-locked artifact corresponding to one exact candidate-policy plan step.
 /// Extra fields are intentionally ignored by the legacy Manifest downloader;
 /// SHA256 and size still bind the fetched bytes.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExactArtifact {
     #[serde(flatten)]
     pub artifact: Package,
@@ -403,7 +403,7 @@ pub struct ExactArtifact {
     pub architecture: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExactManifest {
     pub packages: Vec<ExactArtifact>,
     pub executable: bool,
