@@ -156,4 +156,35 @@ fi
 if simulate rpt-app rpt-conflict >"$root/conflict.log"; then
   echo "APT unexpectedly accepted conflicting packages" >&2; exit 1
 fi
+# Negative trust-chain fixtures: altered index and altered signed metadata
+# must fail before any simulated dependency resolution is considered valid.
+cp "$root/repo/Packages" "$root/Packages.original"
+printf '\\n# tampered after signing\\n' >> "$root/repo/Packages"
+if apt-get "${opts[@]}" update >"$root/tampered-index.log" 2>&1; then
+  echo "APT accepted a Packages index modified after Release signing" >&2
+  exit 1
+fi
+mv "$root/Packages.original" "$root/repo/Packages"
+cp "$root/repo/InRelease" "$root/InRelease.original"
+# Mutate a byte inside the clearsigned payload, not after its signature block.
+# This preserves the InRelease envelope while invalidating its signature.
+sed -i 's/^Origin: RPT CI$/Origin: RPT Cx/' "$root/repo/InRelease"
+if cmp -s "$root/InRelease.original" "$root/repo/InRelease"; then
+  echo "InRelease tamper fixture did not modify signed content" >&2
+  exit 1
+fi
+# APT can return zero while retaining previously verified indexes and warning
+# about a failed refresh. Verify the cryptographic failure directly, then
+# require a fresh isolated lists directory to reject the repository.
+if gpgv --keyring "$root/fixture-keyring.gpg" "$root/repo/InRelease" >"$root/gpgv-tampered.log" 2>&1; then
+  echo "gpgv accepted a modified clearsigned InRelease" >&2
+  exit 1
+fi
+mkdir -p "$root/tampered-lists/partial"
+if apt-get "${opts[@]}" -o "Dir::State::lists=$root/tampered-lists" update >"$root/tampered-release.log" 2>&1; then
+  echo "APT accepted an altered InRelease with empty index cache" >&2
+  cat "$root/tampered-release.log" >&2
+  exit 1
+fi
+mv "$root/InRelease.original" "$root/repo/InRelease"
 echo "PASS independent APT simulation oracle: dependencies, alternatives, versioned Provides, unsatisfied dependency, Pre-Depends, version mismatch and Conflicts"
