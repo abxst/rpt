@@ -14,7 +14,7 @@ use std::{fs, io::Write, path::{Path, PathBuf}, time::Duration};
 use tokio::process::Command;
 
 mod bound_execution;
-pub use bound_execution::apply_bound;
+pub use bound_execution::{apply_bound, BoundApply};
 
 const SESSION_LABEL: &str = "org.rpt.sandbox=true";
 const INSPECT_TEMPLATE: &str = r#"{{index .Config.Labels "org.rpt.sandbox"}}|{{.State.Running}}"#;
@@ -273,7 +273,7 @@ fn plan_install_snapshot(
 ) -> Result<Vec<PlanStep>> {
     let mut temporary = tempfile::NamedTempFile::new()
         .context("creating private sandbox status snapshot")?;
-    temporary.write_all(&status)?;
+    temporary.write_all(status)?;
     temporary.flush()?;
     install_plan::preview_many_with_policy(
         cache, temporary.path(), apt_root, packages, architecture, max_packages,
