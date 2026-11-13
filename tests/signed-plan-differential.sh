@@ -113,6 +113,43 @@ Filename: pool/rpt-cycle-b_1.0_all.deb
 Size: 1
 Description: cycle second node
 
+
+Package: rpt-self-conflict
+Version: 1.0
+Architecture: all
+Depends: rpt-lib (>= 2)
+Conflicts: rpt-lib
+Filename: pool/rpt-self-conflict_1.0_all.deb
+Size: 1
+Description: impossible dependency and conflict combination
+
+Package: rpt-self-breaks
+Version: 1.0
+Architecture: all
+Depends: rpt-lib (>= 2)
+Breaks: rpt-lib
+Filename: pool/rpt-self-breaks_1.0_all.deb
+Size: 1
+Description: impossible dependency and breaks combination
+
+Package: rpt-alternative-conflict
+Version: 1.0
+Architecture: all
+Depends: rpt-lib | rpt-foundation
+Conflicts: rpt-lib
+Filename: pool/rpt-alternative-conflict_1.0_all.deb
+Size: 1
+Description: must backtrack to nonconflicting alternative
+
+Package: rpt-alternative-breaks
+Version: 1.0
+Architecture: all
+Depends: rpt-lib | rpt-foundation
+Breaks: rpt-lib
+Filename: pool/rpt-alternative-breaks_1.0_all.deb
+Size: 1
+Description: must backtrack to nonbreaking alternative
+
 PACKAGES
 gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback --passphrase '' \
   --quick-generate-key 'RPT differential <rpt-diff@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
@@ -195,10 +232,10 @@ reject_plan() {
     echo "RPT unexpectedly accepted $pkg" >&2; exit 1
   fi
 }
-for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app; do
+for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app rpt-alternative-conflict rpt-alternative-breaks; do
   compare_plan "$pkg"
 done
-for pkg in rpt-broken rpt-version-mismatch; do
+for pkg in rpt-broken rpt-version-mismatch rpt-self-conflict rpt-self-breaks; do
   reject_plan "$pkg"
 done
 # Conflicts must be rejected when both packages are explicitly requested.
@@ -207,4 +244,4 @@ if apt-get "${opts[@]}" -s -y install rpt-app rpt-conflict >"$root/apt-conflict"
 fi
 # RPT's public CLI currently accepts one root package, so do not pretend
 # that its single-root preview validates a multi-root conflict.
-echo "PASS signed APT/RPT versioned plan differential: Depends, Pre-Depends, alternatives, Provides, missing/version constraints; APT multi-root Conflicts"
+echo "PASS signed APT/RPT versioned plan differential: Depends, Pre-Depends, alternatives, Provides, Conflicts, Breaks, missing/version constraints; APT multi-root Conflicts"
