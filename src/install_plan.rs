@@ -1160,14 +1160,36 @@ pub fn preview_with_policy(
     cache: &Path, status: &Path, apt_root: &Path, package: &str,
     architecture: &str, max_packages: usize,
 ) -> Result<Vec<PlanStep>> {
+    preview_many_with_policy(cache, status, apt_root, &[package.to_owned()], architecture, max_packages)
+}
+
+/// Resolve all requested roots in one candidate-verified policy closure.
+/// Unsupported policy/architecture cases fail closed; never runs dpkg.
+pub fn preview_many_with_policy(
+    cache: &Path, status: &Path, apt_root: &Path, packages: &[String],
+    architecture: &str, max_packages: usize,
+) -> Result<Vec<PlanStep>> {
+    if packages.is_empty() || packages.len() > 128 {
+        bail!("expected 1..=128 requested packages");
+    }
+    let mut requested = BTreeSet::new();
+    for package in packages {
+        let atom = parse_atom_for_arch(package, architecture)?;
+        if atom.constraint.is_some() || atom.any_arch || atom.requested_arch.is_some() {
+            bail!("policy batch roots must be unqualified binary names");
+        }
+        if !requested.insert(package.clone()) { bail!("duplicate requested package: {package}"); }
+    }
     if max_packages == 0 || max_packages > 5000 {
         bail!("max_packages must be 1..=5000");
     }
     let target_release = crate::policy::read_default_release(apt_root)?;
     let preferences = crate::apt_preferences::load(apt_root)?;
-    crate::apt_pin_eval::evaluate_with_phasing(
-        package, &[], &preferences, target_release.as_deref(), None,
-    )?;
+    for package in packages {
+        crate::apt_pin_eval::evaluate_with_phasing(
+            package, &[], &preferences, target_release.as_deref(), None,
+        )?;
+    }
     let complete = cache_query::installed_catalog_by_arch(status)?;
     let complete_relations = read_installed_relations_by_arch(status)?;
     validate_installed_metadata(&complete, &complete_relations)?;
@@ -1178,7 +1200,7 @@ pub fn preview_with_policy(
     // dependency metadata is available from a signed repository occurrence.
     let mut validated = BTreeSet::<String>::new();
     let mut roots = BTreeSet::new();
-    roots.insert(package.to_owned());
+    roots.extend(requested.iter().cloned());
     for _ in 0..16 {
         let mut changed = false;
         for name in &roots {
@@ -1222,7 +1244,7 @@ pub fn preview_with_policy(
             if roots.insert(name) { discovered = true; }
         }
         if discovered { continue; }
-        let plan = solve_catalog(&catalog, &installed, &installed_relations, package, max_packages, architecture)?;
+        let plan = solve_catalog_many(&catalog, &installed, &installed_relations, packages, max_packages, architecture)?;
         for step in &plan {
             if roots.insert(step.package.clone()) {
                 discovered = true;
