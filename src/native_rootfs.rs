@@ -4,7 +4,7 @@ use crate::{artifact_store, dry_run_executor::DryRunExecutor, install_plan, pack
     sandbox_execution::{self, valid_id}, sandbox_session::BoundTransaction};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
-use std::{fs, path::{Path, PathBuf}, time::Duration};
+use std::{collections::BTreeSet, fs, path::{Path, PathBuf}, time::Duration};
 
 const MARKER: &str = "rpt-disposable-rootfs-v1\n";
 
@@ -40,6 +40,46 @@ fn status(root: &Path) -> Result<Vec<u8>> {
     fs::read(path).context("reading guest dpkg status")
 }
 
+/// Installed user roots must become manual, and only newly installed
+/// dependency archives become automatic. Never relabel an existing dependency:
+/// it may have been explicitly installed by an operator before this transaction.
+fn install_mark_targets(requested: &[String], steps: &[install_plan::PlanStep])
+    -> (Vec<String>, Vec<String>) {
+    let roots = requested.iter().cloned().collect::<BTreeSet<_>>();
+    let automatic = steps.iter().filter(|step|
+        step.installed.is_none() && !roots.contains(&step.package))
+        .map(|step| step.package.clone()).collect::<BTreeSet<_>>();
+    (automatic.into_iter().collect(), roots.into_iter().collect())
+}
+
+/// Exact guest APT mark-state identity, sampled before a dpkg transaction.
+/// The executor checks it again immediately before touching dpkg.
+fn mark_state_digest(root: &Path) -> Result<String> {
+    let marks = root.join("var/lib/apt/extended_states");
+    match fs::symlink_metadata(&marks) {
+        Ok(meta) if meta.file_type().is_file() && meta.len() <= 64 * 1024 * 1024 =>
+            Ok(hex::encode(Sha256::digest(fs::read(&marks)?))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".into()),
+        _ => bail!("guest APT marks must be absent or a regular file <=64 MiB"),
+    }
+}
+
+fn write_mark_targets(path: &Path, targets: &[String]) -> Result<()> {
+    let mut contents = String::new();
+    for package in targets {
+        // apt-mark arguments come from the verified solver, but the staged
+        // text protocol must also reject malformed names and line breaks.
+        if package.len() < 2 || !package.bytes().all(|c|
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'.' | b'-')) {
+            bail!("invalid package identity in native APT marking plan: {package}");
+        }
+        contents.push_str(package);
+        contents.push('\n');
+    }
+    fs::write(path, contents)?;
+    Ok(())
+}
+
 /// Reuse the exact signed candidate-policy and download intent contract.
 pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
     max_packages: usize, packages: &[String], include_recommends: bool) -> Result<BoundTransaction> {
@@ -57,7 +97,7 @@ pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
 }
 
 const INSTALL_SCRIPT: &str = r#"set -eu
-root="$1"; expected="$2"; stage="$3"; shift 3
+root="$1"; expected="$2"; stage="$3"; expected_marks="$4"; shift 4
 test -f "$root/.rpt-disposable-rootfs"
 test "$(cat "$root/.rpt-disposable-rootfs")" = "rpt-disposable-rootfs-v1"
 actual="$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)"
@@ -66,6 +106,15 @@ if [ "$expected" != "$actual" ]; then
 fi
 if [ -n "$(dpkg --root="$root" --audit)" ]; then
     echo "rootfs dpkg database is already broken" >&2; exit 1
+fi
+marks="$root/var/lib/apt/extended_states"
+if [ "$expected_marks" = missing ]; then
+    if [ -e "$marks" ] || [ -L "$marks" ]; then
+        echo "guest APT mark state appeared before install" >&2; exit 1
+    fi
+elif [ ! -f "$marks" ] || [ -L "$marks" ] ||
+     [ "$(sha256sum "$marks" | cut -d ' ' -f1)" != "$expected_marks" ]; then
+    echo "guest APT mark state changed before install" >&2; exit 1
 fi
 tab="$(printf '\t')"
 while IFS="$tab" read -r file package version arch; do
@@ -90,6 +139,42 @@ while IFS="$tab" read -r file package version arch; do
         echo "rootfs postflight version mismatch: $package" >&2; exit 1
     fi
 done < "$stage/expected.tsv"
+
+# Mark only newly installed dependency archives as automatic. Existing
+# dependencies keep their previous marks, including manual state. Explicit
+# request roots are always manual, even if they were already installed.
+if [ ! -x "$root/usr/bin/apt-mark" ]; then
+    echo "guest apt-mark binary missing" >&2; exit 1
+fi
+status_after_install="$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)"
+set --
+while IFS= read -r package; do
+    if [ -n "$package" ]; then set -- "$@" "$package"; fi
+done < "$stage/auto-marks.txt"
+if [ "$#" -gt 0 ]; then
+    chroot "$root" /usr/bin/apt-mark auto "$@"
+fi
+for package in "$@"; do
+    chroot "$root" /usr/bin/apt-mark showauto "$package" | grep -Fxq "$package" ||
+        { echo "native auto mark missing for $package" >&2; exit 1; }
+done
+set --
+while IFS= read -r package; do
+    if [ -n "$package" ]; then set -- "$@" "$package"; fi
+done < "$stage/manual-marks.txt"
+if [ "$#" -gt 0 ]; then
+    chroot "$root" /usr/bin/apt-mark manual "$@"
+fi
+for package in "$@"; do
+    chroot "$root" /usr/bin/apt-mark showmanual "$package" | grep -Fxq "$package" ||
+        { echo "native manual mark missing for $package" >&2; exit 1; }
+done
+if [ "$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)" != "$status_after_install" ]; then
+    echo "native APT marking unexpectedly changed dpkg state" >&2; exit 1
+fi
+if [ -n "$(dpkg --root="$root" --audit)" ]; then
+    echo "native install/mark postflight dpkg audit failed" >&2; exit 1
+fi
 "#;
 
 pub struct Apply<'a> {
@@ -150,11 +235,18 @@ pub async fn apply(opts: Apply<'_>) -> Result<()> {
     impl Drop for StageGuard { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
     let _guard = StageGuard(stage.clone());
     let names = sandbox_execution::stage_artifacts(&stage, opts.artifacts, &bound.manifest)?;
+    if !root.join("usr/bin/apt-mark").exists() {
+        bail!("native disposable rootfs does not include apt-mark");
+    }
+    let expected_marks = mark_state_digest(&root)?;
+    let (automatic, manual) = install_mark_targets(&bound.requested, &bound.steps);
+    write_mark_targets(&stage.join("auto-marks.txt"), &automatic)?;
+    write_mark_targets(&stage.join("manual-marks.txt"), &manual)?;
     let stage = fs::canonicalize(stage)?;
     let mut args = vec![
         "-euc".into(), INSTALL_SCRIPT.into(), "rpt-native-rootfs".into(),
         root.to_string_lossy().into_owned(), bound.status_sha256,
-        stage.to_string_lossy().into_owned(),
+        stage.to_string_lossy().into_owned(), expected_marks,
     ];
     args.extend(names.iter().map(|name| stage.join(name).to_string_lossy().into_owned()));
     DryRunExecutor::new(journal, 1)?.submit_command(
@@ -339,13 +431,7 @@ pub async fn mark(root: &Path, journal_path: &Path, id: &str, mode: &str,
     if !root.join("usr/bin/apt-mark").exists() {
         bail!("native disposable rootfs does not include apt-mark");
     }
-    let marks_path = root.join("var/lib/apt/extended_states");
-    let digest = match fs::symlink_metadata(&marks_path) {
-        Ok(meta) if meta.file_type().is_file() && meta.len() <= 64 * 1024 * 1024 =>
-            hex::encode(Sha256::digest(fs::read(&marks_path)?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing".into(),
-        _ => bail!("native APT marks must be absent or a regular file <=64 MiB"),
-    };
+    let digest = mark_state_digest(&root)?;
     fs::create_dir_all(journal_path)?;
     let journal = fs::canonicalize(journal_path)?;
     if journal == Path::new("/") || journal.starts_with(&root) {
@@ -373,6 +459,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(rootfs(dir.path()).is_err());
     }
+    #[test]
+    fn native_install_auto_manual_marks_never_demote_preinstalled_dependencies() {
+        let requested = vec!["rpt-app".to_owned(), "rpt-already-installed".to_owned()];
+        let steps = vec![
+            install_plan::PlanStep {
+                package: "rpt-new-dep".into(), architecture: "all".into(),
+                version: "1".into(), installed: None,
+            },
+            install_plan::PlanStep {
+                package: "rpt-upgraded-dep".into(), architecture: "amd64".into(),
+                version: "2".into(), installed: Some("1".into()),
+            },
+            install_plan::PlanStep {
+                package: "rpt-app".into(), architecture: "all".into(),
+                version: "1".into(), installed: None,
+            },
+        ];
+        let (auto, manual) = install_mark_targets(&requested, &steps);
+        assert_eq!(auto, ["rpt-new-dep"]);
+        assert_eq!(manual, ["rpt-already-installed", "rpt-app"]);
+        assert!(!auto.contains(&"rpt-upgraded-dep".to_owned()));
+    }
+
+    #[test]
+    fn native_install_staged_mark_names_reject_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("marks.txt");
+        assert!(write_mark_targets(&file, &["lib-dep1".into(), "app".into()]).is_ok());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "lib-dep1\napp\n");
+        assert!(write_mark_targets(&file, &["bad\nname".into()]).is_err());
+        assert!(write_mark_targets(&file, &["bad_name".into()]).is_err());
+    }
+
     #[test]
     fn native_script_revalidates_and_audits() {
         for term in ["dpkg --root=", "dpkg-deb -f", "expected.tsv", "postflight version mismatch"] {
