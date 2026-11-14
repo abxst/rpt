@@ -279,6 +279,76 @@ async fn execute_remove(root: &Path, run: Run<'_>,
     ).await
 }
 
+
+/// Mark auto/manual through the real APT binary inside the disposable rootfs,
+/// rather than editing a host or guessed extended-states database.
+const MARK_SCRIPT: &str = r#"set -eu
+root="$1"; expected="$2"; mark_digest="$3"; mode="$4"; shift 4
+test "$(cat "$root/.rpt-disposable-rootfs")" = "rpt-disposable-rootfs-v1"
+if [ "$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)" != "$expected" ]; then
+    echo "native dpkg status changed before marking" >&2; exit 1
+fi
+marks="$root/var/lib/apt/extended_states"
+if [ "$mark_digest" = "missing" ]; then
+    if [ -e "$marks" ] || [ -L "$marks" ]; then
+        echo "native APT marks appeared since planning" >&2; exit 1
+    fi
+elif [ ! -f "$marks" ] || [ -L "$marks" ] ||
+     [ "$(sha256sum "$marks" | cut -d ' ' -f1)" != "$mark_digest" ]; then
+    echo "native APT marks changed since planning" >&2; exit 1
+fi
+case "$mode" in auto|manual) ;; *) exit 2;; esac
+chroot "$root" /usr/bin/apt-mark "$mode" "$@"
+if [ "$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)" != "$expected" ]; then
+    echo "native apt-mark unexpectedly changed dpkg status" >&2; exit 1
+fi
+for package in "$@"; do
+    if ! chroot "$root" /usr/bin/apt-mark "show$mode" "$package" |
+         grep -Fxq "$package"; then
+        echo "native apt-mark postflight failed for $package" >&2; exit 1
+    fi
+done
+if [ -n "$(dpkg --root="$root" --audit)" ]; then
+    echo "native APT marking left broken dpkg state" >&2; exit 1
+fi
+"#;
+
+pub async fn mark(root: &Path, journal_path: &Path, id: &str, mode: &str,
+    packages: &[String], timeout_seconds: u64) -> Result<()> {
+    if !matches!(mode, "auto" | "manual") || !valid_id(id)
+        || !(10..=3600).contains(&timeout_seconds) {
+        bail!("invalid native APT mark mode, ID or timeout");
+    }
+    let root = rootfs(root)?;
+    let before = status(&root)?;
+    let names = crate::sandbox_session::resolve_mark_packages(&before, packages)?;
+    if !root.join("usr/bin/apt-mark").exists() {
+        bail!("native disposable rootfs does not include apt-mark");
+    }
+    let marks_path = root.join("var/lib/apt/extended_states");
+    let digest = match fs::symlink_metadata(&marks_path) {
+        Ok(meta) if meta.file_type().is_file() && meta.len() <= 64 * 1024 * 1024 =>
+            hex::encode(Sha256::digest(fs::read(&marks_path)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+        _ => bail!("native APT marks must be absent or a regular file <=64 MiB"),
+    };
+    fs::create_dir_all(journal_path)?;
+    let journal = fs::canonicalize(journal_path)?;
+    if journal == Path::new("/") || journal.starts_with(&root) {
+        bail!("native APT marking journal must be outside rootfs");
+    }
+    let mut args = vec![
+        "-euc".into(), MARK_SCRIPT.into(), "rpt-native-mark".into(),
+        root.to_string_lossy().into_owned(), hex::encode(Sha256::digest(&before)),
+        digest, mode.into(),
+    ];
+    args.extend(names);
+    DryRunExecutor::new(journal, 1)?.submit_command(
+        id.to_owned(), "/bin/sh".into(), args,
+        Duration::from_secs(timeout_seconds), Duration::from_secs(5),
+    ).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
