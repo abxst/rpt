@@ -47,23 +47,36 @@ pub struct NativeCombinedIntent {
 
 fn digest(input: &[u8]) -> String { hex::encode(Sha256::digest(input)) }
 
-fn scenario(
-    cache: &Path, status: &Path, apt_root: &Path, architecture: &str,
-    mode: &str, requested: &[String], max_roots: usize,
-    max_packages: usize, max_removals: usize,
-) -> Result<JointUpgradeScenario> {
-    match mode {
+/// Explicit typed preparation contract, also replayed at apply time.
+pub struct Prepare<'a> {
+    pub root: &'a Path,
+    pub cache: &'a Path,
+    pub apt_root: &'a Path,
+    pub architecture: &'a str,
+    pub mode: &'a str,
+    pub requested: &'a [String],
+    pub max_roots: usize,
+    pub max_packages: usize,
+    pub max_removals: usize,
+}
+
+fn scenario(opts: &Prepare<'_>, status: &Path) -> Result<JointUpgradeScenario> {
+    let Prepare {
+        cache, apt_root, architecture, mode, requested,
+        max_roots, max_packages, max_removals, ..
+    } = opts;
+    match *mode {
         "explicit" => {
             if requested.is_empty() { bail!("explicit removal set must not be empty"); }
             system_full_upgrade::preview(cache, status, apt_root, architecture,
-                requested, max_roots, max_packages)
+                requested, *max_roots, *max_packages)
         }
         "automatic" => {
             if !requested.is_empty() {
                 bail!("automatic full-upgrade intent cannot also specify explicit removals");
             }
             let report = system_auto_upgrade::preview(cache, status, apt_root,
-                architecture, max_roots, max_packages, max_removals)?;
+                architecture, *max_roots, *max_packages, *max_removals)?;
             match report.selection {
                 AutoUpgradeSelection::RemovalScenario { scenario } => Ok(scenario),
                 AutoUpgradeSelection::NoRemoval { .. } =>
@@ -76,14 +89,14 @@ fn scenario(
 
 /// Produce a *nonexecutable* artifact manifest with exact provenance and
 /// bind it to a globally checked, original-status full-upgrade scenario.
-pub fn prepare(
-    root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
-    mode: &str, requested: &[String], max_roots: usize,
-    max_packages: usize, max_removals: usize,
-) -> Result<NativeCombinedIntent> {
-    let root = native_rootfs::rootfs(root)?;
-    if !(1..=128).contains(&max_roots) || !(1..=5000).contains(&max_packages)
-        || !(1..=3).contains(&max_removals) {
+pub fn prepare(opts: Prepare<'_>) -> Result<NativeCombinedIntent> {
+    let Prepare {
+        root: requested_root, cache, apt_root, architecture, mode, requested,
+        max_roots, max_packages, max_removals,
+    } = &opts;
+    let root = native_rootfs::rootfs(requested_root)?;
+    if !(1..=128).contains(max_roots) || !(1..=5000).contains(max_packages)
+        || !(1..=3).contains(max_removals) {
         bail!("invalid bounded native full-upgrade solver limits");
     }
     let status = native_rootfs::status(&root)?;
@@ -99,8 +112,7 @@ pub fn prepare(
         }
     }
     let pre_sha = digest(&status);
-    let scenario = scenario(cache, &root.join("var/lib/dpkg/status"), apt_root,
-        architecture, mode, requested, max_roots, max_packages, max_removals)
+    let scenario = scenario(&opts, &root.join("var/lib/dpkg/status"))
         .context("selecting the fully audited combined upgrade/removal scenario")?;
     if scenario.original_status_sha256 != pre_sha || scenario.removals.is_empty() {
         bail!("combined signed scenario is stale or contains no removals");
@@ -110,7 +122,7 @@ pub fn prepare(
         || scenario.upgrades.requested_upgrades.is_empty() {
         bail!("combined upgrade requires real signed upgrades, no downgrades/reinstalls");
     }
-    if scenario.removals.len() > max_removals {
+    if scenario.removals.len() > *max_removals {
         bail!("selected scenario exceeds approved removal limit");
     }
     let selected_removals = scenario.removals.iter().map(|r| BoundRemoval {
@@ -133,8 +145,9 @@ pub fn prepare(
     Ok(NativeCombinedIntent {
         schema_version: 1, session: native_rootfs::root_identity(&root),
         architecture: architecture.into(), status_sha256: pre_sha,
-        marks_sha256, max_roots, max_packages, max_removals,
-        selection_mode: mode.into(), requested_removals: requested.to_vec(),
+        marks_sha256, max_roots: *max_roots, max_packages: *max_packages,
+        max_removals: *max_removals,
+        selection_mode: (*mode).into(), requested_removals: requested.to_vec(),
         selected_removals, requested_upgrades: scenario.upgrades.requested_upgrades,
         scenario_sha256, steps, manifest,
     })
@@ -228,11 +241,12 @@ pub async fn apply(opts: Apply<'_>) -> Result<()> {
     }
     // Re-run the complete signed candidate policy, bounded removal selection,
     // original-state reverse dependencies and exact manifest generation.
-    let replay = prepare(
-        &root, opts.cache, opts.apt_root, &bound.architecture,
-        &bound.selection_mode, &bound.requested_removals,
-        bound.max_roots, bound.max_packages, bound.max_removals,
-    ).context("signed full-upgrade intent replay failed before guest mutation")?;
+    let replay = prepare(Prepare {
+        root: &root, cache: opts.cache, apt_root: opts.apt_root,
+        architecture: &bound.architecture, mode: &bound.selection_mode,
+        requested: &bound.requested_removals, max_roots: bound.max_roots,
+        max_packages: bound.max_packages, max_removals: bound.max_removals,
+    }).context("signed full-upgrade intent replay failed before guest mutation")?;
     if serde_json::to_value(&replay)? != serde_json::to_value(&bound)? {
         bail!("combined transaction changed since signed/policy preflight");
     }
