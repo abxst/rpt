@@ -1,0 +1,30 @@
+name: VM-hosted sandbox transaction acceptance
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  vm-guest-transaction:
+    name: VM host ${{ matrix.host }} / dpkg guest ${{ matrix.guest }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: ubuntu-24.04
+            guest: debian:bookworm-slim
+          - host: ubuntu-22.04
+            guest: ubuntu:22.04
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile isolated RPT transaction test binaries
+        run: |
+          cargo generate-lockfile
+          cargo build --locked
+      - name: Signed install, upgrade, SIGKILL and recovery in Docker guest
+        env:
+          RPT_SANDBOX_IMAGE: ${{ matrix.guest }}
+        run: bash tests/vm-host-transaction-acceptance.sh
