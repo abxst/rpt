@@ -710,7 +710,7 @@ impl Solver<'_> {
             if options.len() > 1 { replayable = false; }
             seen_possible.extend(options);
         }
-        replayable &= seen_possible.len() > 1;
+        replayable &= !soft && seen_possible.len() > 1;
         let decision_key = ReplayKey {
             owner: owner.clone(), group: index, soft,
         };
@@ -1384,19 +1384,30 @@ fn solve_catalog_many_options(
     packages: &[String], max_packages: usize, architecture: &str,
     include_recommends: bool,
 ) -> Result<Vec<PlanStep>> {
+    // All retries share the same bounded search fuel, so revisiting earlier
+    // choices never turns the 4,096-branch cap into an unbounded retry loop.
+    let search_budget = Rc::new(Cell::new(4096));
+    let mut replay_rules = BTreeMap::<ReplayKey, ReplayRule>::new();
+    loop {
+    if search_budget.get() == 0 {
+        bail!("global dependency branch budget exhausted");
+    }
     let mut solver = Solver {
         catalog, installed, installed_relations, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         architecture: architecture.to_owned(),
-        branch_budget: Rc::new(Cell::new(4096)), include_recommends,
+        branch_budget: Rc::clone(&search_budget), include_recommends,
         requested_roots: BTreeSet::new(),
         installed_provider_proofs: Vec::new(),
+        replay_rules: replay_rules.clone(),
+        replay_trace: Vec::new(),
     };
     for package in packages {
         if let Some(key) = solver.key_for(package)? {
             solver.requested_roots.insert(key);
         }
     }
+    let attempt = (|| -> Result<()> {
     for package in packages {
         solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
     }
@@ -1436,7 +1447,38 @@ fn solve_catalog_many_options(
             }
         }
     }
-    Ok(solver.plan)
+    Ok(())
+    })();
+    match attempt {
+        Ok(()) => return Ok(solver.plan),
+        Err(error) => {
+            // Retry the last committed alternative with another candidate.
+            // Pin earlier choices exactly, discard all later decisions and
+            // re-evaluate their entire dependent closure.
+            let mut retry = None;
+            for (index, decision) in solver.replay_trace.iter().enumerate().rev() {
+                if decision.choice + 1 >= decision.count { continue; }
+                let mut rules = BTreeMap::new();
+                for earlier in &solver.replay_trace[..index] {
+                    rules.insert(
+                        earlier.key.clone(), ReplayRule::Exactly(earlier.choice),
+                    );
+                }
+                rules.insert(
+                    decision.key.clone(),
+                    ReplayRule::AtLeast(decision.choice + 1),
+                );
+                retry = Some(rules);
+                break;
+            }
+            if let Some(next) = retry {
+                replay_rules = next;
+            } else {
+                return Err(error);
+            }
+        }
+    }
+    }
 }
 
 /// Build a candidate-specific read-only catalog for the current dependency
@@ -1765,6 +1807,8 @@ mod tests {
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
             requested_roots: BTreeSet::new(),
             installed_provider_proofs: Vec::new(),
+            replay_rules: BTreeMap::new(),
+            replay_trace: Vec::new(),
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -2707,6 +2751,8 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
             requested_roots: BTreeSet::new(),
             installed_provider_proofs: Vec::new(),
+            replay_rules: BTreeMap::new(),
+            replay_trace: Vec::new(),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
