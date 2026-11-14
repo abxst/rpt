@@ -291,7 +291,7 @@ dpkg --audit
 
 /// Resolve requested names against the exact installed binary catalog.
 /// Bare names are only legal when no foreign copy makes them ambiguous.
-fn resolve_mark_packages(status: &[u8], requests: &[String]) -> Result<Vec<String>> {
+pub(crate) fn resolve_mark_packages(status: &[u8], requests: &[String]) -> Result<Vec<String>> {
     if requests.is_empty() || requests.len() > 128 {
         bail!("expected 1..=128 installed binary identities to mark");
     }
