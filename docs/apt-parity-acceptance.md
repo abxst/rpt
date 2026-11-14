@@ -184,6 +184,39 @@ M2.6.1 status-only path. The signed APT differential checks both
 `foreign` and `allowed` new native leaves against `apt-get -s` and
 adds explicit refusal for an old installed native version.
 
+## Owner-scoped recursive native dependency closure (M2.6.3)
+
+The read-only explicit foreign-architecture policy planner can now traverse
+native `Depends` **multiple levels deep** after a foreign i386 package
+chooses a signed amd64 candidate that declares `Multi-Arch: foreign`,
+or `Multi-Arch: allowed` for a `:any` relationship.
+
+Once a native amd64 binary is selected, **its own Depends are resolved
+against amd64 candidates**, not against a coincidentally same-named i386
+binary. An ordinary native helper is permitted to declare the default
+`Multi-Arch: no`: that does not authorize the original i386 root to
+depend directly on it, but it does satisfy its amd64 parent. Installed
+native status records are honored at their exact versions without
+scheduling upgrades. Every discovered native binary must independently
+pass signed index origin verification, candidate pinning/phasing, and
+the same full staged-set and installed Conflicts/Breaks/Replaces guards.
+The existing global bounded branch budget and transaction size limits
+remain in force.
+
+The signed differential uses an i386 app -> amd64 `foreign` tool ->
+amd64 ordinary helper -> amd64 ordinary bottom package. It compares
+selected exact names/versions with isolated `apt-get -s`, includes a
+newer same-named i386 decoy, reuses an installed amd64 helper, and
+rejects an implicitly required upgrade of an older installed helper.
+
+This is a **read-only partial dependency resolver**, not APT parity:
+native `Pre-Depends`, cross-architecture virtual provider selection,
+new architecture-specific edges from native nodes, generic
+`:native` qualifiers, arbitrary `Architecture: all` native
+substitution, upgrades of installed native dependencies, removal and
+coordinated Multi-Arch transactions remain fail-closed. No foreign
+dpkg execution or live-host mutation is authorized.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
