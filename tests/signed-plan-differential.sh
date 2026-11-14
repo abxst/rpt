@@ -571,6 +571,52 @@ sudo chroot "$mark_guest" /usr/bin/apt-mark showmanual rpt-mark-preserved \
 test -z "$(sudo dpkg --root="$mark_guest" --audit)"
 grep -Fq '"phase": "succeeded"' "$root/native-mark-journal/native-mark-install.json"
 echo "PASS native signed install auto dependency/manual root, preserved preinstalled manual dependency"
+# No-op install: the requested root already has the signed candidate version,
+# but its APT mark is auto. A bound, zero-archive transaction must make it
+# manual, leave dpkg status bit-for-bit unchanged, and need no artifact dir.
+sudo chroot "$mark_guest" /usr/bin/apt-mark auto rpt-mark-root
+sudo chroot "$mark_guest" /usr/bin/apt-mark showauto rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+./target/debug/rpt native-rootfs-prepare-transaction \
+  --rootfs "$mark_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/native-mark-only.json" rpt-mark-root
+python3 - "$root/native-mark-only.json" "$root/native-mark-only-tampered.json" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1]))
+assert data['packages']==[] and data['steps']==[]
+assert data['requested']==['rpt-mark-root'] and data['executable'] is False
+data['status_sha256']='0'*64
+json.dump(data,open(sys.argv[2],'w'))
+PY
+if sudo ./target/debug/rpt native-rootfs-apply-transaction \
+  --rootfs "$mark_guest" --id native-mark-only-tampered \
+  --transaction "$root/native-mark-only-tampered.json" \
+  --artifacts "$root/empty-marks-no-artifacts" \
+  --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-mark-journal" --timeout-seconds 180 \
+  >"$root/native-mark-only-tampered.log" 2>&1; then
+  echo "Native mark-only accepted tampered dpkg status" >&2; exit 1
+fi
+sudo chroot "$mark_guest" /usr/bin/apt-mark showauto rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+mark_only_before="$(sudo sha256sum "$mark_guest/var/lib/dpkg/status" | cut -d' ' -f1)"
+sudo ./target/debug/rpt native-rootfs-apply-transaction \
+  --rootfs "$mark_guest" --id native-mark-only \
+  --transaction "$root/native-mark-only.json" \
+  --artifacts "$root/empty-marks-no-artifacts" \
+  --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-mark-journal" --timeout-seconds 180 \
+  >"$root/native-mark-only.log"
+grep -Fq 'mark-only transaction verified and applied' "$root/native-mark-only.log"
+grep -Fq '"phase": "succeeded"' "$root/native-mark-journal/native-mark-only.json"
+sudo chroot "$mark_guest" /usr/bin/apt-mark showmanual rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+sudo chroot "$mark_guest" /usr/bin/apt-mark showmanual rpt-mark-preserved \
+  | grep -Fxq rpt-mark-preserved
+test "$(sudo sha256sum "$mark_guest/var/lib/dpkg/status" | cut -d' ' -f1)" = "$mark_only_before"
+test -z "$(sudo dpkg --root="$mark_guest" --audit)"
+echo "PASS signed native zero-archive mark-only; no dpkg changes or artifact directory"
+
 
 
 # Install/remove and install/purge exercise actual dpkg operations in the
