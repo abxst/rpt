@@ -1,0 +1,183 @@
+//! Signed dpkg transactions on an explicitly marked disposable Linux rootfs.
+//! This is independent of Docker, not an executor for the live machine.
+use crate::{artifact_store, dry_run_executor::DryRunExecutor, install_plan, package_provenance,
+    sandbox_execution::{self, valid_id}, sandbox_session::BoundTransaction};
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::{fs, path::{Path, PathBuf}, time::Duration};
+
+const MARKER: &str = "rpt-disposable-rootfs-v1\n";
+
+fn rootfs(path: &Path) -> Result<PathBuf> {
+    if !cfg!(target_os = "linux") { bail!("native rootfs requires Linux"); }
+    if fs::symlink_metadata(path)?.file_type().is_symlink() { bail!("rootfs cannot be a symlink"); }
+    let root = fs::canonicalize(path)?;
+    if !root.is_dir() || !(root.starts_with("/tmp/") || root.starts_with("/var/tmp/")) {
+        bail!("only disposable rootfs beneath /tmp or /var/tmp is supported; refusing live root");
+    }
+    let marker = root.join(".rpt-disposable-rootfs");
+    if !fs::symlink_metadata(&marker)?.file_type().is_file()
+        || fs::read(&marker)? != MARKER.as_bytes() {
+        bail!("missing exact disposable-rootfs marker");
+    }
+    for path in ["var/lib/dpkg/status", "usr/bin/dpkg", "bin/sh"] {
+        if !root.join(path).exists() { bail!("incomplete rootfs: {path}"); }
+    }
+    // Refuse bind mounts, proc/sys/dev mounts, and external writable volumes.
+    let mount_prefix = format!("{}/", root.display());
+    for line in fs::read_to_string("/proc/self/mountinfo")?.lines() {
+        let Some(target) = line.split_whitespace().nth(4) else { continue };
+        if target == root.to_string_lossy() || target.starts_with(&mount_prefix) {
+            bail!("rootfs contains a mount: {target}");
+        }
+    }
+    Ok(root)
+}
+fn root_identity(root: &Path) -> String { format!("native-rootfs:{}", root.display()) }
+fn status(root: &Path) -> Result<Vec<u8>> {
+    let path = root.join("var/lib/dpkg/status");
+    if !fs::symlink_metadata(&path)?.file_type().is_file() { bail!("dpkg status must be a regular file"); }
+    fs::read(path).context("reading guest dpkg status")
+}
+
+/// Reuse the exact signed candidate-policy and download intent contract.
+pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String], include_recommends: bool) -> Result<BoundTransaction> {
+    let root = rootfs(root)?;
+    let bytes = status(&root)?;
+    let steps = install_plan::preview_many_with_policy_options(
+        cache, &root.join("var/lib/dpkg/status"), apt_root, packages,
+        architecture, max_packages, include_recommends)?;
+    let manifest = package_provenance::prepare_exact(cache, &steps, architecture)?;
+    Ok(BoundTransaction {
+        schema_version: 1, session: root_identity(&root), architecture: architecture.into(),
+        status_sha256: hex::encode(Sha256::digest(&bytes)), requested: packages.to_vec(),
+        max_packages, include_recommends, steps, manifest,
+    })
+}
+
+const INSTALL_SCRIPT: &str = r#"set -eu
+root="$1"; expected="$2"; stage="$3"; shift 3
+test -f "$root/.rpt-disposable-rootfs"
+test "$(cat "$root/.rpt-disposable-rootfs")" = "rpt-disposable-rootfs-v1"
+actual="$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)"
+if [ "$expected" != "$actual" ]; then
+    echo "stale rootfs dpkg state" >&2; exit 1
+fi
+if [ -n "$(dpkg --root="$root" --audit)" ]; then
+    echo "rootfs dpkg database is already broken" >&2; exit 1
+fi
+tab="$(printf '\t')"
+while IFS="$tab" read -r file package version arch; do
+    archive="$stage/$file"
+    if [ "$(dpkg-deb -f "$archive" Package)" != "$package" ] ||
+       [ "$(dpkg-deb -f "$archive" Version)" != "$version" ] ||
+       [ "$(dpkg-deb -f "$archive" Architecture)" != "$arch" ]; then
+        echo "archive control mismatches signed plan" >&2; exit 1
+    fi
+done < "$stage/expected.tsv"
+for archive in "$@"; do
+    dpkg --root="$root" --install -- "$archive"
+done
+dpkg --root="$root" --configure --pending
+dpkg --root="$root" --triggers-only --pending
+if [ -n "$(dpkg --root="$root" --audit)" ]; then
+    echo "rootfs dpkg postflight audit failed" >&2; exit 1
+fi
+while IFS="$tab" read -r file package version arch; do
+    actual="$(dpkg-query --admindir="$root/var/lib/dpkg" -W '-f=${Status}|${Version}|${Architecture}' "$package")"
+    if [ "$actual" != "install ok installed|$version|$arch" ]; then
+        echo "rootfs postflight version mismatch: $package" >&2; exit 1
+    fi
+done < "$stage/expected.tsv"
+"#;
+
+pub struct Apply<'a> {
+    pub rootfs: &'a Path,
+    pub transaction: &'a Path,
+    pub artifacts: &'a Path,
+    pub cache: &'a Path,
+    pub apt_root: &'a Path,
+    pub journal: &'a Path,
+    pub id: &'a str,
+    pub timeout_seconds: u64,
+}
+
+/// Failure leaves the rootfs and journal for operator inspection; no
+/// filesystem rollback is implied by successful process supervision.
+pub async fn apply(opts: Apply<'_>) -> Result<()> {
+    if !valid_id(opts.id) || !(10..=3600).contains(&opts.timeout_seconds) {
+        bail!("invalid native transaction ID or timeout");
+    }
+    let root = rootfs(opts.rootfs)?;
+    let metadata = fs::symlink_metadata(opts.transaction)?;
+    if !metadata.file_type().is_file() || metadata.len() > 16 * 1024 * 1024 {
+        bail!("native intent must be a regular file <=16 MiB");
+    }
+    let original = fs::read(opts.transaction)?;
+    let bound: BoundTransaction = serde_json::from_slice(&original)?;
+    if bound.schema_version != 1 || bound.session != root_identity(&root)
+        || bound.manifest.executable || bound.steps.is_empty()
+        || bound.manifest.packages.is_empty() {
+        bail!("wrong rootfs, empty or unsupported signed native transaction");
+    }
+    if hex::encode(Sha256::digest(status(&root)?)) != bound.status_sha256 {
+        bail!("native transaction stale: dpkg status changed");
+    }
+    let steps = install_plan::preview_many_with_policy_options(
+        opts.cache, &root.join("var/lib/dpkg/status"), opts.apt_root,
+        &bound.requested, &bound.architecture, bound.max_packages, bound.include_recommends)?;
+    if steps != bound.steps { bail!("native plan changed since signing/policy resolution"); }
+    let trusted = package_provenance::prepare_exact(opts.cache, &steps, &bound.architecture)?;
+    if serde_json::to_value(&trusted.packages)? != serde_json::to_value(&bound.manifest.packages)? {
+        bail!("native artifact identities differ from signed repository");
+    }
+    let verified = artifact_store::verify(opts.transaction, opts.artifacts, opts.cache, &bound.architecture)?;
+    if verified.verified != bound.manifest.packages.len() || original != fs::read(opts.transaction)? {
+        bail!("native artifact verification or intent integrity failed");
+    }
+    fs::create_dir_all(opts.journal)?;
+    let journal = fs::canonicalize(opts.journal)?;
+    if journal == Path::new("/") || journal.starts_with(&root) {
+        bail!("native transaction journal must be outside rootfs");
+    }
+    let stages = journal.join("native-rootfs-stages");
+    fs::create_dir_all(&stages)?;
+    if !fs::symlink_metadata(&stages)?.file_type().is_dir() { bail!("staging root cannot be symlink"); }
+    let stage = stages.join(opts.id);
+    fs::create_dir(&stage).context("native stage exists; inspect previous attempt")?;
+    struct StageGuard(PathBuf);
+    impl Drop for StageGuard { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+    let _guard = StageGuard(stage.clone());
+    let names = sandbox_execution::stage_artifacts(&stage, opts.artifacts, &bound.manifest)?;
+    let stage = fs::canonicalize(stage)?;
+    let mut args = vec![
+        "-euc".into(), INSTALL_SCRIPT.into(), "rpt-native-rootfs".into(),
+        root.to_string_lossy().into_owned(), bound.status_sha256,
+        stage.to_string_lossy().into_owned(),
+    ];
+    args.extend(names.iter().map(|name| stage.join(name).to_string_lossy().into_owned()));
+    DryRunExecutor::new(journal, 1)?.submit_command(
+        opts.id.to_owned(), "/bin/sh".into(), args,
+        Duration::from_secs(opts.timeout_seconds), Duration::from_secs(5),
+    ).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn live_root_and_unmarked_tree_are_refused() {
+        assert!(rootfs(Path::new("/")).is_err());
+        assert!(rootfs(Path::new("/etc")).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(rootfs(dir.path()).is_err());
+    }
+    #[test]
+    fn native_script_revalidates_and_audits() {
+        for term in ["dpkg --root=", "dpkg-deb -f", "expected.tsv", "postflight version mismatch"] {
+            assert!(INSTALL_SCRIPT.contains(term));
+        }
+        assert!(!INSTALL_SCRIPT.contains("--force"));
+    }
+}
