@@ -128,6 +128,23 @@ Filename: pool/rpt-all-native-data_1.0_all.deb
 Size: 1
 Description: signed universal binary dependency
 
+Package: rpt-native-virtual-tool
+Version: 2.0
+Architecture: amd64
+Multi-Arch: foreign
+Depends: rpt-native-virtual-cap (>= 7.0)
+Filename: pool/rpt-native-virtual-tool_2.0_amd64.deb
+Size: 1
+Description: native tool requiring a versioned virtual capability
+
+Package: rpt-native-virtual-impl
+Version: 1.0
+Architecture: amd64
+Provides: rpt-native-virtual-cap (= 7.0)
+Filename: pool/rpt-native-virtual-impl_1.0_amd64.deb
+Size: 1
+Description: versioned native virtual implementation
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
@@ -223,6 +240,22 @@ Multi-Arch: foreign
 Filename: pool/rpt-all-native-data_1.0_all.deb
 Size: 1
 Description: signed universal binary dependency
+
+Package: rpt-native-virtual-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-native-virtual-tool (>= 2.0)
+Filename: pool/rpt-native-virtual-user_1.0_i386.deb
+Size: 1
+Description: foreign app needing a native virtual provider
+
+Package: rpt-native-virtual-decoy
+Version: 99.0
+Architecture: i386
+Provides: rpt-native-virtual-cap (= 99.0)
+Filename: pool/rpt-native-virtual-decoy_99.0_i386.deb
+Size: 1
+Description: foreign versioned virtual decoy
 
 Package: rpt-pair
 Version: 1.0
@@ -331,6 +364,32 @@ compare_plan() {
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
 }
+compare_plan native-virtual "$root/empty-status" rpt-native-virtual-user:i386
+grep -Fxq 'rpt-native-virtual-tool 2.0' "$root/rpt-native-virtual-selected"
+grep -Fxq 'rpt-native-virtual-impl 1.0' "$root/rpt-native-virtual-selected"
+grep -Fxq 'rpt-native-virtual-user:i386 1.0' "$root/rpt-native-virtual-selected"
+! grep -Fq 'rpt-native-virtual-decoy' "$root/rpt-native-virtual"
+test "$(wc -l <"$root/rpt-native-virtual-selected")" -eq 3
+# Installed status may provide a capability with no repository candidate;
+# its installed Provides version, not a newer repository index, is proof.
+cat >"$root/native-virtual-installed" <<'EOF'
+Package: rpt-native-vinstalled
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Provides: rpt-native-virtual-cap (= 7.0)
+Description: installed-only native virtual satisfier
+
+EOF
+compare_plan native-virtual-installed "$root/native-virtual-installed" rpt-native-virtual-user:i386
+test "$(wc -l <"$root/rpt-native-virtual-installed-selected")" -eq 2
+! grep -Fq 'rpt-native-virtual-impl' "$root/rpt-native-virtual-installed"
+# An older installed virtual capability is insufficient. Both solvers must
+# select the signed new provider rather than trust its unrelated binary version.
+sed 's/Provides: rpt-native-virtual-cap (= 7.0)/Provides: rpt-native-virtual-cap (= 6.0)/' \
+  "$root/native-virtual-installed" >"$root/native-virtual-outdated"
+compare_plan native-virtual-outdated "$root/native-virtual-outdated" rpt-native-virtual-user:i386
+grep -Fxq 'rpt-native-virtual-impl 1.0' "$root/rpt-native-virtual-outdated-selected"
 compare_plan native-predepends "$root/empty-status" rpt-pre-native-user:i386
 grep -Fxq 'rpt-pre-native-user:i386 1.0' "$root/rpt-native-predepends-selected"
 grep -Fxq 'rpt-pre-native-tool 2.0' "$root/rpt-native-predepends-selected"
@@ -482,4 +541,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS signed Multi-Arch recursive native Pre-Depends, ordered alternatives, all leaf and tamper refusal'
+echo 'PASS signed Multi-Arch native virtual Provides, Pre-Depends, ordered alternatives and tamper refusal'
