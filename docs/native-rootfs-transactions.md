@@ -71,6 +71,32 @@ A journaled and supervised command handles SIGINT/SIGTERM/timeouts, including
 process-group shutdown verification. On failure, the rootfs may be broken.
 Do not rerun blindly; retain the rootfs and journal for manual inspection.
 
+## Optional WSL2 smoke test (Ubuntu amd64)
+
+Run from the RPT repository in a **disposable Ubuntu WSL2 distro**, as an
+ordinary user (sudo is required for the separate guest filesystem):
+
+    bash tests/wsl-native-rootfs-smoke.sh 2>&1 | tee ~/rpt-native-wsl-test.log
+
+It uses `debootstrap` to create a separate Ubuntu rootfs, tests the signed
+`hello` installation, removal, reinstallation, guest `apt-mark` manual/auto,
+orphan autoremove and purge, and checks the **live WSL dpkg status SHA256** on
+both success and failure. Workspaces under `/tmp/rpt-native-wsl.*` are kept
+for inspection.
+
+On environments where `/tmp` is mounted `nodev`, `debootstrap` can emit
+a `test-dev-null: Permission denied` diagnostic even if the rootfs creation
+continues successfully. The script reports `nodev` when detectable and
+verifies the resulting rootfs; it does **not** remount the host or suppress
+the diagnostic. An unsuccessful bootstrap or failed guest checks still fail
+the test.
+
+The first real Ubuntu 26.04 `resolute` WSL2 run confirmed signature
+verification, downloaded archive integrity, native `hello` install/remove,
+and unchanged host dpkg status. The extended mark/autoremove/purge WSL
+sequence must pass independently; CI also tests it on Ubuntu and Debian
+guest roots.
+
 ## Scope and limitations
 
 - No Docker process is needed to *apply* the plan. The acceptance test

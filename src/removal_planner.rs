@@ -231,7 +231,7 @@ fn result(mode: &str, removed: &BTreeSet<InstalledKey>, blockers: BTreeSet<Strin
         removable: blockers.is_empty(),
         blockers: blockers.into_iter().collect(),
         executable: false,
-        warning: "Read-only candidate plan only. APT removal/auto-mark parity, maintainer scripts and dpkg execution not implemented.".into(),
+        warning: "Read-only removal intent (executable=false). Applying it requires a separate journaled, state-bound executor; full APT removal and autoremove parity is not guaranteed.".into(),
     }
 }
 
@@ -377,6 +377,8 @@ mod tests {
         let snapshot = remove_snapshot(status, "amd64", &["libpkg".into()], false).unwrap();
         assert!(!snapshot.removable);
         assert_eq!(snapshot.remove, ["libpkg:amd64".to_owned()]);
+        assert!(snapshot.warning.contains("journaled, state-bound executor"));
+        assert!(!snapshot.warning.contains("dpkg execution not implemented"));
         let autoremove = autoremove_snapshot(status, marked, "amd64").unwrap();
         assert!(autoremove.remove.is_empty());
         assert!(autoremove.removable);
