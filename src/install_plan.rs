@@ -2440,6 +2440,94 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).is_err());
     }
     #[test]
+    fn foreign_native_predepends_is_ordered_and_cycles_fail_closed() {
+        let mut app = item("foreign-app", "1", "host-tool (>= 2)");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "2", "");
+        tool.multi_arch = "foreign".into();
+        tool.pre_depends = "host-setup (>= 1)".into();
+        let setup = item("host-setup", "1", "");
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "host-setup".into(), architecture: "amd64".into() }, setup),
+        ]);
+        let empty = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).unwrap();
+        assert_eq!(plan.iter().map(|s| (s.package.as_str(), s.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+            ("host-setup", "amd64"), ("host-tool", "amd64"), ("foreign-app", "i386"),
+        ]);
+        // If Pre-Depends would require configuring a package that itself
+        // Depends on the still-unconfigured parent, refuse the cycle.
+        catalog.get_mut(&PackageKey {
+            name: "host-setup".into(), architecture: "amd64".into(),
+        }).unwrap().depends = "host-tool".into();
+        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+    }
+
+    #[test]
+    fn foreign_native_alternatives_backtrack_on_installed_conflict() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "1", "host-bad | host-good");
+        tool.multi_arch = "foreign".into();
+        let mut bad = item("host-bad", "1", "");
+        bad.conflicts = "legacy-service".into();
+        let good = item("host-good", "1", "");
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "host-bad".into(), architecture: "amd64".into() }, bad),
+            (PackageKey { name: "host-good".into(), architecture: "amd64".into() }, good),
+        ]);
+        let installed = BTreeMap::from([(
+            cache_query::InstalledKey {
+                name: "legacy-service".into(), architecture: "amd64".into(),
+            },
+            InstalledRelations { version: "1".into(), multi_arch: "no".into(),
+                ..Default::default() },
+        )]);
+        let plan = solve_catalog_foreign(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), "foreign-app:i386", 20, ("i386", "amd64"), &installed).unwrap();
+        assert_eq!(plan.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+            ["host-good", "host-tool", "foreign-app"]);
+        assert!(reject_foreign_negative_relations_with_native(
+            &catalog, &installed, &plan, "i386", Some("amd64"),
+        ).is_ok());
+    }
+
+    #[test]
+    fn native_owner_can_select_signed_universal_foreign_leaf() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "1", "shared-data");
+        tool.multi_arch = "foreign".into();
+        let mut data = item("shared-data", "1", "");
+        data.architecture = "all".into();
+        data.multi_arch = "foreign".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "shared-data".into(), architecture: "all".into() }, data),
+        ]);
+        let empty = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).unwrap();
+        assert_eq!(plan.iter().map(|s| (s.package.as_str(),s.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+                ("shared-data", "all"), ("host-tool", "amd64"), ("foreign-app", "i386"),
+            ]);
+        catalog.get_mut(&PackageKey {
+            name: "shared-data".into(), architecture: "all".into(),
+        }).unwrap().multi_arch = "no".into();
+        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+    }
+
+    #[test]
     fn foreign_preview_recurses_native_dependency_graph_by_owner_architecture() {
         let mut app = item("cross-app", "1", "native-tool (>= 2)");
         app.architecture = "i386".into();
