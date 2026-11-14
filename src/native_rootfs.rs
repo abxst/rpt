@@ -125,11 +125,15 @@ while IFS="$tab" read -r file package version arch; do
         echo "archive control mismatches signed plan" >&2; exit 1
     fi
 done < "$stage/expected.tsv"
-for archive in "$@"; do
-    dpkg --root="$root" --install -- "$archive"
-done
-dpkg --root="$root" --configure --pending
-dpkg --root="$root" --triggers-only --pending
+# If the verified plan has no .deb archives, this is an APT mark-only
+# transaction: never trigger dpkg configure/pending or any maintainer script.
+if [ "$#" -gt 0 ]; then
+    for archive in "$@"; do
+        dpkg --root="$root" --install -- "$archive"
+    done
+    dpkg --root="$root" --configure --pending
+    dpkg --root="$root" --triggers-only --pending
+fi
 if [ -n "$(dpkg --root="$root" --audit)" ]; then
     echo "rootfs dpkg postflight audit failed" >&2; exit 1
 fi
@@ -162,6 +166,17 @@ set --
 while IFS= read -r package; do
     if [ -n "$package" ]; then set -- "$@" "$package"; fi
 done < "$stage/manual-marks.txt"
+# Never allow a mark-only intent to mark an uninstalled or ambiguous root.
+# The policy replan and snapshot binding already enforce exact candidate
+# selection; verify the guest dpkg state again before applying marks.
+for package in "$@"; do
+    installed="$(dpkg-query --admindir="$root/var/lib/dpkg" -W \
+        '-f=${Status}' "$package" 2>/dev/null)" || installed=""
+    case "$installed" in
+        "install ok installed"|"hold ok installed") ;;
+        *) echo "native manual root is not installed: $package" >&2; exit 1 ;;
+    esac
+done
 if [ "$#" -gt 0 ]; then
     chroot "$root" /usr/bin/apt-mark manual "$@"
 fi
@@ -177,6 +192,12 @@ if [ -n "$(dpkg --root="$root" --audit)" ]; then
 fi
 "#;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    Installed,
+    MarksOnly,
+}
+
 pub struct Apply<'a> {
     pub rootfs: &'a Path,
     pub transaction: &'a Path,
@@ -190,7 +211,7 @@ pub struct Apply<'a> {
 
 /// Failure leaves the rootfs and journal for operator inspection; no
 /// filesystem rollback is implied by successful process supervision.
-pub async fn apply(opts: Apply<'_>) -> Result<()> {
+pub async fn apply(opts: Apply<'_>) -> Result<ApplyOutcome> {
     if !valid_id(opts.id) || !(10..=3600).contains(&opts.timeout_seconds) {
         bail!("invalid native transaction ID or timeout");
     }
@@ -202,12 +223,19 @@ pub async fn apply(opts: Apply<'_>) -> Result<()> {
     let original = fs::read(opts.transaction)?;
     let bound: BoundTransaction = serde_json::from_slice(&original)?;
     if bound.schema_version != 1 || bound.session != root_identity(&root)
-        || bound.manifest.executable || bound.steps.is_empty()
-        || bound.manifest.packages.is_empty() {
-        bail!("wrong rootfs, empty or unsupported signed native transaction");
+        || bound.manifest.executable
+        || bound.steps.is_empty() != bound.manifest.packages.is_empty() {
+        bail!("wrong rootfs, inconsistent or unsupported native transaction");
     }
-    if hex::encode(Sha256::digest(status(&root)?)) != bound.status_sha256 {
+    let mark_only = bound.steps.is_empty();
+    let guest_status = status(&root)?;
+    if hex::encode(Sha256::digest(&guest_status)) != bound.status_sha256 {
         bail!("native transaction stale: dpkg status changed");
+    }
+    if mark_only {
+        // Reject empty/ambiguous/uninstalled request roots. The signed
+        // solver must additionally prove that no package changes are due.
+        crate::sandbox_session::resolve_mark_packages(&guest_status, &bound.requested)?;
     }
     let steps = install_plan::preview_many_with_policy_options(
         opts.cache, &root.join("var/lib/dpkg/status"), opts.apt_root,
@@ -234,7 +262,15 @@ pub async fn apply(opts: Apply<'_>) -> Result<()> {
     struct StageGuard(PathBuf);
     impl Drop for StageGuard { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
     let _guard = StageGuard(stage.clone());
-    let names = sandbox_execution::stage_artifacts(&stage, opts.artifacts, &bound.manifest)?;
+    let names = if mark_only {
+        // No artifacts are needed and callers need not create a dummy cache
+        // directory. Still create the expected empty transcript for the
+        // same script, status preflight, mark checks, and journal.
+        fs::write(stage.join("expected.tsv"), b"")?;
+        Vec::new()
+    } else {
+        sandbox_execution::stage_artifacts(&stage, opts.artifacts, &bound.manifest)?
+    };
     if !root.join("usr/bin/apt-mark").exists() {
         bail!("native disposable rootfs does not include apt-mark");
     }
@@ -252,7 +288,8 @@ pub async fn apply(opts: Apply<'_>) -> Result<()> {
     DryRunExecutor::new(journal, 1)?.submit_command(
         opts.id.to_owned(), "/bin/sh".into(), args,
         Duration::from_secs(opts.timeout_seconds), Duration::from_secs(5),
-    ).await
+    ).await?;
+    Ok(if mark_only { ApplyOutcome::MarksOnly } else { ApplyOutcome::Installed })
 }
 
 
@@ -490,6 +527,14 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), "lib-dep1\napp\n");
         assert!(write_mark_targets(&file, &["bad\nname".into()]).is_err());
         assert!(write_mark_targets(&file, &["bad_name".into()]).is_err());
+    }
+
+    #[test]
+    fn mark_only_install_script_never_unconditionally_configures_dpkg() {
+        assert!(INSTALL_SCRIPT.contains("if [ \"$#\" -gt 0 ]; then\n    for archive"));
+        assert!(INSTALL_SCRIPT.contains("native manual root is not installed"));
+        assert!(INSTALL_SCRIPT.contains("guest APT mark state changed before install"));
+        assert!(INSTALL_SCRIPT.contains("native APT marking unexpectedly changed dpkg state"));
     }
 
     #[test]
