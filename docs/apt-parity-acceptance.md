@@ -261,10 +261,31 @@ The test runs against the same signed repository, uses `apt-get -s`, and
 does not mutate the host dpkg database.
 
 This closes a **specific** Gate D gap. It does not complete Gate D:
-cross-root backtracking, broader Multi-Arch behavior, Recommends selection,
+broader cross-root dependency search, Multi-Arch behavior, Recommends selection,
 autoremove parity, holds/pinning corner cases, conffiles and full APT solver
 heuristics still need differential evidence. Host dpkg execution remains
 disabled.
+
+### Explicit root lookahead during alternative backtracking
+
+Joint batch planning now treats every *concrete, explicitly requested root*
+as mandatory before resolving the first package. When an earlier root has
+`Depends: first | second`, and the first option conflicts with a later
+explicit root, the bounded resolver can reject that branch and select the
+next viable dependency. It checks both forward and reverse versioned
+`Conflicts`/`Breaks`, as well as rejecting matching `Replaces`, using
+the verified policy-selected metadata for both packages. The earlier
+single-root preference remains unchanged. Ordered choices are bounded
+by the existing 4,096 branch-attempt budget.
+
+A signed same-repository APT fixture compares the exact package/version
+set for both joint-root argument orders and requires preservation of both
+requested roots. Unit tests exercise reverse versioned `Breaks`,
+an out-of-range `Breaks`, and impossible `Replaces`/`Conflicts`
+combinations. This is **not a complete multi-root SAT resolver**:
+globally nested alternative decisions, removal/replacement, foreign
+co-installation, installed virtual providers and full APT heuristics still
+need further validation. No production dpkg execution is authorized.
 
 ## Resolver and policy regression milestone
 

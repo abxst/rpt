@@ -402,6 +402,19 @@ The read-only native dependency solver now uses exact `(name, architecture)` key
 
 RPT now preserves the Debian `Replaces` control field from repository metadata and installed dpkg status. When a planned binary declares a matching versioned or unversioned `Replaces` relationship with another installed (including foreign-architecture) or simultaneously staged binary, or a reverse installed relationship exists, dependency planning refuses that unsafe file-ownership transfer. Unsupported `Replaces` syntax also fails closed. Full dpkg file ownership checks (`/var/lib/dpkg/info/*.list`), `Conflicts` + `Replaces` transitions, overwrite rules and actual package transactions are **not implemented**; this guard prevents claiming an unsafe plan is installable.
 
+### Candidate-aware joint-root alternative lookahead (read-only)
+
+A batch install planner now treats every concrete explicitly requested package
+as mandatory **before** selecting dependency alternatives. If an earlier
+root prefers a dependency that `Conflicts`/`Breaks` with a later requested
+root, the bounded solver can backtrack to another compatible alternative.
+Matching `Replaces` is refused without file-ownership verification. Signed
+APT/RPT simulations compare the exact selected package/version set for both
+root argument orders; the policy candidate is verified before planning.
+
+This is a scoped resolver improvement, **not** full multi-root search, host
+package execution or complete APT compatibility.
+
 ### Native disposable-rootfs install/upgrade (development only)
 
 The `native-rootfs-prepare-transaction` and

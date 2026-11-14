@@ -192,6 +192,36 @@ Filename: pool/rpt-alpha_1.0_all.deb
 Size: 1
 Description: second declared dependency but alphabetically first
 
+Package: rpt-joint-app
+Version: 1.0
+Architecture: all
+Depends: rpt-joint-first | rpt-joint-fallback
+Filename: pool/rpt-joint-app_1.0_all.deb
+Size: 1
+Description: joint requested-root dependency fixture
+
+Package: rpt-joint-first
+Version: 1.0
+Architecture: all
+Conflicts: rpt-joint-blocker
+Filename: pool/rpt-joint-first_1.0_all.deb
+Size: 1
+Description: preferred dependency incompatible with requested root
+
+Package: rpt-joint-fallback
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-joint-fallback_1.0_all.deb
+Size: 1
+Description: safe alternative dependency
+
+Package: rpt-joint-blocker
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-joint-blocker_1.0_all.deb
+Size: 1
+Description: explicitly requested mandatory root
+
 Package: rpt-soft-app
 Version: 1.0
 Architecture: all
@@ -928,6 +958,38 @@ if ./target/debug/rpt plan-install-batch-policy --cache "$root/rpt-cache" \
   echo "RPT unexpectedly accepted jointly conflicting roots" >&2; exit 1
 fi
 echo "PASS signed APT/RPT differential: Debian ordered alternatives and joint multi-root candidate parity"
+
+# A later mandatory root must constrain earlier alternatives. APT's simulated
+# package/version set is authoritative for both argument orders; neither
+# requested root may be dropped to preserve the preferred dependency.
+for ordering in app-first blocker-first; do
+  if [[ "$ordering" == app-first ]]; then
+    roots=(rpt-joint-app rpt-joint-blocker)
+  else
+    roots=(rpt-joint-blocker rpt-joint-app)
+  fi
+  apt-get "${opts[@]}" -s -y install "${roots[@]}" \
+    >"$root/apt-joint-lookahead"
+  ./target/debug/rpt plan-install-batch-policy \
+    --cache "$root/rpt-cache" --status "$root/apt/status" \
+    --apt-root "$root/rpt-apt" --architecture "$arch" \
+    "${roots[@]}" >"$root/rpt-joint-lookahead"
+  sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-joint-lookahead" \
+    | LC_ALL=C sort -u >"$root/apt-joint-lookahead-versions"
+  sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-joint-lookahead" \
+    | LC_ALL=C sort -u >"$root/rpt-joint-lookahead-versions"
+  test -s "$root/apt-joint-lookahead-versions"
+  diff -u "$root/apt-joint-lookahead-versions" "$root/rpt-joint-lookahead-versions"
+  for pkg in rpt-joint-app rpt-joint-blocker rpt-joint-fallback; do
+    grep -Fxq "$pkg 1.0" "$root/apt-joint-lookahead-versions"
+  done
+  if grep -Fq "rpt-joint-first " "$root/apt-joint-lookahead-versions"; then
+    echo "APT chose an incompatible package despite the explicit blocker root" >&2
+    exit 1
+  fi
+done
+echo "PASS signed APT/RPT mandatory-root dependency backtracking, both orders"
+
 
 # Compare APT Install-Recommends=true/false with an explicit RPT preview
 # mode. Both must select the same names and versions from signed metadata.

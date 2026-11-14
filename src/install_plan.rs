@@ -443,6 +443,10 @@ struct Solver<'a> {
     architecture: String,
     branch_budget: Rc<Cell<usize>>,
     include_recommends: bool,
+    /// Explicit concrete roots required by this entire batch. These are
+    /// constraints even before the solver reaches a later root. A dependency
+    /// alternative must not defeat a root the user explicitly requested.
+    requested_roots: BTreeSet<PackageKey>,
 }
 
 impl Solver<'_> {
@@ -680,6 +684,38 @@ impl Solver<'_> {
         Ok(())
     }
 
+    /// Look ahead to every mandatory root in a joint install plan. APT can
+    /// backtrack to another dependency alternative when the first choice
+    /// conflicts with a later explicit root. Without this check the first
+    /// root's dependency branch gets committed before the later root is
+    /// visited, and the entire batch fails even when a safe option exists.
+    ///
+    /// This uses exact policy-selected candidate metadata, not a guess based
+    /// on installed package names. Conflicts/Breaks and Replaces still fail
+    /// closed; the engine never interprets this as permission to remove or
+    /// replace a package or skip a root.
+    fn check_requested_roots(&self, key: &PackageKey, candidate: &PackageSummary) -> Result<()> {
+        for root_key in &self.requested_roots {
+            if root_key == key { continue; }
+            let root = self.catalog.get(root_key)
+                .context("requested root lacks candidate metadata")?;
+            let conflicts = relations_hit(&candidate.conflicts, &root.name, &root.version, &root.provides)?
+                || relations_hit(&candidate.breaks, &root.name, &root.version, &root.provides)?
+                || relations_hit(&root.conflicts, &candidate.name, &candidate.version, &candidate.provides)?
+                || relations_hit(&root.breaks, &candidate.name, &candidate.version, &candidate.provides)?;
+            if conflicts {
+                bail!("Conflicts/Breaks between {} and required root {}",
+                    candidate.name, root.name);
+            }
+            if replaces_hit(&candidate.replaces, &root.name, &root.version)?
+                || replaces_hit(&root.replaces, &candidate.name, &candidate.version)? {
+                bail!("Replaces between {} and required root {} needs file ownership validation",
+                    candidate.name, root.name);
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_concrete(&mut self, key: &PackageKey, requested: &Requirement) -> Result<()> {
         if self.done.contains(key) {
             let current = self.catalog.get(key)
@@ -704,6 +740,9 @@ impl Solver<'_> {
         if !satisfies(&current.version, requested)? {
             bail!("repository version {} does not satisfy dependency {}", current.version, requested.name);
         }
+        // Reject branches incompatible with a later explicit batch root
+        // *before* this branch can be committed by ordered backtracking.
+        self.check_requested_roots(key, current)?;
         // Ancestors are not yet in self.plan while resolving their dependencies.
         // Reject incompatible branches here so alternative backtracking can
         // select a viable sibling rather than reporting false ambiguity.
@@ -1184,7 +1223,13 @@ fn solve_catalog_many_options(
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         architecture: architecture.to_owned(),
         branch_budget: Rc::new(Cell::new(4096)), include_recommends,
+        requested_roots: BTreeSet::new(),
     };
+    for package in packages {
+        if let Some(key) = solver.key_for(package)? {
+            solver.requested_roots.insert(key);
+        }
+    }
     for package in packages {
         solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
     }
@@ -1479,6 +1524,7 @@ mod tests {
             catalog: &keyed, installed: &keyed_installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
+            requested_roots: BTreeSet::new(),
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -1996,6 +2042,72 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             ["second", "fallback", "app"]);
     }
     #[test]
+    fn future_explicit_root_forces_fallback_even_when_requested_last() {
+        let mut first = item("first", "1", "");
+        first.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), first),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        for roots in [
+            vec!["app".into(), "blocker".into()],
+            vec!["blocker".into(), "app".into()],
+        ] {
+            let plan = solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+                &roots, 20, "amd64").unwrap();
+            let names = plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>();
+            assert!(names.contains(&"app") && names.contains(&"blocker"));
+            assert!(names.contains(&"fallback") && !names.contains(&"first"));
+            assert_eq!(names.len(), 3);
+        }
+        // A single root still prefers its first declared dependency.
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["first", "app"]);
+    }
+
+    #[test]
+    fn joint_root_lookahead_checks_reverse_breaks_and_version_constraints() {
+        let mut blocker = item("blocker", "3", "");
+        blocker.breaks = "first (>= 2)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), item("first", "2", "")),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("blocker".into(), blocker.clone()),
+        ]));
+        let roots = ["app".into(), "blocker".into()];
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &roots, 20, "amd64").unwrap();
+        assert!(plan.iter().any(|step| step.package == "fallback"));
+        blocker.breaks = "first (>> 2)".into();
+        let mut harmless = catalog;
+        harmless.insert(PackageKey { name: "blocker".into(), architecture: "amd64".into() }, blocker);
+        let plan = solve_catalog_many(&harmless, &BTreeMap::new(), &BTreeMap::new(),
+            &roots, 20, "amd64").unwrap();
+        assert!(plan.iter().any(|step| step.package == "first"));
+    }
+
+    #[test]
+    fn joint_root_lookahead_does_not_discard_roots_or_authorize_replaces() {
+        let mut first = item("first", "1", "");
+        first.replaces = "blocker".into();
+        let mut fallback = item("fallback", "1", "");
+        fallback.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), first),
+            ("fallback".into(), fallback),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        assert!(solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["app".into(), "blocker".into()], 20, "amd64").is_err());
+    }
+
+    #[test]
     fn backtracks_failed_branch_and_restores_full_partial_plan() {
         let catalog = BTreeMap::from([
             ("app".into(), item("app", "1", "bad | good")),
@@ -2172,6 +2284,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             catalog: &keyed, installed: &binary_installed, installed_relations: &binary_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
+            requested_roots: BTreeSet::new(),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
