@@ -817,7 +817,7 @@ Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\
         assert!(audit_transition_with_removals(status, "amd64",
             &steps, &trusted, &[]).is_err());
         let ok = audit_transition_with_removals(status, "amd64",
-            &steps, &trusted, &[old.clone()]).unwrap();
+            &steps, &trusted, std::slice::from_ref(&old)).unwrap();
         assert_eq!(ok.removed_binaries, 1);
         assert_eq!(ok.installed_before, 2);
         assert_eq!(ok.installed_after, 1);
