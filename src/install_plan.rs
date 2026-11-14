@@ -2376,6 +2376,107 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
     }
 
     #[test]
+    fn multiple_virtual_providers_choose_unique_conflict_free_candidate() {
+        let mut bad = item("badprovider", "1", "");
+        bad.provides = "virtual-service (= 2)".into();
+        bad.conflicts = "blocker".into();
+        let mut good = item("goodprovider", "1", "");
+        good.provides = "virtual-service (= 2)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service (>= 2)")),
+            ("badprovider".into(), bad),
+            ("goodprovider".into(), good),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        for roots in [
+            vec!["app".into(), "blocker".into()],
+            vec!["blocker".into(), "app".into()],
+        ] {
+            let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+                &BTreeMap::new(), &roots, 30, "amd64").unwrap();
+            let names = plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>();
+            assert!(names.contains(&"app") && names.contains(&"blocker"));
+            assert!(names.contains(&"goodprovider") && !names.contains(&"badprovider"));
+            assert_eq!(names.len(), 3);
+        }
+        // Without blocker both providers work; refuse arbitrary lexical ranking.
+        assert!(solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["app".into()], 30, "amd64")
+            .unwrap_err().to_string().contains("multiple viable providers"));
+    }
+
+    #[test]
+    fn multiple_virtual_providers_backtrack_on_transitive_failure() {
+        let mut bad = item("badprovider", "1", "helper, nonexistent");
+        bad.provides = "virtual-service".into();
+        let mut good = item("goodprovider", "1", "");
+        good.provides = "virtual-service".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service")),
+            ("badprovider".into(), bad),
+            ("goodprovider".into(), good),
+            ("helper".into(), item("helper", "1", "")),
+        ]));
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["app".into()], 30, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["goodprovider", "app"]);
+    }
+
+    #[test]
+    fn provider_version_and_foreign_architecture_remain_isolated() {
+        let mut old = item("oldprovider", "999", "");
+        old.provides = "virtual-service (= 1)".into();
+        let mut good = item("goodprovider", "1", "");
+        good.provides = "virtual-service (= 3)".into();
+        let mut foreign = item("foreignprovider", "4", "");
+        foreign.provides = "virtual-service (= 3)".into();
+        foreign.architecture = "i386".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service (>= 2)")),
+            ("oldprovider".into(), old),
+            ("goodprovider".into(), good),
+            ("foreignprovider".into(), foreign),
+        ]));
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["app".into()], 30, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["goodprovider", "app"]);
+    }
+
+    #[test]
+    fn bounded_virtual_provider_enumeration_fails_closed() {
+        let mut catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service")),
+        ]);
+        for index in 0..33 {
+            let name = format!("provider{index:02}");
+            let mut provider = item(&name, "1", "");
+            provider.provides = "virtual-service".into();
+            catalog.insert(name, provider);
+        }
+        assert!(solve(&catalog, &BTreeMap::new(), "app")
+            .unwrap_err().to_string().contains("32"));
+    }
+
+    #[test]
+    fn direct_virtual_root_and_ambiguous_predepends_remain_fail_closed() {
+        let mut one = item("providerone", "1", "");
+        one.provides = "virtual-service".into();
+        let mut two = item("providertwo", "1", "");
+        two.provides = "virtual-service".into();
+        let mut app = item("app", "1", "");
+        app.pre_depends = "virtual-service".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), app),
+            ("providerone".into(), one),
+            ("providertwo".into(), two),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "virtual-service").is_err());
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+    }
+
+    #[test]
     fn single_virtual_provider_with_explicit_version() {
         let mut provider = item("provider", "9.0", "");
         provider.provides = "virtual-api (= 2.1)".into();
