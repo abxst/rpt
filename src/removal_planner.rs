@@ -286,7 +286,7 @@ pub fn remove_snapshot(status: &[u8], native: &str, requested: &[String], cascad
     }
     Ok(result("remove", &removed, removal_blockers(&installed, &removed, native)?))
 }
-fn auto_marks_from_bytes(bytes: &[u8], installed: &BTreeMap<InstalledKey, InstalledPackage>) -> Result<BTreeSet<InstalledKey>> {
+fn auto_marks_from_bytes(bytes: &[u8], installed: &BTreeMap<InstalledKey, InstalledPackage>, native: &str) -> Result<BTreeSet<InstalledKey>> {
     if bytes.len() > 64 * 1024 * 1024 { bail!("APT extended states exceed 64 MiB"); }
     let mut auto = BTreeSet::new();
     let mut seen = BTreeSet::new();
@@ -302,7 +302,21 @@ fn auto_marks_from_bytes(bytes: &[u8], installed: &BTreeMap<InstalledKey, Instal
             }
         };
         checked_arch(&arch)?;
-        let key = InstalledKey { name: name.into(), architecture: arch };
+        let mut key = InstalledKey { name: name.into(), architecture: arch };
+        // apt-mark stores Architecture: all binaries under the configured
+        // *native* architecture in extended_states. dpkg status still records
+        // Architecture: all; without this narrowly scoped projection we would
+        // silently treat genuine auto-installed packages as manual.
+        if key.architecture == native && !installed.contains_key(&key) {
+            let independent = InstalledKey { name: name.into(), architecture: "all".into() };
+            if installed.contains_key(&independent) {
+                if installed.keys().any(|other|
+                    other.name == name && other.architecture != "all") {
+                    bail!("ambiguous APT native/all auto mark for {name}");
+                }
+                key = independent;
+            }
+        }
         if !seen.insert(key.clone()) { bail!("duplicate extended state: {}", key_label(&key)); }
         match record.field("Auto-Installed").unwrap_or("0") {
             "1" if installed.contains_key(&key) => { auto.insert(key); },
@@ -325,7 +339,7 @@ pub fn autoremove_snapshot(status: &[u8], extended_states: &[u8], native: &str) 
     checked_arch(native)?;
     let installed = read_installed_bytes(status)?;
     ensure_initial_dependencies(&installed, native)?;
-    let auto = auto_marks_from_bytes(extended_states, &installed)?;
+    let auto = auto_marks_from_bytes(extended_states, &installed, native)?;
     let mut keep = BTreeSet::new();
     let mut queue = VecDeque::new();
     for (key, entry) in &installed {
@@ -395,6 +409,27 @@ mod tests {
         assert!(plan.removable);
         assert!(!plan.executable);
         fs::remove_file(status).unwrap(); fs::remove_file(states).unwrap();
+    }
+    #[test]
+    fn apt_mark_native_architecture_maps_only_unambiguous_all_binaries() {
+        let status = b"Package: commonpkg\nArchitecture: all\nVersion: 1\nStatus: install ok installed\n\n\
+Package: nativepkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let native_mark = b"Package: commonpkg\nArchitecture: amd64\nAuto-Installed: 1\n\n";
+        let plan = autoremove_snapshot(status, native_mark, "amd64").unwrap();
+        assert!(plan.removable);
+        assert_eq!(plan.remove, vec!["commonpkg:all"]);
+        let foreign_mark = b"Package: commonpkg\nArchitecture: i386\nAuto-Installed: 1\n\n";
+        assert!(autoremove_snapshot(status, foreign_mark, "amd64").unwrap().remove.is_empty());
+        let duplicate = b"Package: commonpkg\nArchitecture: amd64\nAuto-Installed: 1\n\n\
+Package: commonpkg\nArchitecture: all\nAuto-Installed: 1\n\n";
+        assert!(autoremove_snapshot(status, duplicate, "amd64").is_err());
+    }
+    #[test]
+    fn native_all_alias_rejects_ambiguous_installed_multiarch() {
+        let status = b"Package: commonpkg\nArchitecture: all\nVersion: 1\nStatus: install ok installed\n\n\
+Package: commonpkg\nArchitecture: i386\nVersion: 1\nStatus: install ok installed\n\n";
+        let mark = b"Package: commonpkg\nArchitecture: amd64\nAuto-Installed: 1\n\n";
+        assert!(autoremove_snapshot(status, mark, "amd64").is_err());
     }
     #[test]
     fn versioned_virtual_provides_are_not_provider_versions() {
