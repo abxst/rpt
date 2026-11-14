@@ -297,6 +297,40 @@ removal/upgrade and live-host dpkg. Debian `:native` is primarily
 a build-dependency qualifier; binary install preview continues to
 refuse it rather than treating it as the foreign request architecture.
 
+## Cross-architecture virtual Provides, read-only foreign policy (M2.6.6)
+
+The explicit `plan-install-foreign-policy` can now resolve a *virtual*
+dependency owned by an i386 foreign root using a **new signed native amd64
+provider** only when its Multi-Arch declaration authorizes the crossing.
+For unqualified `Depends: capability (>= X)`, the provider must carry
+`Multi-Arch: foreign`; any provided virtual interface inherits this
+contract. An explicit `Depends: capability:any (>= X)` instead requires
+`Multi-Arch: allowed`. Exact virtual `Provides: capability (= Y)`
+versions are compared against the constraint, not against the binary
+provider's unrelated `Version`.
+
+The planner first prefers a matching same-architecture virtual provider,
+then tries the bounded cross-architecture native provider subset. All new
+native provider binaries and their native dependency graphs must pass
+independent authenticated index and APT candidate-policy validation; no
+package is renamed or treated as belonging to a different architecture.
+An installed native virtual provider is accepted only from the exact
+`Provides`, `Version` and `Multi-Arch` declared by installed dpkg
+status, without implicit upgrade. An incorrect Multi-Arch contract or an
+old virtual capability version is insufficient. Ambiguous multiple
+viable new providers remain rejected pending APT ranking equivalence.
+
+CI's isolated signed APT/RPT fixtures verify ordinary and `:any`
+cross-architecture virtual requirements; an unsatisfying i386 provider
+with a misleading high package version; and installed-only native
+virtual providers with wrong-contract and obsolete-version refusal.
+
+**Still not production parity:** cross-architecture removal/upgrade,
+complex virtual provider ranking, foreign explicit architecture suffixes,
+multi-provider alternatives involving removals, arbitrary native/all
+co-installation transactions, and execution on the live host. The
+foreign planner remains a read-only diagnostic.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
