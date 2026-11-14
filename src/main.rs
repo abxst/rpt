@@ -1155,10 +1155,11 @@ async fn execute(cli: Cli) -> Result<()> {
             max_removals, automatic, remove, output,
         } => {
             let mode = if automatic { "automatic" } else { "explicit" };
-            let intent = rpt::native_full_upgrade::prepare(
-                &rootfs, &cache, &apt_root, &architecture, mode,
-                &remove, max_roots, max_packages, max_removals,
-            ).context(ErrorCategory::System)?;
+            let intent = rpt::native_full_upgrade::prepare(rpt::native_full_upgrade::Prepare {
+                root: &rootfs, cache: &cache, apt_root: &apt_root,
+                architecture: &architecture, mode, requested: &remove,
+                max_roots, max_packages, max_removals,
+            }).context(ErrorCategory::System)?;
             let count = intent.manifest.packages.len();
             let removals = intent.selected_removals.len();
             tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
