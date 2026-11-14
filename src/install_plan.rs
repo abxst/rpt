@@ -991,6 +991,15 @@ impl Solver<'_> {
             bail!("dependency plan exceeded maximum package count");
         }
         self.visiting.insert(key.clone());
+        // Debian :native is anchored to the host's native architecture, not
+        // the foreign root's architecture. Until cross-architecture qualifier
+        // resolution is implemented, explicitly refuse rather than interpret
+        // it as :i386 in an i386 preview.
+        if self.external_native.is_some()
+            && (current.depends.contains(":native")
+                || current.pre_depends.contains(":native")) {
+            bail!("foreign preview does not support :native dependencies");
+        }
         let dependency_arch = if current.architecture == "all" {
             self.architecture.clone()
         } else {
@@ -2333,6 +2342,19 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         app.depends = "native-tool:i386 (>= 2)".into();
         assert!(solve_catalog_foreign(&build(tool.clone(), app.clone()),
             &BTreeMap::new(), &BTreeMap::new(), "foreign-user:i386", 20,
+            ("i386", "amd64"), &no_installed).is_err());
+        // :native cannot be treated as the foreign target's own arch.
+        // A foreign candidate of the same name must not make it seem valid.
+        let mut foreign_tool = item("native-tool", "2", "");
+        foreign_tool.architecture = "i386".into();
+        let mut native_qualified_app = item("foreign-user", "1", "native-tool:native");
+        native_qualified_app.architecture = "i386".into();
+        let native_qualified = test_keyed(&BTreeMap::from([
+            ("foreign-user".into(), native_qualified_app),
+            ("native-tool".into(), foreign_tool),
+        ]));
+        assert!(solve_catalog_foreign(&native_qualified, &BTreeMap::new(),
+            &BTreeMap::new(), "foreign-user:i386", 20,
             ("i386", "amd64"), &no_installed).is_err());
         // :any requires allowed, not foreign; it may still select an
         // authenticated native package if the declaration is correct.
