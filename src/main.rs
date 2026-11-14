@@ -406,6 +406,8 @@ enum Command {
         #[arg(long)] id: String,
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        /// Opt-in full-tree checkpoint before APT state change.
+        #[arg(long)] checkpoint_rootfs: Option<PathBuf>,
         #[arg(value_parser = ["auto", "manual"])] mode: String,
         #[arg(required = true)] packages: Vec<String>,
     },
@@ -465,6 +467,8 @@ enum Command {
         #[arg(long, default_value = "/")] apt_root: PathBuf,
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        /// Opt-in: create a verified full-tree checkpoint BEFORE mutation.
+        #[arg(long)] checkpoint_rootfs: Option<PathBuf>,
     },
     /// Create a verified, copy-based checkpoint of a clean disposable guest.
     /// Holds the cooperative transaction journal lock; never snapshots /.
@@ -498,6 +502,8 @@ enum Command {
         #[arg(long, default_value_t = false)] cascade: bool,
         #[arg(long, default_value_t = false)] purge: bool,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        /// Opt-in full-tree checkpoint before remove/purge.
+        #[arg(long)] checkpoint_rootfs: Option<PathBuf>,
         #[arg(required = true)] packages: Vec<String>,
     },
     /// Mark auto/manual using APT inside a marked disposable native rootfs.
@@ -516,6 +522,8 @@ enum Command {
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        /// Opt-in full-tree checkpoint before a nonempty autoremove.
+        #[arg(long)] checkpoint_rootfs: Option<PathBuf>,
     },
     /// Apply a previously bound, authenticated install/upgrade only inside Docker.
     SandboxSessionApplyTransaction {
@@ -1036,11 +1044,13 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::NativeRootfsApplyTransaction {
             rootfs, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds,
+            checkpoint_rootfs,
         } => {
             let outcome = rpt::native_rootfs::apply(rpt::native_rootfs::Apply {
                 rootfs: &rootfs, id: &id, transaction: &transaction,
                 artifacts: &artifacts, cache: &cache, apt_root: &apt_root,
                 journal: &journal_dir, timeout_seconds,
+                checkpoint_rootfs: checkpoint_rootfs.as_deref(),
             }).await.context(ErrorCategory::System)?;
             match outcome {
                 rpt::native_rootfs::ApplyOutcome::Installed =>
@@ -1074,26 +1084,32 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::NativeRootfsRemovePlanned {
             rootfs, id, journal_dir, architecture, cascade, purge, timeout_seconds, packages,
+            checkpoint_rootfs,
         } => {
             let result = rpt::native_rootfs::remove_planned(rpt::native_rootfs::Remove {
                 rootfs: &rootfs, journal: &journal_dir, id: &id,
                 architecture: &architecture, packages: &packages,
                 cascade, purge, timeout_seconds,
+                checkpoint_rootfs: checkpoint_rootfs.as_deref(),
             }).await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             println!("Native disposable-rootfs {} complete; live host dpkg untouched.",
                 if purge { "purge" } else { "removal" });
         }
-        Command::NativeRootfsMark { rootfs, id, journal_dir, timeout_seconds, mode, packages } => {
-            rpt::native_rootfs::mark(&rootfs, &journal_dir, &id, &mode,
-                &packages, timeout_seconds).await.context(ErrorCategory::System)?;
+        Command::NativeRootfsMark {
+            rootfs, id, journal_dir, timeout_seconds, mode, packages, checkpoint_rootfs,
+        } => {
+            rpt::native_rootfs::mark_with_checkpoint(&rootfs, &journal_dir, &id, &mode,
+                &packages, timeout_seconds, checkpoint_rootfs.as_deref())
+                .await.context(ErrorCategory::System)?;
             println!("Native rootfs APT {mode} marks applied and verified; live host unchanged.");
         }
         Command::NativeRootfsAutoremovePlanned {
-            rootfs, id, journal_dir, architecture, timeout_seconds,
+            rootfs, id, journal_dir, architecture, timeout_seconds, checkpoint_rootfs,
         } => {
-            let result = rpt::native_rootfs::autoremove_planned(
+            let result = rpt::native_rootfs::autoremove_planned_with_checkpoint(
                 &rootfs, &journal_dir, &id, &architecture, timeout_seconds,
+                checkpoint_rootfs.as_deref(),
             ).await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             println!("Native disposable-rootfs autoremove complete; live host dpkg untouched.");
