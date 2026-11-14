@@ -21,7 +21,8 @@ cleanup() {
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
   if [[ -d "$root" && ! -L "$root" && "$root" == /tmp/rpt-signed.* ]]; then
     sudo rm -rf -- "$root/native-guest" "$root/native-journal" \
-      "$root/native-mark-guest" "$root/native-mark-journal"
+      "$root/native-mark-guest" "$root/native-mark-journal" \
+      "$root/native-checkpoint" "$root/native-restored"
   fi
   rm -rf "$root"
 }
