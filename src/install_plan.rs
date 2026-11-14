@@ -1087,9 +1087,14 @@ pub fn preview_explicit_architecture_with_policy(
             if step.architecture != foreign_architecture && step.architecture != "all" {
                 bail!("foreign policy preview cannot stage a native binary");
             }
-            if !validated.contains(&PackageKey {
+            let identity = PackageKey {
                 name: step.package.clone(), architecture: step.architecture.clone(),
-            }) {
+            };
+            if step.architecture == "all"
+                && catalog.get(&identity).is_none_or(|item| item.multi_arch != "foreign") {
+                bail!("foreign dependency on Architecture: all requires Multi-Arch: foreign");
+            }
+            if !validated.contains(&identity) {
                 bail!("foreign dependency was not policy-validated");
             }
         }
