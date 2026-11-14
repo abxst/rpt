@@ -224,6 +224,8 @@ jobs:
         run: bash tests/removal-planner-e2e.sh ./target/debug/rpt
       - name: APT/RPT remove and autoremove simulator differential (unprivileged)
         run: bash tests/apt-removal-autoremove-differential.sh ./target/debug/rpt
+      - name: Explicit foreign-architecture policy CLI rejects invalid scope (unprivileged)
+        run: bash tests/foreign-policy-cli.sh ./target/debug/rpt
       - name: Release build
         run: cargo build --release --locked
   arm64-native:
