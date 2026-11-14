@@ -1557,8 +1557,7 @@ pub fn preview_explicit_architecture_with_policy(
                 bail!("foreign dependency on Architecture: all requires Multi-Arch: foreign");
             }
             if step.architecture == native_architecture {
-                let candidate = catalog.get(&identity)
-                    .context("native dependency missing signed metadata")?;
+                catalog.get(&identity).context("native dependency missing signed metadata")?;
             }
             if !validated.contains(&identity) {
                 bail!("foreign dependency was not policy-validated");
