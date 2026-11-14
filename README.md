@@ -17,6 +17,9 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 - Whole-installed-set **read-only no-removals upgrade audit** from signed
   policy candidates, with strict held/installed-only handling and a bounded
   joint transaction preview (`plan-system-upgrade-policy`, never executes dpkg).
+  A companion `native-rootfs-prepare-system-upgrade` produces an exact signed
+  intent for a marked **disposable off-host rootfs**, reusing the existing
+  guest-only dpkg executor and recovery journal.
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
