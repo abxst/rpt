@@ -198,6 +198,13 @@ for package in "$@"; do
         echo "package remained installed after native rootfs removal: $package" >&2
         exit 1
     fi
+    # A successful purge must leave no residual conffile-only dpkg state.
+    # This is stricter than remove, which deliberately retains conffiles.
+    if [ "$mode" = purge ] && [ -n "$installed" ] &&
+       [ "$installed" != "unknown ok not-installed" ]; then
+        echo "package remained in dpkg database after native rootfs purge: $package ($installed)" >&2
+        exit 1
+    fi
 done
 "#;
 
@@ -216,12 +223,16 @@ pub struct Remove<'a> {
 pub async fn remove_planned(opts: Remove<'_>) -> Result<crate::removal_planner::RemovalPlan> {
     let root = rootfs(opts.rootfs)?;
     let before = status(&root)?;
-    let plan = crate::removal_planner::remove_snapshot(
+    let mut plan = crate::removal_planner::remove_snapshot(
         &before, opts.architecture, opts.packages, opts.cascade)?;
     if !plan.removable { bail!("unsafe native removal: {}", plan.blockers.join("; ")); }
     execute_remove(&root, Run {
         journal: opts.journal, id: opts.id, timeout_seconds: opts.timeout_seconds,
     }, &before, None, &plan.remove, opts.purge).await?;
+    // Planning semantics are shared, but report the command actually executed.
+    // executable=false still describes the read-only planner intent, not
+    // whether the separate journaled executor has completed.
+    if opts.purge { plan.mode = "purge".into(); }
     Ok(plan)
 }
 
