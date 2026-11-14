@@ -437,14 +437,13 @@ fn scoped_relations(
 
 /// A replayable dependency alternative is identified by its owning binary
 /// and group ordinal, not by plan position (which changes while backtracking).
-/// A newly selected native binary may satisfy an unqualified foreign
-/// Depends only with Multi-Arch: foreign, or :any with Multi-Arch: allowed.
-/// This first read-only milestone admits leaf candidates only.
-fn eligible_native_foreign_leaf(item: &PackageSummary, required: &Requirement) -> bool {
+/// A foreign package may choose a new native provider only with an explicit
+/// Multi-Arch contract. The native candidate's dependency graph is then
+/// resolved independently in native scope; native Pre-Depends stay unsupported.
+fn eligible_native_foreign_candidate(item: &PackageSummary, required: &Requirement) -> bool {
     required.requested_arch.is_none()
         && item.multi_arch == if required.any_arch { "allowed" } else { "foreign" }
         && item.pre_depends.trim().is_empty()
-        && item.depends.trim().is_empty()
 }
 
 /// Read-only proof that an installed native binary can satisfy a foreign
@@ -463,6 +462,25 @@ fn installed_native_satisfies_foreign(
     let Some(installed) = native_installed.get(&key) else { return Ok(false) };
     let expected = if required.any_arch { "allowed" } else { "foreign" };
     Ok(installed.multi_arch == expected && satisfies(&installed.version, required)?)
+}
+
+/// A native package's ordinary dependencies are resolved against its own
+/// architecture, not the foreign requester's. Installed native state is
+/// authoritative for this read-only shortcut; installed older versions
+/// must never trigger an implicit upgrade during foreign planning.
+fn installed_native_satisfies_native(
+    full_installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    required: &Requirement, native_arch: &str,
+) -> Result<bool> {
+    if required.requested_arch.as_deref().is_some_and(|arch| arch != native_arch) {
+        return Ok(false);
+    }
+    let key = cache_query::InstalledKey {
+        name: required.name.clone(), architecture: native_arch.to_owned(),
+    };
+    let Some(status) = full_installed.get(&key) else { return Ok(false) };
+    Ok((!required.any_arch || status.multi_arch == "allowed")
+        && satisfies(&status.version, required)?)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -654,7 +672,7 @@ impl Solver<'_> {
                 let installed = cache_query::InstalledKey {
                     name: key.name.clone(), architecture: key.architecture.clone(),
                 };
-                if eligible_native_foreign_leaf(native, required)
+                if eligible_native_foreign_candidate(native, required)
                     && !full_status.contains_key(&installed)
                     && satisfies(&native.version, required)? {
                     return Ok(vec![key]);
@@ -681,6 +699,40 @@ impl Solver<'_> {
             }
         }
         Ok(providers)
+    }
+
+    /// A native package selected by a foreign binary owns its next dependency
+    /// group. Resolve that group only in native scope; a same-named i386
+    /// binary cannot satisfy an amd64 package's Depends. Virtual and all
+    /// substitutions across that nested boundary remain fail-closed.
+    fn candidates_for_owner(
+        &self, owner: &PackageKey, required: &Requirement,
+    ) -> Result<Vec<PackageKey>> {
+        if let Some((native_arch, installed)) = self.external_native {
+            if owner.architecture == native_arch {
+                if required.requested_arch.as_deref()
+                    .is_some_and(|arch| arch != native_arch) {
+                    return Ok(Vec::new());
+                }
+                let key = PackageKey {
+                    name: required.name.clone(), architecture: native_arch.to_owned(),
+                };
+                let status_key = cache_query::InstalledKey {
+                    name: key.name.clone(), architecture: key.architecture.clone(),
+                };
+                // A pre-existing but inadequate native binary must NOT be
+                // replaced by a foreign-root-driven implicit upgrade.
+                if installed.contains_key(&status_key) {
+                    return Ok(Vec::new());
+                }
+                return Ok(match self.catalog.get(&key) {
+                    Some(item) if (!required.any_arch || item.multi_arch == "allowed")
+                        && satisfies(&item.version, required)? => vec![key],
+                    _ => Vec::new(),
+                });
+            }
+        }
+        self.concrete_candidates(required)
     }
 
     /// An explicit root or an early Pre-Depends cycle guard must not choose
@@ -723,6 +775,18 @@ impl Solver<'_> {
         // An already installed satisfier wins before scheduling a new binary,
         // even when it is not the first textual alternative.
         for alternative in group {
+            if let Some((native_arch, native_relations)) = self.external_native {
+                if owner.architecture == native_arch {
+                    if installed_native_satisfies_native(
+                        native_relations, alternative, native_arch,
+                    )? {
+                        return self.resolve_groups(owner, groups, index + 1, soft);
+                    }
+                    // Never use a foreign/all installed package or a virtual
+                    // provider as an implicit native dependency satisfier.
+                    continue;
+                }
+            }
             let selected_installed = if let Some(arch) = &alternative.requested_arch {
                 let exact = PackageKey { name: alternative.name.clone(), architecture: arch.clone() };
                 self.installed.get_key_value(&exact)
@@ -766,7 +830,7 @@ impl Solver<'_> {
         let mut seen_possible = BTreeSet::new();
         let mut replayable = true;
         for requirement in group {
-            let options = self.concrete_candidates(requirement)?;
+            let options = self.candidates_for_owner(owner, requirement)?;
             if options.len() > 1 { replayable = false; }
             seen_possible.extend(options);
         }
@@ -784,7 +848,7 @@ impl Solver<'_> {
         let mut seen = BTreeSet::new();
         let mut ordinal = 0usize;
         for requirement in group {
-            let candidates = self.concrete_candidates(requirement)?;
+            let candidates = self.candidates_for_owner(owner, requirement)?;
             let multiple_virtual = candidates.len() > 1;
             let mut chosen: Option<Self> = None;
             for option in candidates {
@@ -1005,6 +1069,12 @@ impl Solver<'_> {
         } else {
             current.architecture.clone()
         };
+        // Native dependency recursion is read-only and restricted to ordinary
+        // Depends; introducing native Pre-Depends needs ordering semantics.
+        if self.external_native.as_ref().is_some_and(|(native, _)|
+            current.architecture == *native && !current.pre_depends.trim().is_empty()) {
+            bail!("native Pre-Depends in foreign plan require transaction ordering");
+        }
         let pre_groups = parse_groups_for_arch(&current.pre_depends, &dependency_arch)?;
         // A Pre-Depends back-edge cannot be safely represented by a simple
         // package set: configuring the target before unpacking the source
@@ -1252,7 +1322,7 @@ fn foreign_dependency_identity_with_native(
         name: required.name.clone(), architecture: native_arch.to_owned(),
     };
     Ok(catalog.get(&native)
-        .filter(|item| eligible_native_foreign_leaf(item, required))
+        .filter(|item| eligible_native_foreign_candidate(item, required))
         .map(|_| native))
 }
 
@@ -1340,7 +1410,11 @@ pub fn preview_explicit_architecture_with_policy(
                 .collect::<Vec<_>>();
             let candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
                 &key.name, &origins, &preferences,
-                installed.get(key).map(String::as_str), target_release.as_deref(), None,
+                installed.get(key).map(String::as_str).or_else(||
+                    relations.get(&cache_query::InstalledKey {
+                        name: key.name.clone(), architecture: key.architecture.clone(),
+                    }).map(|status| status.version.as_str())),
+                target_release.as_deref(), None,
             )?.candidate.with_context(|| format!(
                 "APT policy has no candidate for foreign dependency {}:{}",
                 key.name, key.architecture,
@@ -1364,14 +1438,40 @@ pub fn preview_explicit_architecture_with_policy(
             if !validated.contains(key) { continue; }
             let item = catalog.get(key)
                 .context("validated foreign dependency missing catalog entry")?;
-            for group in parse_groups_for_arch(&item.pre_depends, foreign_architecture)?.into_iter()
-                .chain(parse_groups_for_arch(&item.depends, foreign_architecture)?) {
+            let owner_arch = if item.architecture == native_architecture {
+                native_architecture
+            } else {
+                foreign_architecture
+            };
+            if item.architecture == native_architecture
+                && !item.pre_depends.trim().is_empty() {
+                bail!("nested native Pre-Depends are unsupported");
+            }
+            if item.pre_depends.contains(":native") || item.depends.contains(":native") {
+                bail!("foreign preview does not support :native dependencies");
+            }
+            for group in parse_groups_for_arch(&item.pre_depends, owner_arch)?.into_iter()
+                .chain(parse_groups_for_arch(&item.depends, owner_arch)?) {
                 if group.len() == 1 {
                     let dep = &group[0];
                     if let Some(requested_arch) = &dep.requested_arch {
-                        if requested_arch != foreign_architecture {
+                        if requested_arch != owner_arch {
                             bail!("explicit cross-architecture dependency needs full Multi-Arch resolver");
                         }
+                    }
+                    if owner_arch == native_architecture {
+                        if installed_native_satisfies_native(
+                            &relations, dep, native_architecture,
+                        )? {
+                            continue;
+                        }
+                        let native_key = PackageKey {
+                            name: dep.name.clone(), architecture: native_architecture.to_owned(),
+                        };
+                        if catalog.contains_key(&native_key) {
+                            mandatory.insert(native_key);
+                        }
+                        continue;
                     }
                     if installed_native_satisfies_foreign(
                         &relations, dep, native_architecture, foreign_architecture,
@@ -1419,11 +1519,10 @@ pub fn preview_explicit_architecture_with_policy(
                 bail!("foreign dependency on Architecture: all requires Multi-Arch: foreign");
             }
             if step.architecture == native_architecture {
-                let candidate = catalog.get(&identity).context("native staged leaf missing metadata")?;
-                if !matches!(candidate.multi_arch.as_str(), "foreign" | "allowed")
-                    || !candidate.depends.trim().is_empty()
-                    || !candidate.pre_depends.trim().is_empty() {
-                    bail!("native foreign-policy dependency is not an allowed leaf");
+                let candidate = catalog.get(&identity)
+                    .context("native dependency missing signed metadata")?;
+                if !candidate.pre_depends.trim().is_empty() {
+                    bail!("native Pre-Depends are not supported by foreign preview");
                 }
             }
             if !validated.contains(&identity) {
@@ -2300,6 +2399,85 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
                 name, &origins, &pins, installed, None, None,
             )?.candidate)
         }).is_err());
+    }
+    #[test]
+    fn foreign_preview_recurses_native_dependency_graph_by_owner_architecture() {
+        let mut app = item("cross-app", "1", "native-tool (>= 2)");
+        app.architecture = "i386".into();
+        let mut tool = item("native-tool", "2", "native-helper (>= 3)");
+        tool.multi_arch = "foreign".into();
+        let helper = item("native-helper", "3", "native-bottom (= 4)");
+        let bottom = item("native-bottom", "4", "");
+        let mut deceptive_foreign = item("native-helper", "99", "");
+        deceptive_foreign.architecture = "i386".into();
+        let catalog = BTreeMap::from([
+            (PackageKey {name: "cross-app".into(), architecture: "i386".into()}, app),
+            (PackageKey {name: "native-tool".into(), architecture: "amd64".into()}, tool.clone()),
+            (PackageKey {name: "native-helper".into(), architecture: "amd64".into()}, helper.clone()),
+            (PackageKey {name: "native-bottom".into(), architecture: "amd64".into()}, bottom),
+            (PackageKey {name: "native-helper".into(), architecture: "i386".into()}, deceptive_foreign),
+        ]);
+        let empty = BTreeMap::<cache_query::InstalledKey, InstalledRelations>::new();
+        let empty_binary = BTreeMap::<PackageKey, String>::new();
+        let run = |entries: &BTreeMap<PackageKey, PackageSummary>,
+                   statuses: &BTreeMap<cache_query::InstalledKey, InstalledRelations>| {
+            solve_catalog_foreign(entries, &empty_binary, &BTreeMap::new(), "cross-app:i386",
+                20, ("i386", "amd64"), statuses)
+        };
+        let plan = run(&catalog, &empty).unwrap();
+        assert_eq!(plan.iter().map(|step|
+            (step.package.as_str(), step.architecture.as_str())
+        ).collect::<Vec<_>>(), [
+            ("native-bottom", "amd64"),
+            ("native-helper", "amd64"),
+            ("native-tool", "amd64"),
+            ("cross-app", "i386"),
+        ]);
+        assert!(reject_foreign_negative_relations_with_native(
+            &catalog, &empty, &plan, "i386", Some("amd64"),
+        ).is_ok());
+
+        // An existing native helper with Multi-Arch: no satisfies a native
+        // owner but is NOT a valid direct foreign-root substitute.
+        let installed_helper = BTreeMap::from([(
+            cache_query::InstalledKey {
+                name: "native-helper".into(), architecture: "amd64".into(),
+            },
+            InstalledRelations {version: "3".into(), multi_arch: "no".into(), ..Default::default()},
+        )]);
+        let reused = run(&catalog, &installed_helper).unwrap();
+        assert!(!reused.iter().any(|step| step.package == "native-helper"));
+        // A native dependency cannot silently upgrade an installed old
+        // helper from 2 to 3.
+        let mut old_status = installed_helper.clone();
+        old_status.values_mut().next().unwrap().version = "2".into();
+        assert!(run(&catalog, &old_status).is_err());
+
+        let mut no_native = catalog.clone();
+        no_native.remove(&PackageKey {
+            name: "native-helper".into(), architecture: "amd64".into(),
+        });
+        assert!(run(&no_native, &empty).is_err());
+        let mut bad = catalog.clone();
+        bad.get_mut(&PackageKey {
+            name: "native-tool".into(), architecture: "amd64".into(),
+        }).unwrap().pre_depends = "native-bottom".into();
+        assert!(run(&bad, &empty).is_err());
+        // A regular native helper needs no Multi-Arch: foreign/allowed flag,
+        // but a foreign i386 package cannot consume it across the boundary.
+        let mut direct = catalog.clone();
+        direct.get_mut(&PackageKey {
+            name: "cross-app".into(), architecture: "i386".into(),
+        }).unwrap().depends = "native-helper (>= 3)".into();
+        let local = run(&direct, &empty).unwrap();
+        assert!(local.iter().any(|step| step.package == "native-helper"
+            && step.architecture == "i386" && step.version == "99"));
+        // With the legitimate i386 binary absent, a native helper with
+        // Multi-Arch: no cannot replace it across the architecture boundary.
+        direct.remove(&PackageKey {
+            name: "native-helper".into(), architecture: "i386".into(),
+        });
+        assert!(run(&direct, &empty).is_err());
     }
     #[test]
     fn foreign_preview_selects_new_native_signed_leaf_without_native_upgrades() {
