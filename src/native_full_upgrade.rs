@@ -106,7 +106,7 @@ pub fn prepare(opts: Prepare<'_>) -> Result<NativeCombinedIntent> {
     let installed = cache_query::installed_catalog_from_bytes(&status)?;
     let mut names = BTreeSet::new();
     for key in installed.keys() {
-        if (key.architecture != architecture && key.architecture != "all")
+        if (key.architecture != *architecture && key.architecture != "all")
             || !names.insert(&key.name) {
             bail!("native combined upgrade requires unambiguous native/all-only dpkg state");
         }
@@ -144,7 +144,7 @@ pub fn prepare(opts: Prepare<'_>) -> Result<NativeCombinedIntent> {
     let scenario_sha256 = digest(&serde_json::to_vec(&scenario)?);
     Ok(NativeCombinedIntent {
         schema_version: 1, session: native_rootfs::root_identity(&root),
-        architecture: architecture.into(), status_sha256: pre_sha,
+        architecture: (*architecture).into(), status_sha256: pre_sha,
         marks_sha256, max_roots: *max_roots, max_packages: *max_packages,
         max_removals: *max_removals,
         selection_mode: (*mode).into(), requested_removals: requested.to_vec(),
