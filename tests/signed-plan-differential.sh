@@ -547,10 +547,10 @@ PY
 ./target/debug/rpt sandbox-session-remove-planned \
   --session "$session" --id session-remove --journal-dir "$root/session-journal" \
   --architecture "$arch" --timeout-seconds 180 rpt-sandbox-demo
-if ./target/debug/rpt sandbox-session-inspect --session "$session" | grep -Fq rpt-sandbox-demo; then
-  echo "Package still present after sandbox removal" >&2
-  exit 1
-fi
+# A removed package with conffiles remains visible to dpkg-query --show;
+# assert the actual dpkg installed state instead of hiding the residual config.
+test "$(docker exec "rpt-session-$session" dpkg-query -W \
+  '-f=${Status}' rpt-sandbox-demo)" = 'deinstall ok config-files'
 ./target/debug/rpt sandbox-session-install \
   --session "$session" --id session-reinstall \
   --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
