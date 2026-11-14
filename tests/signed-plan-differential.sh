@@ -500,10 +500,15 @@ sudo ./target/debug/rpt native-rootfs-mark \
   --journal-dir "$root/native-journal" auto rpt-sandbox-demo
 sudo chroot "$native_guest" /usr/bin/apt-mark showauto rpt-sandbox-demo \
   | grep -Fxq rpt-sandbox-demo
+# Debian slim exports may mark apt itself automatic. This acceptance fixture
+# reuses the guest for later signed installs, so retain the package manager
+# instead of letting its unrelated preexisting auto mark remove apt-mark.
+sudo chroot "$native_guest" /usr/bin/apt-mark manual apt
 sudo ./target/debug/rpt native-rootfs-autoremove-planned \
   --rootfs "$native_guest" --id native-autoremove \
   --journal-dir "$root/native-journal" --architecture "$arch" --timeout-seconds 180
 grep -Fq '"phase": "succeeded"' "$root/native-journal/native-autoremove.json"
+sudo test -x "$native_guest/usr/bin/apt-mark"
 ./target/debug/rpt native-rootfs-prepare-transaction \
   --rootfs "$native_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
   --architecture "$arch" --output "$root/native-purge-install.json" rpt-sandbox-demo
