@@ -443,7 +443,6 @@ fn scoped_relations(
 fn eligible_native_foreign_candidate(item: &PackageSummary, required: &Requirement) -> bool {
     required.requested_arch.is_none()
         && item.multi_arch == if required.any_arch { "allowed" } else { "foreign" }
-        && item.pre_depends.trim().is_empty()
 }
 
 /// Read-only proof that an installed native binary can satisfy a foreign
@@ -530,6 +529,11 @@ struct Solver<'a> {
     replay_rules: BTreeMap<ReplayKey, ReplayRule>,
     /// Chronological decision history along ONLY the committed branch.
     replay_trace: Vec<ReplayChoice>,
+    /// Strict Pre-Depends owner group positions, retained across backtracking.
+    pre_depends_groups: BTreeMap<PackageKey, usize>,
+    /// While visiting a Pre-Depends edge, any recursion to an ancestor is
+    /// unsafe for dependency-first configure ordering.
+    strict_pre_depends_depth: usize,
 }
 
 impl Solver<'_> {
@@ -725,9 +729,22 @@ impl Solver<'_> {
                 if installed.contains_key(&status_key) {
                     return Ok(Vec::new());
                 }
-                return Ok(match self.catalog.get(&key) {
-                    Some(item) if (!required.any_arch || item.multi_arch == "allowed")
-                        && satisfies(&item.version, required)? => vec![key],
+                if let Some(item) = self.catalog.get(&key) {
+                    return Ok(if (!required.any_arch || item.multi_arch == "allowed")
+                        && satisfies(&item.version, required)? { vec![key] } else { Vec::new() });
+                }
+                // A signed Architecture: all leaf is also a valid dependency
+                // identity for a native owner. Require Multi-Arch: foreign
+                // until general all-binary graph semantics are implemented.
+                let universal = PackageKey {
+                    name: required.name.clone(), architecture: "all".into(),
+                };
+                return Ok(match self.catalog.get(&universal) {
+                    Some(item) if item.multi_arch == "foreign"
+                        && !required.any_arch
+                        && item.depends.trim().is_empty()
+                        && item.pre_depends.trim().is_empty()
+                        && satisfies(&item.version, required)? => vec![universal],
                     _ => Vec::new(),
                 });
             }
@@ -847,6 +864,7 @@ impl Solver<'_> {
         // before committing it. Branch budgets are SHARED across attempts.
         let mut seen = BTreeSet::new();
         let mut ordinal = 0usize;
+        let mut last_failure = None;
         for requirement in group {
             let candidates = self.candidates_for_owner(owner, requirement)?;
             let multiple_virtual = candidates.len() > 1;
@@ -885,8 +903,18 @@ impl Solver<'_> {
                         requested_arch: Some(option.architecture.clone()),
                     }
                 };
-                if branch.resolve_concrete(&option, &actual).is_ok()
-                    && branch.resolve_groups(owner, groups, index + 1, soft).is_ok() {
+                let strict = branch.pre_depends_groups.get(owner)
+                    .is_some_and(|count| index < *count);
+                if strict { branch.strict_pre_depends_depth += 1; }
+                let resolved = branch.resolve_concrete(&option, &actual);
+                if strict { branch.strict_pre_depends_depth -= 1; }
+                let resolved = resolved.and_then(|()|
+                    branch.resolve_groups(owner, groups, index + 1, soft));
+                if let Err(error) = resolved {
+                    last_failure = Some(error);
+                    continue;
+                }
+                {
                     if multiple_virtual && chosen.is_some() {
                         bail!("ambiguous virtual package {}: multiple viable providers",
                             requirement.name);
@@ -904,7 +932,14 @@ impl Solver<'_> {
                 return Ok(());
             }
         }
-        bail!("no viable dependency alternative after bounded ordered backtracking")
+        let descriptions = group.iter().map(|req| req.name.as_str())
+            .collect::<Vec<_>>().join(" | ");
+        if let Some(error) = last_failure {
+            bail!("no viable alternative for {}:{} group {index} ({descriptions}): {error:#}",
+                owner.name, owner.architecture);
+        }
+        bail!("no candidate for {}:{} group {index} ({descriptions})",
+            owner.name, owner.architecture)
     }
 
     /// Validate the final effective set (installed packages overridden by
@@ -1014,6 +1049,9 @@ impl Solver<'_> {
             return Ok(());
         }
         if self.visiting.contains(key) {
+            if self.strict_pre_depends_depth > 0 {
+                bail!("dependency cycle crosses a Pre-Depends edge; configure ordering unsupported");
+            }
             // Read-only package-set preview: a Depends cycle does not require
             // resolving the same binary twice. Never relax version constraints.
             let current = self.catalog.get(key)
@@ -1069,28 +1107,24 @@ impl Solver<'_> {
         } else {
             current.architecture.clone()
         };
-        // Native dependency recursion is read-only and restricted to ordinary
-        // Depends; introducing native Pre-Depends needs ordering semantics.
-        if self.external_native.as_ref().is_some_and(|(native, _)|
-            current.architecture == *native && !current.pre_depends.trim().is_empty()) {
-            bail!("native Pre-Depends in foreign plan require transaction ordering");
-        }
         let pre_groups = parse_groups_for_arch(&current.pre_depends, &dependency_arch)?;
         // A Pre-Depends back-edge cannot be safely represented by a simple
         // package set: configuring the target before unpacking the source
         // requires an execution-order model.
         for group in &pre_groups {
             for dependency in group {
-                if let Some(target) = self.concrete(dependency)? {
-                    if self.visiting.contains(&target) {
-                        bail!("Pre-Depends cycle requires transaction ordering");
-                    }
+                let possible = self.candidates_for_owner(key, dependency)?;
+                if possible.len() > 1 {
+                    bail!("ambiguous Pre-Depends virtual provider");
                 }
             }
         }
+        let pre_count = pre_groups.len();
         let groups = pre_groups.into_iter()
             .chain(parse_groups_for_arch(&current.depends, &dependency_arch)?).collect::<Vec<_>>();
+        self.pre_depends_groups.insert(key.clone(), pre_count);
         self.resolve_groups(key, &groups, 0, false)?;
+        self.pre_depends_groups.remove(key);
         self.visiting.remove(key);
         self.done.insert(key.clone());
         let installed = self.installed.get(key).cloned();
@@ -1119,6 +1153,15 @@ impl Solver<'_> {
                 version: current.version.clone(), installed,
             });
             self.check_negative_relations()?;
+            // Reject a conflicting installed-native alternative inside the
+            // search branch, so the bounded solver can select its sibling.
+            if let Some((native_arch, all_installed)) = self.external_native {
+                reject_foreign_negative_relations_with_native(
+                    self.catalog, all_installed,
+                    std::slice::from_ref(self.plan.last().context("new staged step missing")?),
+                    &self.architecture, Some(native_arch),
+                )?;
+            }
             if self.include_recommends {
                 // APT recommends are soft dependencies. Preserve every
                 // mandatory change even if this suggestion cannot be
@@ -1443,10 +1486,6 @@ pub fn preview_explicit_architecture_with_policy(
             } else {
                 foreign_architecture
             };
-            if item.architecture == native_architecture
-                && !item.pre_depends.trim().is_empty() {
-                bail!("nested native Pre-Depends are unsupported");
-            }
             if item.pre_depends.contains(":native") || item.depends.contains(":native") {
                 bail!("foreign preview does not support :native dependencies");
             }
@@ -1470,6 +1509,17 @@ pub fn preview_explicit_architecture_with_policy(
                         };
                         if catalog.contains_key(&native_key) {
                             mandatory.insert(native_key);
+                        } else {
+                            let universal = PackageKey {
+                                name: dep.name.clone(), architecture: "all".into(),
+                            };
+                            if catalog.get(&universal).is_some_and(|item|
+                                item.multi_arch == "foreign"
+                                && item.depends.trim().is_empty()
+                                && item.pre_depends.trim().is_empty()
+                                && !dep.any_arch) {
+                                mandatory.insert(universal);
+                            }
                         }
                         continue;
                     }
@@ -1519,11 +1569,7 @@ pub fn preview_explicit_architecture_with_policy(
                 bail!("foreign dependency on Architecture: all requires Multi-Arch: foreign");
             }
             if step.architecture == native_architecture {
-                let candidate = catalog.get(&identity)
-                    .context("native dependency missing signed metadata")?;
-                if !candidate.pre_depends.trim().is_empty() {
-                    bail!("native Pre-Depends are not supported by foreign preview");
-                }
+                catalog.get(&identity).context("native dependency missing signed metadata")?;
             }
             if !validated.contains(&identity) {
                 bail!("foreign dependency was not policy-validated");
@@ -1658,6 +1704,8 @@ fn solve_catalog_many_options_with_external<'a>(
         installed_provider_proofs: Vec::new(),
         replay_rules: replay_rules.clone(),
         replay_trace: Vec::new(),
+        pre_depends_groups: BTreeMap::new(),
+        strict_pre_depends_depth: 0,
     };
     for package in packages {
         if let Some(key) = solver.key_for(package)? {
@@ -2069,6 +2117,8 @@ mod tests {
             installed_provider_proofs: Vec::new(),
             replay_rules: BTreeMap::new(),
             replay_trace: Vec::new(),
+            pre_depends_groups: BTreeMap::new(),
+            strict_pre_depends_depth: 0,
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -2401,6 +2451,96 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).is_err());
     }
     #[test]
+    fn foreign_native_predepends_is_ordered_and_cycles_fail_closed() {
+        let mut app = item("foreign-app", "1", "host-tool (>= 2)");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "2", "");
+        tool.multi_arch = "foreign".into();
+        tool.pre_depends = "host-setup (>= 1)".into();
+        let setup = item("host-setup", "1", "");
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "host-setup".into(), architecture: "amd64".into() }, setup),
+        ]);
+        let empty_binary = BTreeMap::new();
+        let empty_status = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).unwrap();
+        assert_eq!(plan.iter().map(|s| (s.package.as_str(), s.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+            ("host-setup", "amd64"), ("host-tool", "amd64"), ("foreign-app", "i386"),
+        ]);
+        // If Pre-Depends would require configuring a package that itself
+        // Depends on the still-unconfigured parent, refuse the cycle.
+        catalog.get_mut(&PackageKey {
+            name: "host-setup".into(), architecture: "amd64".into(),
+        }).unwrap().depends = "host-tool".into();
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
+    }
+
+    #[test]
+    fn foreign_native_alternatives_backtrack_on_installed_conflict() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "1", "host-bad | host-good");
+        tool.multi_arch = "foreign".into();
+        let mut bad = item("host-bad", "1", "");
+        bad.conflicts = "legacy-service".into();
+        let good = item("host-good", "1", "");
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "host-bad".into(), architecture: "amd64".into() }, bad),
+            (PackageKey { name: "host-good".into(), architecture: "amd64".into() }, good),
+        ]);
+        let installed = BTreeMap::from([(
+            cache_query::InstalledKey {
+                name: "legacy-service".into(), architecture: "amd64".into(),
+            },
+            InstalledRelations { version: "1".into(), multi_arch: "no".into(),
+                ..Default::default() },
+        )]);
+        let plan = solve_catalog_foreign(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), "foreign-app:i386", 20, ("i386", "amd64"), &installed).unwrap();
+        assert_eq!(plan.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+            ["host-good", "host-tool", "foreign-app"]);
+        assert!(reject_foreign_negative_relations_with_native(
+            &catalog, &installed, &plan, "i386", Some("amd64"),
+        ).is_ok());
+    }
+
+    #[test]
+    fn native_owner_can_select_signed_universal_foreign_leaf() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "1", "shared-data");
+        tool.multi_arch = "foreign".into();
+        let mut data = item("shared-data", "1", "");
+        data.architecture = "all".into();
+        data.multi_arch = "foreign".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "shared-data".into(), architecture: "all".into() }, data),
+        ]);
+        let empty_binary = BTreeMap::new();
+        let empty_status = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).unwrap();
+        assert_eq!(plan.iter().map(|s| (s.package.as_str(),s.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+                ("shared-data", "all"), ("host-tool", "amd64"), ("foreign-app", "i386"),
+            ]);
+        catalog.get_mut(&PackageKey {
+            name: "shared-data".into(), architecture: "all".into(),
+        }).unwrap().multi_arch = "no".into();
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
+    }
+
+    #[test]
     fn foreign_preview_recurses_native_dependency_graph_by_owner_architecture() {
         let mut app = item("cross-app", "1", "native-tool (>= 2)");
         app.architecture = "i386".into();
@@ -2458,11 +2598,17 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             name: "native-helper".into(), architecture: "amd64".into(),
         });
         assert!(run(&no_native, &empty).is_err());
-        let mut bad = catalog.clone();
-        bad.get_mut(&PackageKey {
+        // Native Pre-Depends is now supported when its ordering remains
+        // acyclic; this previously rejected case is a valid package set.
+        let mut with_predepends = catalog.clone();
+        with_predepends.get_mut(&PackageKey {
             name: "native-tool".into(), architecture: "amd64".into(),
         }).unwrap().pre_depends = "native-bottom".into();
-        assert!(run(&bad, &empty).is_err());
+        let ordered = run(&with_predepends, &empty).unwrap();
+        assert_eq!(ordered.iter().map(|step| step.package.as_str())
+            .collect::<Vec<_>>(), [
+                "native-bottom", "native-helper", "native-tool", "cross-app",
+            ]);
         // A regular native helper needs no Multi-Arch: foreign/allowed flag,
         // but a foreign i386 package cannot consume it across the boundary.
         let mut direct = catalog.clone();
@@ -3299,6 +3445,8 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             installed_provider_proofs: Vec::new(),
             replay_rules: BTreeMap::new(),
             replay_trace: Vec::new(),
+            pre_depends_groups: BTreeMap::new(),
+            strict_pre_depends_depth: 0,
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }

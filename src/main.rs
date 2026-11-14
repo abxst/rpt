@@ -4,7 +4,7 @@ use rpt::{drivers::{self, DriverKind}, download::Downloader, error::{classify, c
 use std::{path::PathBuf, process::ExitCode, str::FromStr};
 
 #[derive(Parser)]
-#[command(name = "rpt", version, about = "Experimental Rust APT-compatible engine (transport MVP)")]
+#[command(name = "rpt", version, about = "Experimental Rust package engine (partial APT compatibility; host execution disabled)")]
 struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,

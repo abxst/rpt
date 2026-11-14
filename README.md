@@ -5,19 +5,32 @@ architecture is an asynchronous download/preparation layer feeding a **single-wr
 system transaction queue**. Configuration and package policy aim to remain compatible
 with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 
-## Current implementation (v0.1.0)
+## Current implementation (experimental; not a system APT replacement)
 
-- Read-only inventory of traditional `.list` and Deb822 `.sources` APT source files.
-- Multi-package concurrent HTTP(S) downloads, optional byte-range segmentation.
-- Docker-pull-style animated package progress on interactive terminals, aggregate transfer stats (requests, range segments, retries, cache hits, throughput); plain summary for redirected logs.
-- Bounded worker counts, expected-size and SHA-256 verification before publishing files.
-- Rust unit tests, CI and automated **pre-release** workflow for Linux amd64.
-- In-process bounded FIFO single-worker transaction queue primitive with serialization tests (not connected to dpkg).
+- Signed `InRelease` verification using explicitly trusted `Signed-By`
+  keyrings, SHA-256 checked Packages indexes, by-hash acquisition where
+  advertised, and an isolated RPT cache.
+- Concurrent downloads with bounded workers, segmentation, retry limits,
+  size/SHA-256 verification, progress reporting, and FIFO scheduling.
+- Debian version ordering, installed-state inspection, restricted APT
+  preferences/pinning and phased candidate diagnostics.
+- Read-only dependency plans: native, joint roots, policy-bound candidates,
+  ordered alternatives, virtual-provider subsets, removals/autoremove
+  previews, and a **partial foreign Multi-Arch planner**.
+- Durable transaction journals, crash/recovery diagnostics, process
+  supervision, and real dpkg transactions **only in explicitly disposable**
+  Docker guest roots or prepared native rootfs test environments.
+- Differential CI against APT and dpkg, native ARM64 checks, and guest
+  VM transaction/recovery acceptance.
 
-**NOT IMPLEMENTED:** signed repository metadata verification, complete APT configuration
-and policy compatibility, dependency solver, durable dpkg transaction executor, installation,
-upgrade or removal. The sample manifest is illustrative, not installable.
-Do not use this release to replace system APT.
+**Important:** Full APT CLI/config, candidate policy, SAT resolver,
+cross-architecture transactions, real-host `dpkg` execution,
+upgrade/remove parity, failure recovery and release/benchmark gates are
+**not complete**. Do not replace the system's `apt` or `apt-get`.
+See [the live A–I parity gate matrix](docs/apt-parity-acceptance.md).
+Some detailed alpha milestone descriptions below document earlier
+snapshots; their historic limitations are superseded by this overview
+and the maintained gate matrix.
 
 ## Build
 
@@ -66,11 +79,13 @@ Text mode includes stable codes such as `DOWNLOAD_HTTP`, `DOWNLOAD_TIMEOUT`,
 `SYSTEM_IO`, `SYSTEM_CONFIG`, and `SYSTEM_WORKER`.
 Statistics remain human-readable stdout; progress is hidden when stderr is not a TTY.
 
-**APT 1:1 compatibility status: NOT ACHIEVED.** RPT still supports only `sources` and
-`fetch`; none of `apt update`, `install`, `remove`, `upgrade`, dpkg transaction
-behavior, or APT option semantics is implemented. A parity gate in
-`tests/apt_parity_gate.rs` verifies unsupported APT commands and options fail
-instead of pretending success. The tests do **not** validate APT parity.
+**APT 1:1 compatibility status: NOT ACHIEVED.** RPT now has a
+signed, isolated `update`, multiple read-only planners and test-only
+dpkg transaction entry points, but it does not expose complete
+`apt install`/`upgrade`/`remove` semantics or authorize execution on
+the live host. `tests/apt_parity_gate.rs` checks unsupported CLI
+behaviors fail explicitly. A successful narrow APT differential is not
+evidence of general APT parity.
 
 `scripts/stage-apt.sh` is a **staging-only** tool for Ubuntu amd64. For instance:
 
