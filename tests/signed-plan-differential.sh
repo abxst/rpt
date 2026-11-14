@@ -401,8 +401,55 @@ python3 - "$root/native-noop.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['packages']==[]
 PY
+# Out-of-Docker remove and purge use guest dependency safety checks.
+if sudo ./target/debug/rpt native-rootfs-remove-planned \
+  --rootfs "$native_guest" --id native-unsafe \
+  --journal-dir "$root/native-journal" --architecture "$arch" dpkg \
+  >/dev/null 2>&1; then
+  echo "Native rootfs removal accepted an Essential package" >&2; exit 1
+fi
+sudo ./target/debug/rpt native-rootfs-remove-planned \
+  --rootfs "$native_guest" --id native-remove \
+  --journal-dir "$root/native-journal" --architecture "$arch" rpt-sandbox-demo
+grep -Fq '"phase": "succeeded"' "$root/native-journal/native-remove.json"
+if sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-sandbox-demo 2>/dev/null | grep -Fxq 'install ok installed'; then
+  echo "Native rootfs removal left package installed" >&2; exit 1
+fi
+./target/debug/rpt native-rootfs-prepare-transaction \
+  --rootfs "$native_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/native-reinstall.json" rpt-sandbox-demo
+sudo ./target/debug/rpt native-rootfs-apply-transaction \
+  --rootfs "$native_guest" --id native-reinstall \
+  --transaction "$root/native-reinstall.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-journal" --timeout-seconds 180
+# APT Architecture: all marks are stored using the native architecture.
+# Seed a precisely scoped guest mark set and verify RPT orphan planning
+# executes dpkg only against this isolated rootfs, not the VM host.
+sudo mkdir -p "$native_guest/var/lib/apt"
+printf 'Package: rpt-sandbox-demo\nArchitecture: %s\nAuto-Installed: 1\n\n' "$arch" \
+  | sudo tee "$native_guest/var/lib/apt/extended_states" >/dev/null
+sudo ./target/debug/rpt native-rootfs-autoremove-planned \
+  --rootfs "$native_guest" --id native-autoremove \
+  --journal-dir "$root/native-journal" --architecture "$arch" --timeout-seconds 180
+grep -Fq '"phase": "succeeded"' "$root/native-journal/native-autoremove.json"
+./target/debug/rpt native-rootfs-prepare-transaction \
+  --rootfs "$native_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/native-purge-install.json" rpt-sandbox-demo
+sudo ./target/debug/rpt native-rootfs-apply-transaction \
+  --rootfs "$native_guest" --id native-purge-install \
+  --transaction "$root/native-purge-install.json" --artifacts "$root/sandbox-artifacts" \
+  --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-journal" --timeout-seconds 180
+sudo ./target/debug/rpt native-rootfs-remove-planned \
+  --rootfs "$native_guest" --id native-purge \
+  --journal-dir "$root/native-journal" --architecture "$arch" \
+  --purge rpt-sandbox-demo
+grep -Fq '"phase": "succeeded"' "$root/native-journal/native-purge.json"
+test -z "$(sudo dpkg --root="$native_guest" --audit)"
 test ! -e /var/lib/dpkg/info/rpt-sandbox-demo.list
-echo "PASS RPT native disposable-rootfs install, stale-plan refusal and host isolation"
+echo "PASS native rootfs install, remove, reinstall, autoremove, purge and no host changes"
 
 # Install/remove and install/purge exercise actual dpkg operations in the
 # same isolated container; different journals and disposable roots each time.
