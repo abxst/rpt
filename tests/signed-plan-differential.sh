@@ -414,16 +414,43 @@ fi
   --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
   --cache "$root/rpt-cache" --journal-dir "$root/session-journal" \
   --architecture "$arch" --timeout-seconds 180
-# Mark our fixture as auto-installed inside the sandbox; the installed
-# Debian base packages remain manual roots.
-cat > "$root/sandbox-auto-states" <<'EOF'
-Package: rpt-sandbox-demo
-Architecture: all
-Auto-Installed: 1
-
-EOF
-docker exec "rpt-session-$session" mkdir -p /var/lib/apt
-docker cp "$root/sandbox-auto-states" "rpt-session-$session:/var/lib/apt/extended_states"
+# APT mark operations use durable journals and snapshots instead of direct
+# Docker copying of extended_states into the test guest.
+# This disposable guest is seeded with an empty APT mark set for a precise
+# autoremove oracle; real base images can contain unrelated automatic packages.
+# This also exercises the initially absent extended_states path.
+docker exec "rpt-session-$session" /bin/sh -ec 'rm -f /var/lib/apt/extended_states'
+if ./target/debug/rpt sandbox-session-mark \
+  --session "$session" --id invalid-mark --journal-dir "$root/session-journal" \
+  auto nonexistent-rpt-package >/dev/null 2>&1; then
+  echo "Unknown installed package was accepted by sandbox marking" >&2; exit 1
+fi
+if ./target/debug/rpt sandbox-session-mark \
+  --session "$session" --id invalid-duplicate --journal-dir "$root/session-journal" \
+  auto rpt-sandbox-demo rpt-sandbox-demo:all >/dev/null 2>&1; then
+  echo "Duplicate marking request was accepted" >&2; exit 1
+fi
+./target/debug/rpt sandbox-session-mark \
+  --session "$session" --id mark-auto --journal-dir "$root/session-journal" \
+  --timeout-seconds 180 auto rpt-sandbox-demo
+grep -Fq '"phase": "succeeded"' "$root/session-journal/mark-auto.json"
+docker exec "rpt-session-$session" apt-mark showauto rpt-sandbox-demo \
+  | grep -Fxq rpt-sandbox-demo
+./target/debug/rpt sandbox-session-mark \
+  --session "$session" --id mark-manual --journal-dir "$root/session-journal" \
+  --timeout-seconds 180 manual rpt-sandbox-demo
+docker exec "rpt-session-$session" apt-mark showmanual rpt-sandbox-demo \
+  | grep -Fxq rpt-sandbox-demo
+./target/debug/rpt sandbox-session-plan-autoremove \
+  --session "$session" --architecture "$arch" > "$root/plan-after-manual.json"
+python3 - "$root/plan-after-manual.json" <<'PY'
+import json,sys
+plan=json.load(open(sys.argv[1]))
+assert 'rpt-sandbox-demo:all' not in plan['remove'], plan
+PY
+./target/debug/rpt sandbox-session-mark \
+  --session "$session" --id mark-auto-again --journal-dir "$root/session-journal" \
+  --timeout-seconds 180 auto rpt-sandbox-demo
 ./target/debug/rpt sandbox-session-plan-autoremove \
   --session "$session" --architecture "$arch" > "$root/plan-autoremove.json"
 python3 - "$root/plan-autoremove.json" <<'PY'

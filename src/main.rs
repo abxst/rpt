@@ -400,6 +400,15 @@ enum Command {
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
     },
+    /// Mark installed packages auto/manual only inside a journaled Docker sandbox.
+    SandboxSessionMark {
+        #[arg(long)] session: String,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(value_parser = ["auto", "manual"])] mode: String,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Preview APT candidate-policy install plan against this sandbox's dpkg state.
     SandboxSessionPlanInstall {
         #[arg(long)] session: String,
@@ -904,6 +913,12 @@ async fn execute(cli: Cli) -> Result<()> {
                 &architecture, timeout_seconds)
                 .await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::SandboxSessionMark { session, id, journal_dir, timeout_seconds, mode, packages } => {
+            rpt::sandbox_session::mark(&session, &journal_dir, &id, &mode,
+                &packages, timeout_seconds)
+                .await.context(ErrorCategory::System)?;
+            println!("Sandbox APT {mode} marks applied and audited; host package state unchanged.");
         }
         Command::SandboxSessionPlanInstall { session, cache, apt_root, architecture, max_packages, include_recommends, packages } => {
             let steps = rpt::sandbox_session::plan_install_with_options(

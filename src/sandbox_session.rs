@@ -2,7 +2,7 @@
 //! Container root may persist across commands, but the host dpkg database
 //! and root filesystem are never mounted or modified.
 use crate::{
-    artifact_store, dry_run_executor::DryRunExecutor,
+    artifact_store, cache_query, dry_run_executor::DryRunExecutor,
     install_plan::{self, PlanStep}, package_provenance::{self, ExactManifest},
     removal_planner::{self, RemovalPlan},
     sandbox_execution::{self, DPKG_CHECK_SCRIPT, DPKG_INSTALL_SCRIPT},
@@ -250,6 +250,123 @@ dpkg --remove -- "$@"
 dpkg --audit
 "#;
 
+/// Mark one or more installed sandbox packages as APT automatic/manual.
+const MARK_SNAPSHOT_SCRIPT: &str = r#"set -eu
+expected_status="$1"; expected_marks="$2"; mode="$3"; shift 3
+actual_status="$(sha256sum /var/lib/dpkg/status | cut -d ' ' -f1)"
+if [ "$actual_status" != "$expected_status" ]; then
+    echo "Sandbox dpkg status changed since mark planning" >&2
+    exit 1
+fi
+if [ "$expected_marks" = "missing" ]; then
+    if [ -e /var/lib/apt/extended_states ] || [ -L /var/lib/apt/extended_states ]; then
+        echo "Sandbox APT marks appeared since planning" >&2
+        exit 1
+    fi
+else
+    if [ ! -f /var/lib/apt/extended_states ] || [ -L /var/lib/apt/extended_states ]; then
+        echo "Sandbox APT marks are no longer a regular file" >&2
+        exit 1
+    fi
+    actual_marks="$(sha256sum /var/lib/apt/extended_states | cut -d ' ' -f1)"
+    if [ "$actual_marks" != "$expected_marks" ]; then
+        echo "Sandbox APT marks changed since planning" >&2
+        exit 1
+    fi
+fi
+apt-mark "$mode" "$@"
+after_status="$(sha256sum /var/lib/dpkg/status | cut -d ' ' -f1)"
+if [ "$after_status" != "$expected_status" ]; then
+    echo "APT marking unexpectedly changed sandbox dpkg status" >&2
+    exit 1
+fi
+for package in "$@"; do
+    if [ -z "$(apt-mark "show$mode" "$package")" ]; then
+        echo "APT mark did not take effect for $package" >&2
+        exit 1
+    fi
+done
+dpkg --audit
+"#;
+
+/// Resolve requested names against the exact installed binary catalog.
+/// Bare names are only legal when no foreign copy makes them ambiguous.
+fn resolve_mark_packages(status: &[u8], requests: &[String]) -> Result<Vec<String>> {
+    if requests.is_empty() || requests.len() > 128 {
+        bail!("expected 1..=128 installed binary identities to mark");
+    }
+    let catalog = cache_query::installed_catalog_from_bytes(status)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut result = Vec::new();
+    for request in requests {
+        validate_package(request)?;
+        let (name, architecture) = request.split_once(':')
+            .map_or((request.as_str(), None), |(name, arch)| (name, Some(arch)));
+        let matching = catalog.keys().filter(|key| key.name == name).collect::<Vec<_>>();
+        if matching.is_empty() {
+            bail!("package is not installed in sandbox: {request}");
+        }
+        let selected = match architecture {
+            Some(arch) => matching.iter().copied()
+                .find(|key| key.architecture == arch)
+                .with_context(|| format!("installed architecture not found: {request}"))?,
+            None if matching.len() == 1 => matching[0],
+            None => bail!("ambiguous installed package {name}; specify :architecture"),
+        };
+        let identity = format!("{}:{}", selected.name, selected.architecture);
+        if !seen.insert(identity) { bail!("duplicate APT mark request: {request}"); }
+        // APT accepts an unqualified name for a unique installed binary,
+        // including Architecture: all; never collapse ambiguous Multi-Arch.
+        result.push(if matching.len() == 1 {
+            selected.name.clone()
+        } else {
+            format!("{}:{}", selected.name, selected.architecture)
+        });
+    }
+    Ok(result)
+}
+
+/// Read an optional APT extended-states file. A missing file is a legitimate
+/// initial state; all other read failures and nonregular paths fail closed.
+async fn optional_mark_state(container: &str) -> Result<Option<Vec<u8>>> {
+    let script = "file=/var/lib/apt/extended_states; if [ -L \"$file\" ]; then exit 15; \
+        elif [ -f \"$file\" ]; then cat \"$file\"; \
+        elif [ -e \"$file\" ]; then exit 15; else exit 42; fi";
+    let output = docker(&[
+        "exec".into(), container.into(), "/bin/sh".into(), "-ec".into(), script.into(),
+    ]).await?;
+    if output.status.code() == Some(42) { return Ok(None); }
+    if !output.status.success() {
+        bail!("reading sandbox APT marks: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    if output.stdout.len() > 64 * 1024 * 1024 { bail!("sandbox APT marks exceed 64 MiB"); }
+    Ok(Some(output.stdout))
+}
+
+/// Journaled and checkpointed sandbox-only APT auto/manual marking.
+/// This neither edits the host dpkg database nor implicitly removes packages.
+pub async fn mark(
+    session: &str, journal: &Path, id: &str, mode: &str,
+    packages: &[String], timeout_seconds: u64,
+) -> Result<()> {
+    if !matches!(mode, "auto" | "manual") { bail!("mark mode must be auto or manual"); }
+    let (container, status) = status_snapshot(session).await?;
+    let names = resolve_mark_packages(&status, packages)?;
+    let marks = optional_mark_state(&container).await?;
+    let status_hash = hex::encode(Sha256::digest(&status));
+    let marks_hash = marks.as_ref().map_or_else(
+        || "missing".to_owned(),
+        |bytes| hex::encode(Sha256::digest(bytes)),
+    );
+    let mut args = vec![
+        "exec".to_owned(), container, "/bin/sh".into(), "-euc".into(),
+        MARK_SNAPSHOT_SCRIPT.into(), "rpt-sandbox-mark".into(),
+        status_hash, marks_hash, mode.into(),
+    ];
+    args.extend(names);
+    run_command(session, journal, id, "docker", args, timeout_seconds).await
+}
+
 async fn guest_file(container: &str, file: &str) -> Result<Vec<u8>> {
     let result = docker(&[
         "exec".to_owned(), container.to_owned(), "cat".to_owned(), file.to_owned(),
@@ -459,6 +576,30 @@ mod tests {
         assert!(validate_package("--force-remove").is_err());
         assert!(validate_package("a").is_err());
         assert!(validate_package("foo:").is_err());
+    }
+    #[test]
+    fn mark_resolution_rejects_unknown_duplicate_and_ambiguous_installs() {
+        let status = b"Package: demo-pkg\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n\n\
+Package: demo-pkg\nStatus: install ok installed\nArchitecture: i386\nVersion: 1\n\n\
+Package: common-pkg\nStatus: install ok installed\nArchitecture: all\nVersion: 1\n\n";
+        assert!(resolve_mark_packages(status, &["demo-pkg".into()]).is_err());
+        assert!(resolve_mark_packages(status, &["unknown-pkg".into()]).is_err());
+        assert!(resolve_mark_packages(status, &["--force-remove".into()]).is_err());
+        assert!(resolve_mark_packages(status, &[]).is_err());
+        assert_eq!(resolve_mark_packages(status, &["demo-pkg:i386".into()]).unwrap(),
+            vec!["demo-pkg:i386"]);
+        assert_eq!(resolve_mark_packages(status, &["common-pkg:all".into()]).unwrap(),
+            vec!["common-pkg"]);
+        assert!(resolve_mark_packages(status, &[
+            "common-pkg".into(), "common-pkg:all".into()
+        ]).is_err());
+    }
+    #[test]
+    fn mark_requires_guest_preflight_and_postflight() {
+        assert!(MARK_SNAPSHOT_SCRIPT.contains("apt-mark \"$mode\""));
+        assert!(MARK_SNAPSHOT_SCRIPT.contains("show$mode"));
+        assert!(MARK_SNAPSHOT_SCRIPT.contains("dpkg --audit"));
+        assert!(!MARK_SNAPSHOT_SCRIPT.contains("--force"));
     }
     #[test]
     fn scripts_never_bind_host_roots() {
