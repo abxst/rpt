@@ -145,6 +145,25 @@ Filename: pool/rpt-native-virtual-impl_1.0_amd64.deb
 Size: 1
 Description: versioned native virtual implementation
 
+Package: rpt-cross-virtual-provider
+Version: 1.0
+Architecture: amd64
+Multi-Arch: foreign
+Provides: rpt-cross-virtual-cap (= 7.0)
+Depends: rpt-native-virtual-impl (>= 1.0)
+Filename: pool/rpt-cross-virtual-provider_1.0_amd64.deb
+Size: 1
+Description: signed foreign native virtual provider with native dependency
+
+Package: rpt-cross-any-provider
+Version: 1.0
+Architecture: amd64
+Multi-Arch: allowed
+Provides: rpt-cross-any-cap (= 7.0)
+Filename: pool/rpt-cross-any-provider_1.0_amd64.deb
+Size: 1
+Description: signed allowed native provider for foreign any virtual dependency
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
@@ -257,6 +276,38 @@ Filename: pool/rpt-native-virtual-decoy_99.0_i386.deb
 Size: 1
 Description: foreign versioned virtual decoy
 
+Package: rpt-cross-virtual-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-cross-virtual-cap (>= 7.0)
+Filename: pool/rpt-cross-virtual-user_1.0_i386.deb
+Size: 1
+Description: i386 app requiring native foreign virtual provider
+
+Package: rpt-cross-any-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-cross-any-cap:any (>= 7.0)
+Filename: pool/rpt-cross-any-user_1.0_i386.deb
+Size: 1
+Description: i386 app requiring native allowed virtual provider
+
+Package: rpt-cross-installed-only-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-cross-installed-only-cap (>= 7.0)
+Filename: pool/rpt-cross-installed-only-user_1.0_i386.deb
+Size: 1
+Description: i386 app requiring virtual capability from native dpkg status
+
+Package: rpt-cross-virtual-decoy
+Version: 99.0
+Architecture: i386
+Provides: rpt-cross-virtual-cap (= 6.0)
+Filename: pool/rpt-cross-virtual-decoy_99.0_i386.deb
+Size: 1
+Description: version insufficient i386 virtual provider must not match
+
 Package: rpt-pair
 Version: 1.0
 Architecture: i386
@@ -364,6 +415,46 @@ compare_plan() {
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
 }
+compare_plan cross-virtual "$root/empty-status" rpt-cross-virtual-user:i386
+grep -Fxq 'rpt-cross-virtual-user:i386 1.0' "$root/rpt-cross-virtual-selected"
+grep -Fxq 'rpt-cross-virtual-provider 1.0' "$root/rpt-cross-virtual-selected"
+grep -Fxq 'rpt-native-virtual-impl 1.0' "$root/rpt-cross-virtual-selected"
+! grep -Fq 'rpt-cross-virtual-decoy' "$root/rpt-cross-virtual"
+test "$(wc -l < "$root/rpt-cross-virtual-selected")" -eq 3
+compare_plan cross-any "$root/empty-status" rpt-cross-any-user:i386
+grep -Fxq 'rpt-cross-any-provider 1.0' "$root/rpt-cross-any-selected"
+test "$(wc -l < "$root/rpt-cross-any-selected")" -eq 2
+# An installed native provider's Multi-Arch and virtual Provides must
+# match the requesting i386 dependency. Do not infer its capabilities
+# from the signed repository's current candidate.
+cat >"$root/cross-installed-only" <<'EOF'
+Package: rpt-cross-status-provider
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Multi-Arch: foreign
+Provides: rpt-cross-installed-only-cap (= 7.0)
+Description: installed-only native foreign virtual provider
+
+EOF
+compare_plan cross-installed-only "$root/cross-installed-only" rpt-cross-installed-only-user:i386
+test "$(wc -l < "$root/rpt-cross-installed-only-selected")" -eq 1
+grep -Fxq 'rpt-cross-installed-only-user:i386 1.0' "$root/rpt-cross-installed-only-selected"
+sed 's/Multi-Arch: foreign/Multi-Arch: no/' "$root/cross-installed-only" >"$root/cross-installed-no"
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/cross-installed-no" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-cross-installed-only-user:i386 >"$root/cross-installed-no.log" 2>&1; then
+  echo 'RPT incorrectly allowed non-Multi-Arch installed virtual provider' >&2; exit 1
+fi
+sed 's/Provides: rpt-cross-installed-only-cap (= 7.0)/Provides: rpt-cross-installed-only-cap (= 6.0)/' \
+  "$root/cross-installed-only" >"$root/cross-installed-old"
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/cross-installed-old" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-cross-installed-only-user:i386 >"$root/cross-installed-old.log" 2>&1; then
+  echo 'RPT incorrectly accepted outdated installed virtual capability' >&2; exit 1
+fi
 compare_plan native-virtual "$root/empty-status" rpt-native-virtual-user:i386
 grep -Fxq 'rpt-native-virtual-tool 2.0' "$root/rpt-native-virtual-selected"
 grep -Fxq 'rpt-native-virtual-impl 1.0' "$root/rpt-native-virtual-selected"
@@ -541,4 +632,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS signed Multi-Arch native virtual Provides, Pre-Depends, ordered alternatives and tamper refusal'
+echo 'PASS signed Multi-Arch cross-architecture virtual Provides, :any and installed-status safety'
