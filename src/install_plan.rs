@@ -2469,6 +2469,14 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         direct.get_mut(&PackageKey {
             name: "cross-app".into(), architecture: "i386".into(),
         }).unwrap().depends = "native-helper (>= 3)".into();
+        let local = run(&direct, &empty).unwrap();
+        assert!(local.iter().any(|step| step.package == "native-helper"
+            && step.architecture == "i386" && step.version == "99"));
+        // With the legitimate i386 binary absent, a native helper with
+        // Multi-Arch: no cannot replace it across the architecture boundary.
+        direct.remove(&PackageKey {
+            name: "native-helper".into(), architecture: "i386".into(),
+        });
         assert!(run(&direct, &empty).is_err());
     }
     #[test]
