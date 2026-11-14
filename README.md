@@ -428,6 +428,22 @@ APT/RPT differential fixture now covers this scenario.
 This improves policy planning only. It does not enable full APT virtual
 provider ranking or production dpkg execution.
 
+### Bounded multiple virtual-provider search (read-only)
+
+The dependency solver now explores up to 32 candidate providers of a
+virtual `Depends` or `Recommends` through bounded backtracking. Each
+provider's transitive requirements and conflicts with explicitly requested
+roots must pass. If only one provider is viable, that candidate may be
+selected; when multiple providers are equally viable, the planner still
+fails closed instead of guessing APT's policy. Versioned `Provides`
+constraints are evaluated against the virtual version, not the provider
+binary version. Signed APT/RPT simulation covers a conflict-forced
+unique selection with both requested-root orders.
+
+Explicit virtual roots, ambiguous virtual `Pre-Depends`, full APT
+candidate-provider ranking and production install execution remain
+unsupported.
+
 ### Native disposable-rootfs install/upgrade (development only)
 
 The `native-rootfs-prepare-transaction` and
