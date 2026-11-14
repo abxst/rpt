@@ -47,6 +47,13 @@ dependency safety check (never a direct arbitrary dpkg invocation):
       --rootfs /tmp/my-guest --architecture amd64 --id remove-001 \
       --journal-dir ./rpt-native-journal demo-package
 
+Mark an installed guest package automatic or manual using **guest APT**, not
+host APT:
+
+    sudo rpt native-rootfs-mark \
+      --rootfs /tmp/my-guest --id mark-001 \
+      --journal-dir ./rpt-native-journal auto demo-package
+
 For conffile cleanup, add `--purge`. For automatic orphans already marked
 in the **guest** `/var/lib/apt/extended_states`:
 
@@ -69,8 +76,8 @@ Do not rerun blindly; retain the rootfs and journal for manual inspection.
 - No Docker process is needed to *apply* the plan. The acceptance test
   exports official images to construct its test rootfs, but **RPT native
   execution does not call Docker**.
-- Native **install, explicit upgrade, planned remove, purge and autoremove**.
-  Auto/manual marking, full-upgrade and a native host executor remain unsupported.
+- Native **install, explicit upgrade, planned remove, purge, auto/manual
+  marking and autoremove**. Full-upgrade and a live-host executor remain unsupported.
   Removal uses the conservative guest dpkg dependency planner; autoremove
   additionally binds guest APT extended states and rejects changed marks.
 - Explicitly **refuses the live root /** and arbitrary host paths.
