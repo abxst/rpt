@@ -199,16 +199,20 @@ fn satisfies(version_string: &str, required: &Requirement) -> Result<bool> {
 /// A conservative, single-name provider list. Debian versioned virtual
 /// Provides require an exact "=", not a range. Never use a provider's *own*
 /// version as proof of a versioned virtual capability.
-fn provides(summary: &PackageSummary) -> Result<Vec<Requirement>> {
-    if summary.provides.trim().is_empty() { return Ok(Vec::new()); }
-    summary.provides.split(',').map(|part| {
-        if part.contains('|') { bail!("unsupported alternatives in Provides for {}", summary.name); }
+fn provides_fields(owner: &str, raw: &str) -> Result<Vec<Requirement>> {
+    if raw.trim().is_empty() { return Ok(Vec::new()); }
+    raw.split(',').map(|part| {
+        if part.contains('|') { bail!("unsupported alternatives in Provides for {owner}"); }
         let cap = parse_atom(part)?;
         if cap.constraint.as_ref().is_some_and(|(op, _)| op != "=") {
-            bail!("unsupported version relation in Provides for {}", summary.name);
+            bail!("unsupported version relation in Provides for {owner}");
         }
         Ok(cap)
     }).collect()
+}
+
+fn provides(summary: &PackageSummary) -> Result<Vec<Requirement>> {
+    provides_fields(&summary.name, &summary.provides)
 }
 
 fn capability_satisfies(cap: &Requirement, required: &Requirement) -> Result<bool> {
@@ -447,6 +451,10 @@ struct Solver<'a> {
     /// constraints even before the solver reaches a later root. A dependency
     /// alternative must not defeat a root the user explicitly requested.
     requested_roots: BTreeSet<PackageKey>,
+    /// Proof that an installed binary satisfied a virtual Depends. Revalidate
+    /// against the FINAL staged package set so later upgrades cannot silently
+    /// remove its Provides capability.
+    installed_provider_proofs: Vec<(PackageKey, Requirement)>,
 }
 
 impl Solver<'_> {
@@ -478,6 +486,69 @@ impl Solver<'_> {
             found = Some((key, version));
         }
         Ok(found)
+    }
+
+    /// Use only the dpkg-installed *native or all* binary's own Provides
+    /// metadata. A repository's newer candidate is not evidence of what the
+    /// installed version provides. However, if this transaction upgrades the
+    /// provider, the new candidate must still advertise the capability.
+    fn effective_installed_provides(&self, key: &PackageKey) -> Result<Vec<Requirement>> {
+        let relation = self.installed_relations.get(key)
+            .context("installed provider missing dpkg relationship metadata")?;
+        let installed_version = self.installed.get(key)
+            .context("installed provider missing installed version")?;
+        if relation.version != *installed_version {
+            bail!("installed virtual provider has inconsistent dpkg metadata");
+        }
+        let staged = self.plan.iter().any(|step|
+            step.package == key.name && step.architecture == key.architecture);
+        let pending_root_upgrade = self.requested_roots.contains(key)
+            && self.catalog.get(key).is_some_and(|candidate|
+                candidate.version != *installed_version);
+        if staged || pending_root_upgrade {
+            let candidate = self.catalog.get(key)
+                .context("staged virtual provider missing verified candidate metadata")?;
+            provides(candidate)
+        } else {
+            provides_fields(&key.name, &relation.provides)
+        }
+    }
+
+    fn installed_virtual_provider(&self, required: &Requirement) -> Result<Option<PackageKey>> {
+        // Installed :any/foreign virtual substitution remains unsupported.
+        if required.any_arch || required.requested_arch.is_some() {
+            return Ok(None);
+        }
+        for key in self.installed.keys() {
+            if key.architecture != self.architecture && key.architecture != "all" {
+                continue;
+            }
+            if !self.installed_relations.contains_key(key) {
+                continue; // Only in-process synthetic solver fixtures omit status metadata.
+            }
+            if self.effective_installed_provides(key)?.iter()
+                .any(|cap| capability_satisfies(cap, required).unwrap_or(false)) {
+                return Ok(Some(key.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn verify_installed_provider_proofs(&self) -> Result<()> {
+        for (key, required) in &self.installed_provider_proofs {
+            let mut matched = false;
+            for capability in self.effective_installed_provides(key)? {
+                if capability_satisfies(&capability, required)? {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                bail!("installed virtual provider {}:{} no longer satisfies {} after planned changes",
+                    key.name, key.architecture, required.name);
+            }
+        }
+        Ok(())
     }
 
     fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
