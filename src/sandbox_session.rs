@@ -438,6 +438,8 @@ pub async fn prepare_download_plan_with_options(
     package_provenance::prepare_exact(cache, &steps, architecture)
 }
 
+fn omit_false(value: &bool) -> bool { !*value }
+
 /// Bound, read-only transaction intent using one exact container dpkg snapshot.
 /// Its top-level packages field remains consumable by the existing fetch CLI.
 #[derive(Debug, Serialize, Deserialize)]
@@ -450,6 +452,10 @@ pub struct BoundTransaction {
     pub max_packages: usize,
     #[serde(default)]
     pub include_recommends: bool,
+    /// Opt-in whole-installed-state verification on disposable native apply.
+    /// The existing sandbox and explicit-install transaction format is unchanged.
+    #[serde(default, skip_serializing_if = "omit_false")]
+    pub system_upgrade: bool,
     pub steps: Vec<PlanStep>,
     #[serde(flatten)]
     pub manifest: ExactManifest,
@@ -476,7 +482,8 @@ pub async fn prepare_bound_with_options(
     Ok(BoundTransaction {
         schema_version: 1, session: session.into(), architecture: architecture.into(),
         status_sha256: hex::encode(Sha256::digest(&status)),
-        requested: packages.to_vec(), max_packages, include_recommends, steps, manifest,
+        requested: packages.to_vec(), max_packages, include_recommends,
+        system_upgrade: false, steps, manifest,
     })
 }
 
