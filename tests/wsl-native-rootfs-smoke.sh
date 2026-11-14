@@ -209,5 +209,33 @@ for transaction in wsl-install wsl-mark-only-seed wsl-mark-only wsl-remove \
   wsl-conffile-remove wsl-conffile-purge; do
   grep -Fq '"phase": "succeeded"' "$journal/$transaction.json"
 done
-echo "PASS WSL signed lifecycle, journaled mark-only/no-dpkg, auto/manual, config-only purge, live dpkg unchanged"
+# Recovery diagnostics observe an unchanged guest and journal but do not
+# authorize a retry or mutate the journal. A deliberately unfinished record
+# in an independent journal must be reported without clearing it.
+sudo "$rpt" native-rootfs-recovery-inspect \
+  --rootfs "$guest" --journal-dir "$journal" >"$work/recovery-healthy.json"
+python3 - "$work/recovery-healthy.json" <<'PY'
+import json, sys
+x=json.load(open(sys.argv[1]))
+assert len(x["dpkg_status_sha256"]) == 64
+assert x["dpkg_audit"] == ""
+assert not x["needs_operator_review"]
+assert not x["journal"]["requires_manual_recovery"]
+assert x["journal"]["records"]
+PY
+mkdir -p "$work/unfinished-journal"
+printf '%s\n' '{"id":"unfinished","phase":"running","error":null}' \
+  >"$work/unfinished-journal/unfinished.json"
+sudo "$rpt" native-rootfs-recovery-inspect \
+  --rootfs "$guest" --journal-dir "$work/unfinished-journal" \
+  >"$work/recovery-unfinished.json"
+python3 - "$work/recovery-unfinished.json" <<'PY'
+import json, sys
+x=json.load(open(sys.argv[1]))
+assert x["needs_operator_review"] and x["journal"]["requires_manual_recovery"]
+assert x["journal"]["records"][0]["phase"] == "running"
+PY
+grep -Fq '"phase":"running"' "$work/unfinished-journal/unfinished.json"
+test "$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)" = "$host_before"
+echo "PASS WSL signed lifecycle, marks, conffile purge, read-only recovery inspection; live dpkg unchanged"
 echo "Inspect test artifacts: $work"
