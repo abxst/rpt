@@ -406,8 +406,6 @@ enum Command {
         #[arg(long)] id: String,
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
-        /// Opt-in full-tree checkpoint before APT state change.
-        #[arg(long)] checkpoint_rootfs: Option<PathBuf>,
         #[arg(value_parser = ["auto", "manual"])] mode: String,
         #[arg(required = true)] packages: Vec<String>,
     },
@@ -512,6 +510,8 @@ enum Command {
         #[arg(long)] id: String,
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        /// Opt-in full-tree checkpoint before APT state change.
+        #[arg(long)] checkpoint_rootfs: Option<PathBuf>,
         #[arg(value_parser = ["auto", "manual"])] mode: String,
         #[arg(required = true)] packages: Vec<String>,
     },
