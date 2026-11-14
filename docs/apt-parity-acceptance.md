@@ -36,6 +36,31 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Verified Recommends policy (opt-in)
+
+The native-architecture, GPG/Release/SHA256-verified candidate planner can
+optionally evaluate Debian `Recommends` relationships. Use
+`rpt plan-install-batch-policy --include-recommends ...` for a read-only
+preview. Recommends are soft requirements: if a recommended package is absent,
+pinned out, conflicts with the mandatory closure, or cannot resolve, the
+mandatory installation remains valid. Any malformed relationship syntax is
+still rejected. Selected optional binaries are subject to the **same**
+candidate pinning, release verification, version and artifact hash rules as
+mandatory dependencies.
+
+Sandbox planning, manifest generation and status-bound install transactions
+also accept `--include-recommends`. The selected mode is serialized into
+the bound transaction intent, and the executor rechecks the same mode before
+performing any Docker-only dpkg operation. Older intents default to `false`.
+Existing RPT commands still default to mandatory-only planning; users must
+opt in until broader APT policy equivalence is proven.
+
+CI compares selected exact package versions with isolated `apt-get -s`
+under `APT::Install-Recommends=true` and `false` against the same signed
+fixture. Multi-root resolution, full Multi-Arch provider selection, complex
+Recommends interactions and ordering heuristics are not yet fully compatible.
+This remains a **partial Gate D/H improvement**, not production authorization.
+
 ## Installed-state removal and autoremove differential
 
 The isolated `tests/apt-removal-autoremove-differential.sh` fixture now

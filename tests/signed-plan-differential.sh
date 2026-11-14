@@ -179,6 +179,21 @@ Filename: pool/rpt-alpha_1.0_all.deb
 Size: 1
 Description: second declared dependency but alphabetically first
 
+Package: rpt-soft-app
+Version: 1.0
+Architecture: all
+Recommends: rpt-soft-extra (>= 1)
+Filename: pool/rpt-soft-app_1.0_all.deb
+Size: 1
+Description: recommends optional addon
+
+Package: rpt-soft-extra
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-soft-extra_1.0_all.deb
+Size: 1
+Description: optional addon for Recommends parity
+
 PACKAGES
 # Each synthetic pool artifact contains one byte; sign the real digest in Packages.
 payload_sha="$(printf 'x' | sha256sum | cut -d' ' -f1)"
@@ -496,6 +511,38 @@ if ./target/debug/rpt plan-install-batch-policy --cache "$root/rpt-cache" \
   echo "RPT unexpectedly accepted jointly conflicting roots" >&2; exit 1
 fi
 echo "PASS signed APT/RPT differential: Debian ordered alternatives and joint multi-root candidate parity"
+
+# Compare APT Install-Recommends=true/false with an explicit RPT preview
+# mode. Both must select the same names and versions from signed metadata.
+apt-get "${opts[@]}" -s -y -o APT::Install-Recommends=true \
+  install rpt-soft-app >"$root/apt-soft-on"
+./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/apt/status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  --include-recommends rpt-soft-app >"$root/rpt-soft-on"
+sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-soft-on" \
+  | LC_ALL=C sort -u >"$root/apt-soft-on-versions"
+sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-soft-on" \
+  | LC_ALL=C sort -u >"$root/rpt-soft-on-versions"
+diff -u "$root/apt-soft-on-versions" "$root/rpt-soft-on-versions"
+grep -Fxq 'rpt-soft-extra 1.0' "$root/rpt-soft-on-versions"
+
+apt-get "${opts[@]}" -s -y -o APT::Install-Recommends=false \
+  install rpt-soft-app >"$root/apt-soft-off"
+./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/apt/status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  rpt-soft-app >"$root/rpt-soft-off"
+sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-soft-off" \
+  | LC_ALL=C sort -u >"$root/apt-soft-off-versions"
+sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-soft-off" \
+  | LC_ALL=C sort -u >"$root/rpt-soft-off-versions"
+diff -u "$root/apt-soft-off-versions" "$root/rpt-soft-off-versions"
+if grep -Fq 'rpt-soft-extra' "$root/rpt-soft-off-versions"; then
+  echo 'RPT included a disabled Recommends edge' >&2; exit 1
+fi
+echo "PASS signed APT/RPT Install-Recommends true/false selected binary/version parity"
+
 
 # Upgrade milestone: add two real packages to signed repository after
 # all original APT/RPT differential fixtures have completed.

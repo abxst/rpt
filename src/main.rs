@@ -266,6 +266,8 @@ enum Command {
         #[arg(long, default_value = "/")] apt_root: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = false)]
+        include_recommends: bool,
         #[arg(required = true)] packages: Vec<String>,
     },
     /// JSON audit of a policy-verified multi-root plan; never executes packages.
@@ -392,6 +394,8 @@ enum Command {
         #[arg(long, default_value = "/")] apt_root: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = false)]
+        include_recommends: bool,
         #[arg(required = true)] packages: Vec<String>,
     },
     /// Produce exact authenticated .deb download manifest using sandbox dpkg state.
@@ -401,6 +405,8 @@ enum Command {
         #[arg(long, default_value = "/")] apt_root: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = false)]
+        include_recommends: bool,
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
     },
@@ -411,6 +417,8 @@ enum Command {
         #[arg(long, default_value = "/")] apt_root: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = false)]
+        include_recommends: bool,
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
     },
@@ -763,9 +771,10 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, packages } => {
-            let steps = rpt::install_plan::preview_many_with_policy(
-                &cache, &status, &apt_root, &packages, &architecture, max_packages
+        Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, include_recommends, packages } => {
+            let steps = rpt::install_plan::preview_many_with_policy_options(
+                &cache, &status, &apt_root, &packages, &architecture, max_packages,
+                include_recommends,
             ).context(ErrorCategory::System)?;
             println!("RPT POLICY-VERIFIED JOINT READ-ONLY PLAN (NOT FULL APT PARITY)");
             for step in &steps {
@@ -862,26 +871,29 @@ async fn execute(cli: Cli) -> Result<()> {
                 .await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
-        Command::SandboxSessionPlanInstall { session, cache, apt_root, architecture, max_packages, packages } => {
-            let steps = rpt::sandbox_session::plan_install(
-                &session, &cache, &apt_root, &architecture, max_packages, &packages,
+        Command::SandboxSessionPlanInstall { session, cache, apt_root, architecture, max_packages, include_recommends, packages } => {
+            let steps = rpt::sandbox_session::plan_install_with_options(
+                &session, &cache, &apt_root, &architecture, max_packages,
+                &packages, include_recommends,
             ).await.context(ErrorCategory::System)?;
             let audit = rpt::transaction_plan_audit::classify(&steps)
                 .context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&audit)?);
         }
-        Command::SandboxSessionPrepareDownloadPlan { session, cache, apt_root, architecture, max_packages, output, packages } => {
-            let ready = rpt::sandbox_session::prepare_download_plan(
-                &session, &cache, &apt_root, &architecture, max_packages, &packages,
+        Command::SandboxSessionPrepareDownloadPlan { session, cache, apt_root, architecture, max_packages, include_recommends, output, packages } => {
+            let ready = rpt::sandbox_session::prepare_download_plan_with_options(
+                &session, &cache, &apt_root, &architecture, max_packages,
+                &packages, include_recommends,
             ).await.context(ErrorCategory::System)?;
             let data = serde_json::to_vec_pretty(&ready)?;
             tokio::fs::write(&output, data).await
                 .context("writing session-specific exact download manifest")?;
             println!("Sandbox session exact manifest: {} artifacts; no dpkg changes", ready.packages.len());
         }
-        Command::SandboxSessionPrepareTransaction { session, cache, apt_root, architecture, max_packages, output, packages } => {
-            let intent = rpt::sandbox_session::prepare_bound(
-                &session, &cache, &apt_root, &architecture, max_packages, &packages,
+        Command::SandboxSessionPrepareTransaction { session, cache, apt_root, architecture, max_packages, include_recommends, output, packages } => {
+            let intent = rpt::sandbox_session::prepare_bound_with_options(
+                &session, &cache, &apt_root, &architecture, max_packages,
+                &packages, include_recommends,
             ).await.context(ErrorCategory::System)?;
             let count = intent.manifest.packages.len();
             tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
