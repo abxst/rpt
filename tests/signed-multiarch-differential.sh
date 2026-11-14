@@ -26,6 +26,7 @@ Description: native library pair
 Package: rpt-common-data
 Version: 1.0
 Architecture: all
+Multi-Arch: foreign
 Filename: pool/rpt-common-data_1.0_all.deb
 Size: 1
 Description: architecture independent dependency of i386 binary
@@ -58,6 +59,7 @@ Description: foreign library pair
 Package: rpt-common-data
 Version: 1.0
 Architecture: all
+Multi-Arch: foreign
 Filename: pool/rpt-common-data_1.0_all.deb
 Size: 1
 Description: architecture independent dependency of i386 binary
