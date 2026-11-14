@@ -36,6 +36,52 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Bounded automatic full-upgrade removal **proposal** (M6 major batch)
+
+The new read-only `rpt plan-auto-full-upgrade` tries the full signed
+no-removal system-upgrade planner first. If a complete no-removal transaction
+is valid, it returns that existing full global post-state audit unchanged.
+
+When it cannot find a globally safe no-removal plan, the candidate-discovery
+phase selects the exact repository-authenticated, APT-policy-eligible
+versions of all installed upgrade roots. Only **Conflicts/Breaks declared
+by those signed selected versions**, or reverse Conflicts/Breaks from the
+existing dpkg status against them, can nominate an installed removal
+candidate. Absence from a signed index alone is never a removal reason.
+Any held, Essential or Protected blocker is rejected.
+
+The conservative search covers at most **eight blocker identities** and
+up to **three removals**, evaluating every combination in ascending
+cardinality (up to 92 scenarios). Each scenario reuses M5's hypothetical
+installed status projection, joint candidate-policy resolver and whole
+system post-state/reverse-dependency auditor. To produce an automatic
+proposal, there must be **exactly one valid minimum-cardinality removal
+set** that preserves all originally requested upgrade roots. Multiple
+equally small valid sets result in a hard error, not arbitrary ranking.
+
+```sh
+rpt plan-auto-full-upgrade --cache ./rpt-lists \\
+  --status ./status-fixture --apt-root ./apt-root \\
+  --architecture amd64 --max-roots 128 --max-packages 200 \\
+  --max-removals 3
+```
+
+The JSON includes `selection.kind` (`no_removal` or
+`removal_scenario`), candidate identities, exact selected removals,
+number of attempted combinations and the full M4/M5 signed global audit.
+The report is always **`executable: false`**, even if its signed
+fixture agrees with `apt-get -s dist-upgrade`. No journal, dpkg removal,
+native-rootfs removal intent, or live-host execution permission is
+created. This is **not full APT dist-upgrade equivalence**: APT's ranking,
+dependency-induced removals and multi-architecture replacement search
+remain outside the supported solver subset.
+
+CI adds a signed multiarch fixture comparing the one-blocker automatic
+proposal with both the M5 explicit scenario and APT's simulated
+`dist-upgrade`, alongside no-removal, held blocker, reverse dependency
+and strict budget refusal cases. Acceptance gates remain conservatively
+incomplete until broader real-distribution coverage is proven.
+
 ## Joint explicit removals + signed system upgrades (M5 large batch)
 
 The experimental `plan-full-upgrade-scenario` reads an original dpkg

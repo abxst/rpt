@@ -29,26 +29,30 @@ fn is_upgrade(current: &str, candidate: &str, held: bool) -> Result<bool> {
     Ok(!held && version::compare(candidate, current)? == Ordering::Greater)
 }
 
-/// Audit a bounded, no-removals upgrade of the *complete* installed native/all
-/// scope. If more roots need upgrades than the solver can jointly evaluate,
-/// REFUSE the request instead of silently previewing a misleading subset.
-///
-/// Every proposed root must originate in an authenticated RPT index and pass
-/// its exact candidate-policy selection before running the joint dependency
-/// solver. The returned report is never an execution authorization.
-pub fn preview(
+/// The signed APT candidate-discovery phase shared by both the no-removal
+/// joint solver and the bounded automatic-removal scenario search. Keeping
+/// one implementation prevents a candidate-policy drift between the paths.
+#[derive(Debug)]
+pub(crate) struct UpgradeDiscovery {
+    pub roots: Vec<String>,
+    pub candidates: Vec<metadata_query::PackageSummary>,
+    pub installed_only: Vec<String>,
+    pub held: Vec<String>,
+    pub unchanged: usize,
+    pub scanned: usize,
+}
+
+pub(crate) fn discover_signed_upgrades(
     cache: &Path, status: &Path, apt_root: &Path, architecture: &str,
-    max_roots: usize, max_packages: usize,
-) -> Result<SystemUpgradeAudit> {
+    max_roots: usize,
+) -> Result<UpgradeDiscovery> {
     if architecture.is_empty() || architecture == "all"
-        || !architecture.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        || !architecture.bytes().all(|b|
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
         bail!("invalid native upgrade architecture");
     }
     if max_roots == 0 || max_roots > 128 {
-        bail!("system upgrade preview supports max_roots 1..=128");
-    }
-    if max_packages == 0 || max_packages > 5000 {
-        bail!("max_packages must be 1..=5000");
+        bail!("system upgrade discovery supports max_roots 1..=128");
     }
     let installed = cache_query::installed_catalog_by_arch(status)?;
     let catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
@@ -61,6 +65,7 @@ pub fn preview(
     )?;
 
     let mut roots = Vec::new();
+    let mut signed_candidates = Vec::new();
     let mut installed_only = Vec::new();
     let mut held = Vec::new();
     let mut unchanged = 0usize;
@@ -120,10 +125,46 @@ pub fn preview(
             bail!("upgrade candidate architecture switch forbidden");
         }
         roots.push(key.name.clone());
+        signed_candidates.push(verified);
         if roots.len() > max_roots {
             bail!("system upgrade needs more than {max_roots} roots; refusing a partial upgrade. Increase --max-roots only within the bounded solver limit (128)");
         }
     }
+
+    Ok(UpgradeDiscovery {
+        roots, candidates: signed_candidates, installed_only, held,
+        unchanged, scanned,
+    })
+}
+
+/// Audit a bounded, no-removals upgrade of the *complete* installed native/all
+/// scope. If more roots need upgrades than the solver can jointly evaluate,
+/// REFUSE the request instead of silently previewing a misleading subset.
+///
+/// Every proposed root must originate in an authenticated RPT index and pass
+/// its exact candidate-policy selection before running the joint dependency
+/// solver. The returned report is never an execution authorization.
+pub fn preview(
+    cache: &Path, status: &Path, apt_root: &Path, architecture: &str,
+    max_roots: usize, max_packages: usize,
+) -> Result<SystemUpgradeAudit> {
+    if architecture.is_empty() || architecture == "all"
+        || !architecture.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        bail!("invalid native upgrade architecture");
+    }
+    if max_roots == 0 || max_roots > 128 {
+        bail!("system upgrade preview supports max_roots 1..=128");
+    }
+    if max_packages == 0 || max_packages > 5000 {
+        bail!("max_packages must be 1..=5000");
+    }
+    let discovery = discover_signed_upgrades(
+        cache, status, apt_root, architecture, max_roots,
+    )?;
+    let UpgradeDiscovery {
+        roots, candidates: _, installed_only, held, unchanged, scanned,
+    } = discovery;
+    let installed = cache_query::installed_catalog_by_arch(status)?;
 
     let steps = if roots.is_empty() {
         Vec::new()

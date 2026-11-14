@@ -690,6 +690,73 @@ if "$rpt" plan-full-upgrade-scenario --cache "$root/cache" \
   echo 'RPT silently truncated joint upgrade root set' >&2; exit 1
 fi
 echo 'PASS M5 signed explicit removal plus global joint upgrades, APT oracle and safety blockers'
+# M6: the read-only automatic proposer must choose the UNIQUE MINIMAL
+# signed-conflict-derived removal set. Verify the prior explicit-scenario
+# oracle and APT dist-upgrade agree for this narrow fixture.
+"$rpt" plan-auto-full-upgrade --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --architecture amd64 --max-removals 3 --max-roots 128 \
+  >"$root/system-auto-full-upgrade.json"
+python3 - "$root/system-auto-full-upgrade.json" \
+  "$root/system-joint-scenario.json" "$root/apt-joint-dist-upgrade" <<'PY'
+import json,sys,re
+auto=json.load(open(sys.argv[1]))
+explicit=json.load(open(sys.argv[2]))
+apt=open(sys.argv[3]).read()
+assert auto['schema_version']==1
+assert not auto['executable']
+assert auto['removal_candidates']==['rpt-conflicting-old:amd64']
+assert auto['selected_removals']==['rpt-conflicting-old:amd64']
+assert auto['combinations_examined']==1
+assert auto['selection']['kind']=='removal_scenario'
+assert auto['selection']['scenario']['original_status_sha256']==explicit['original_status_sha256']
+assert auto['selection']['scenario']['removals']==explicit['removals']
+assert auto['selection']['scenario']['upgrades']['requested_upgrades']==explicit['upgrades']['requested_upgrades']
+assert not auto['selection']['scenario']['executable']
+assert re.search(r'^Remv rpt-conflicting-old(?: |$)',apt,re.M)
+PY
+"$rpt" plan-auto-full-upgrade --cache "$root/cache" \
+  --status "$root/system-upgrade-status" --apt-root "$root/rpt-apt" \
+  --architecture amd64 --max-removals 3 >"$root/system-auto-none.json"
+python3 - "$root/system-auto-none.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r['selection']['kind']=='no_removal'
+assert r['selected_removals']==[] and r['removal_candidates']==[]
+assert r['combinations_examined']==0 and not r['executable']
+assert r['selection']['audit']['transaction']['upgrades']==2
+PY
+# Test the specific blocker held while legitimate upgraded roots remain
+# unheld; broad hold state would suppress the upgrade entirely.
+python3 - "$root/system-with-retired" "$root/system-auto-held" <<'PY'
+import sys
+s=open(sys.argv[1]).read()
+s=s.replace('Package: rpt-conflicting-old\nStatus: install ok installed',
+            'Package: rpt-conflicting-old\nStatus: hold ok installed')
+open(sys.argv[2],'w').write(s)
+PY
+if "$rpt" plan-auto-full-upgrade --cache "$root/cache" \
+  --status "$root/system-auto-held" --apt-root "$root/rpt-apt" \
+  --max-removals 3 >"$root/system-auto-held.log" 2>&1; then
+  echo 'RPT automatically removed a held conflict blocker' >&2; exit 1
+fi
+if "$rpt" plan-auto-full-upgrade --cache "$root/cache" \
+  --status "$root/full-dependency-blocked" --apt-root "$root/rpt-apt" \
+  --max-removals 3 >"$root/system-auto-reverse.log" 2>&1; then
+  echo 'RPT automatically removed an installed reverse dependency target' >&2; exit 1
+fi
+if "$rpt" plan-auto-full-upgrade --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --max-roots 1 >"$root/system-auto-budget.log" 2>&1; then
+  echo 'RPT silently truncated auto full-upgrade roots' >&2; exit 1
+fi
+if "$rpt" plan-auto-full-upgrade --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --max-removals 0 >"$root/system-auto-zero-budget.log" 2>&1; then
+  echo 'RPT accepted an invalid automatic removal budget' >&2; exit 1
+fi
+echo 'PASS M6 bounded signed automatic no-removal and unique-minimal conflict removal oracle'
+
 
 echo 'PASS bounded signed no-removal system upgrade audit vs APT held/installed-only differential'
 compare_plan cross-virtual "$root/empty-status" rpt-cross-virtual-user:i386
