@@ -20,6 +20,9 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   A companion `native-rootfs-prepare-system-upgrade` produces an exact signed
   intent for a marked **disposable off-host rootfs**, reusing the existing
   guest-only dpkg executor and recovery journal.
+  System-upgrade intents now revalidate all retained installed reverse dependencies,
+  versioned virtual providers and Conflicts/Breaks at prepare and at apply time;
+  this remains a conservative test-only subset, not production APT parity.
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

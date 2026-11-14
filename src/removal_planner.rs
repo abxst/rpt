@@ -1,6 +1,6 @@
 //! Read-only removal and autoremove transaction planning from installed dpkg state.
 //! This is a conservative preview, not an authorization to invoke dpkg.
-use crate::{cache_query::{self, InstalledKey}, package_index, version};
+use crate::{cache_query::{self, InstalledKey}, install_plan::PlanStep, metadata_query::PackageSummary, package_index, version};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet, VecDeque}, fs, path::Path};
@@ -12,13 +12,15 @@ struct Requirement {
     relation: Option<(String, String)>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct InstalledPackage {
     version: String,
     multi_arch: String,
     depends: Vec<Vec<Requirement>>,
     recommends: Vec<Vec<Requirement>>,
     provides: Vec<Requirement>,
+    conflicts: Vec<Vec<Requirement>>,
+    breaks: Vec<Vec<Requirement>>,
     protected: bool,
 }
 
@@ -175,6 +177,8 @@ fn read_installed_bytes(data: &[u8]) -> Result<BTreeMap<InstalledKey, InstalledP
                 .into_iter().chain(parse_groups(record.field("Pre-Depends").unwrap_or(""))?).collect(),
             recommends: parse_groups(record.field("Recommends").unwrap_or(""))?,
             provides: parse_provides(record.field("Provides").unwrap_or(""))?,
+            conflicts: parse_groups(record.field("Conflicts").unwrap_or(""))?,
+            breaks: parse_groups(record.field("Breaks").unwrap_or(""))?,
             protected: record.field("Status") == Some("hold ok installed")
                 || critical("Essential")? || critical("Protected")?,
         };
@@ -207,7 +211,9 @@ fn removal_blockers(
         .map(|(key, value)| (key.clone(), InstalledPackage {
             version: value.version.clone(), multi_arch: value.multi_arch.clone(),
             depends: value.depends.clone(), recommends: Vec::new(),
-            provides: value.provides.clone(), protected: value.protected,
+            provides: value.provides.clone(),
+            conflicts: Vec::new(), breaks: Vec::new(),
+            protected: value.protected,
         })).collect::<BTreeMap<_, _>>();
     let mut blockers = BTreeSet::new();
     for key in removed {
@@ -233,6 +239,130 @@ fn result(mode: &str, removed: &BTreeSet<InstalledKey>, blockers: BTreeSet<Strin
         executable: false,
         warning: "Read-only removal intent (executable=false). Applying it requires a separate journaled, state-bound executor; full APT removal and autoremove parity is not guaranteed.".into(),
     }
+}
+
+/// One global simulated dpkg state after a signed no-removals upgrade.
+/// A pass is evidence of consistency only in this conservative dependency
+/// subset; it does NOT authorize executing any package on the live host.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpgradeTransitionAudit {
+    pub installed_before: usize,
+    pub installed_after: usize,
+    pub staged_binaries: usize,
+    pub retained_dependents_checked: usize,
+    pub dependency_groups_checked: usize,
+    pub negative_relations_checked: usize,
+    pub executable: bool,
+}
+
+fn staged_status(item: &PackageSummary, protected: bool) -> Result<InstalledPackage> {
+    if !matches!(item.multi_arch.as_str(), "no" | "same" | "foreign" | "allowed") {
+        bail!("invalid staged Multi-Arch value");
+    }
+    Ok(InstalledPackage {
+        version: item.version.clone(),
+        multi_arch: item.multi_arch.clone(),
+        depends: parse_groups(&item.depends)?.into_iter()
+            .chain(parse_groups(&item.pre_depends)?).collect(),
+        recommends: parse_groups(&item.recommends)?,
+        provides: parse_provides(&item.provides)?,
+        conflicts: parse_groups(&item.conflicts)?,
+        breaks: parse_groups(&item.breaks)?,
+        protected,
+    })
+}
+
+/// Check the *entire* installed state after replacing the exact staged
+/// identities with authenticated candidate metadata. In particular, packages
+/// absent from the solver's explicit root closure can be reverse dependents
+/// of a new version or an old virtual Provides that disappears on upgrade.
+///
+/// Installed metadata is authoritative for every unchanged package. Staged
+/// metadata must have been independently selected/verified from signed cache
+/// and must exactly match every PlanStep identity/version.
+pub fn audit_upgrade_transition(
+    status: &[u8], native: &str, steps: &[PlanStep],
+    signed: &BTreeMap<InstalledKey, PackageSummary>,
+) -> Result<UpgradeTransitionAudit> {
+    checked_arch(native)?;
+    let original = read_installed_bytes(status)?;
+    ensure_initial_dependencies(&original, native)?;
+    let mut projected = original.clone();
+    let mut staged_keys = BTreeSet::new();
+    for step in steps {
+        let key = InstalledKey {
+            name: step.package.clone(), architecture: step.architecture.clone(),
+        };
+        checked_name(&key.name)?;
+        checked_arch(&key.architecture)?;
+        if !staged_keys.insert(key.clone()) {
+            bail!("duplicate staged package identity {}", key_label(&key));
+        }
+        let exact = signed.get(&key).with_context(||
+            format!("missing independently authenticated staged candidate {}", key_label(&key)))?;
+        if exact.name != key.name || exact.architecture != key.architecture
+            || exact.version != step.version {
+            bail!("signed staged candidate identity/version mismatch for {}", key_label(&key));
+        }
+        let existing = original.get(&key);
+        if step.installed.as_deref() != existing.map(|p| p.version.as_str()) {
+            bail!("stale staged installed version for {}", key_label(&key));
+        }
+        if existing.is_some_and(|entry| entry.protected) {
+            bail!("upgrade would alter held, Essential or Protected installed {}", key_label(&key));
+        }
+        projected.insert(key, staged_status(exact, false)?);
+    }
+    // The no-removals transaction cannot silently replace a native package
+    // with the Architecture: all identity (or vice versa).
+    for key in projected.keys() {
+        if key.architecture != "all" && projected.contains_key(&InstalledKey {
+            name: key.name.clone(), architecture: "all".into(),
+        }) {
+            bail!("post-upgrade native/all architecture identity collision for {}", key.name);
+        }
+    }
+
+    let mut dependency_groups_checked = 0;
+    let mut retained_dependents_checked = 0;
+    for (key, pkg) in &projected {
+        if !staged_keys.contains(key) { retained_dependents_checked += 1; }
+        for group in &pkg.depends {
+            dependency_groups_checked += 1;
+            if satisfiers(&projected, group, &key.architecture, native)?.is_empty() {
+                bail!("upgrade would break installed reverse dependency of {}",
+                    key_label(key));
+            }
+        }
+    }
+
+    // Check all negative relationships involving a staged package, not just
+    // the installed packages that appear in the requested dependency closure.
+    // Old negative relationships *between two unchanged binaries* are outside
+    // this transition and are intentionally not treated as a new conflict.
+    let mut negative_relations_checked = 0;
+    for (key, pkg) in &projected {
+        for group in pkg.conflicts.iter().chain(pkg.breaks.iter()) {
+            negative_relations_checked += 1;
+            for matching in satisfiers(&projected, group, &key.architecture, native)? {
+                if matching != *key
+                    && (staged_keys.contains(key) || staged_keys.contains(&matching)) {
+                    bail!("upgrade creates Conflicts/Breaks between {} and {}",
+                        key_label(key), key_label(&matching));
+                }
+            }
+        }
+    }
+
+    Ok(UpgradeTransitionAudit {
+        installed_before: original.len(),
+        installed_after: projected.len(),
+        staged_binaries: staged_keys.len(),
+        retained_dependents_checked,
+        dependency_groups_checked,
+        negative_relations_checked,
+        executable: false,
+    })
 }
 
 /// Plan explicit removals. With cascade, compute reverse-dependent fixed point.
@@ -269,7 +399,9 @@ pub fn remove_snapshot(status: &[u8], native: &str, requested: &[String], cascad
                 .map(|(key, p)| (key.clone(), InstalledPackage {
                     version: p.version.clone(), multi_arch: p.multi_arch.clone(),
                     depends: p.depends.clone(), recommends: Vec::new(),
-                    provides: p.provides.clone(), protected: p.protected,
+                    provides: p.provides.clone(),
+                    conflicts: Vec::new(), breaks: Vec::new(),
+                    protected: p.protected,
                 })).collect::<BTreeMap<_, _>>();
             let mut next = BTreeSet::new();
             for key in remaining {
@@ -427,6 +559,103 @@ mod tests {
         fs::write(&path, contents).unwrap();
         path
     }
+    fn signed_candidate(name: &str, version: &str, provides: &str) -> PackageSummary {
+        PackageSummary {
+            name: name.into(), version: version.into(),
+            architecture: "amd64".into(), multi_arch: "no".into(),
+            description: String::new(), section: String::new(),
+            depends: String::new(), pre_depends: String::new(),
+            recommends: String::new(), suggests: String::new(),
+            provides: provides.into(), conflicts: String::new(),
+            breaks: String::new(), replaces: String::new(),
+        }
+    }
+
+    fn upgrade_step(name: &str, version: &str) -> PlanStep {
+        PlanStep {
+            package: name.into(), architecture: "amd64".into(),
+            version: version.into(), installed: Some("1".into()),
+        }
+    }
+
+    #[test]
+    fn whole_installed_graph_detects_lost_virtual_provides_version() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: virtual-api (<= 1)\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nProvides: virtual-api (= 1)\n\n";
+        let id = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let steps = [upgrade_step("service", "2")];
+        let mut candidates = BTreeMap::from([
+            (id.clone(), signed_candidate("service", "2", "virtual-api (= 2)")),
+        ]);
+        let broken = audit_upgrade_transition(status, "amd64", &steps, &candidates)
+            .unwrap_err().to_string();
+        assert!(broken.contains("consumer"), "{broken}");
+
+        candidates.get_mut(&id).unwrap().provides = "virtual-api (= 1)".into();
+        let safe = audit_upgrade_transition(status, "amd64", &steps, &candidates).unwrap();
+        assert_eq!(safe.installed_before, 2);
+        assert_eq!(safe.installed_after, 2);
+        assert_eq!(safe.retained_dependents_checked, 1);
+        assert!(!safe.executable);
+
+        candidates.get_mut(&id).unwrap().provides.clear();
+        assert!(audit_upgrade_transition(status, "amd64", &steps, &candidates).is_err());
+    }
+
+    #[test]
+    fn alternative_installed_virtual_satisfier_keeps_reverse_dependencies() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: service-cap (<= 1) | alternate-api (>= 2)\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nProvides: service-cap (= 1)\n\n\
+Package: alternate\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\nProvides: alternate-api (= 2)\n\n";
+        let id = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let signed = BTreeMap::from([(
+            id, signed_candidate("service", "2", "service-cap (= 2)"),
+        )]);
+        assert!(audit_upgrade_transition(status, "amd64",
+            &[upgrade_step("service", "2")], &signed).is_ok());
+    }
+
+    #[test]
+    fn staged_upgrade_negative_relation_and_hold_fail_closed() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nConflicts: service (>= 2)\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let key = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let steps = [upgrade_step("service", "2")];
+        let mut signed = BTreeMap::from([(
+            key.clone(), signed_candidate("service", "2", ""),
+        )]);
+        assert!(audit_upgrade_transition(status, "amd64", &steps, &signed)
+            .unwrap_err().to_string().contains("Conflicts/Breaks"));
+        // Signed provider metadata must match actual binary identity/version.
+        signed.get_mut(&key).unwrap().version = "3".into();
+        assert!(audit_upgrade_transition(status, "amd64", &steps, &signed).is_err());
+
+        let held = b"Package: service\nArchitecture: amd64\nVersion: 1\nStatus: hold ok installed\n\n";
+        signed.get_mut(&key).unwrap().version = "2".into();
+        assert!(audit_upgrade_transition(held, "amd64", &steps, &signed)
+            .unwrap_err().to_string().contains("held"));
+    }
+
+    #[test]
+    fn newly_staged_dependency_without_proof_is_rejected() {
+        let status = b"Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let id = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let mut candidate = signed_candidate("service", "2", "");
+        candidate.depends = "absent-helper (>= 1)".into();
+        let signed = BTreeMap::from([(id, candidate)]);
+        assert!(audit_upgrade_transition(status, "amd64",
+            &[upgrade_step("service", "2")], &signed)
+            .unwrap_err().to_string().contains("reverse dependency"));
+    }
+
     #[test]
     fn snapshots_and_file_plans_match() {
         let status = b"Package: rootpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\nPackage: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";

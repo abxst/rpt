@@ -95,7 +95,8 @@ mod tests {
         let bound = BoundTransaction {
             schema_version: 1, session: "dev01".into(), architecture: "amd64".into(),
             status_sha256: "a".repeat(64), requested: vec!["demopkg".into()],
-            max_packages: 20, include_recommends: false, steps: vec![],
+            max_packages: 20, include_recommends: false,
+            system_upgrade: false, steps: vec![],
             manifest: ExactManifest {
                 packages: vec![], executable: false, warning: "test".into(),
             },
