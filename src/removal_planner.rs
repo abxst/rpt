@@ -231,7 +231,7 @@ fn result(mode: &str, removed: &BTreeSet<InstalledKey>, blockers: BTreeSet<Strin
         removable: blockers.is_empty(),
         blockers: blockers.into_iter().collect(),
         executable: false,
-        warning: "Read-only candidate plan only. APT removal/auto-mark parity, maintainer scripts and dpkg execution not implemented.".into(),
+        warning: "Read-only removal intent (executable=false). Applying it requires a separate journaled, state-bound executor; full APT removal and autoremove parity is not guaranteed.".into(),
     }
 }
 
