@@ -464,7 +464,9 @@ decisions and can revisit an earlier root's choice when a later root
 pulls a transitive conflicting dependency. It replays the whole plan
 with previously selected choices fixed, then tries the next alternative,
 sharing a strict 4,096-branch budget across retries. Signed APT/RPT
-simulation checks an indirect conflict with both root orders.
+simulation checks an indirect conflict with both root orders, requiring
+exact parity where APT resolves the graph and explicitly reporting the
+known divergence where an older APT solver rejects the transaction.
 
 This supports concrete textual alternatives only, not general SAT
 resolution, unrestricted virtual-provider ranking, package removals or
