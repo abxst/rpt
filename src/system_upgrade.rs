@@ -1,10 +1,10 @@
 //! Read-only, whole-installed-set upgrade discovery with a bounded joint
 //! policy resolver. This is not apt-get upgrade/full-upgrade and cannot run dpkg.
 use crate::{apt_pin_eval, apt_preferences, cache_query, install_plan, metadata_query,
-    package_provenance, policy, transaction_plan_audit, version};
+    package_provenance, policy, removal_planner, transaction_plan_audit, version};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use std::{cmp::Ordering, collections::BTreeSet, path::Path};
+use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet}, fs, path::Path};
 
 #[derive(Debug, Serialize)]
 pub struct SystemUpgradeAudit {
@@ -14,6 +14,7 @@ pub struct SystemUpgradeAudit {
     pub held: Vec<String>,
     pub requested_upgrades: Vec<String>,
     pub transaction: transaction_plan_audit::PlanAudit,
+    pub post_state: removal_planner::UpgradeTransitionAudit,
     pub executable: bool,
     pub warning: String,
 }
@@ -151,6 +152,32 @@ pub fn preview(
             bail!("joint solver did not preserve required upgrade root {root}");
         }
     }
+    // Solver success only proves its requested closure. Preserve the exact
+    // signed binary metadata for each staged identity and validate the ENTIRE
+    // projected installed dpkg state, including unchanged reverse dependents
+    // and virtual Provides consumers before producing any bound guest intent.
+    let mut signed_steps = BTreeMap::new();
+    for step in &steps {
+        let key = cache_query::InstalledKey {
+            name: step.package.clone(), architecture: step.architecture.clone(),
+        };
+        let origins = package_provenance::verified_version_origins(
+            cache, &step.package, architecture,
+        )?;
+        let verified = metadata_query::verified_exact_version(
+            cache, architecture, &step.package, &step.version, &origins,
+        )?;
+        if verified.architecture != step.architecture {
+            bail!("signed staged candidate changed exact architecture for {}:{}",
+                step.package, step.architecture);
+        }
+        if signed_steps.insert(key, verified).is_some() {
+            bail!("duplicate signed staged candidate");
+        }
+    }
+    let post_state = removal_planner::audit_upgrade_transition(
+        &fs::read(status)?, architecture, &steps, &signed_steps,
+    ).context("whole installed-state upgrade preflight")?;
     Ok(SystemUpgradeAudit {
         scanned_installed: scanned,
         unchanged_or_policy_kept: unchanged,
@@ -158,8 +185,9 @@ pub fn preview(
         held,
         requested_upgrades: roots,
         transaction,
+        post_state,
         executable: false,
-        warning: "Read-only bounded no-removal upgrade preview, NOT apt-get upgrade/full-upgrade parity. No dpkg operations, no live-host execution; unsupported installed dependency/reverse-dependency transitions may require additional APT simulation checks.".into(),
+        warning: "Read-only bounded no-removal upgrade preview, NOT apt-get upgrade/full-upgrade parity. Whole-installed-state reverse dependencies/Conflicts/Breaks verified only for this restricted Debian relationship subset; no dpkg operations, no host execution.".into(),
     })
 }
 
