@@ -530,6 +530,11 @@ struct Solver<'a> {
     replay_rules: BTreeMap<ReplayKey, ReplayRule>,
     /// Chronological decision history along ONLY the committed branch.
     replay_trace: Vec<ReplayChoice>,
+    /// Strict Pre-Depends owner group positions, retained across backtracking.
+    pre_depends_groups: BTreeMap<PackageKey, usize>,
+    /// While visiting a Pre-Depends edge, any recursion to an ancestor is
+    /// unsafe for dependency-first configure ordering.
+    strict_pre_depends_depth: usize,
 }
 
 impl Solver<'_> {
@@ -725,9 +730,22 @@ impl Solver<'_> {
                 if installed.contains_key(&status_key) {
                     return Ok(Vec::new());
                 }
-                return Ok(match self.catalog.get(&key) {
-                    Some(item) if (!required.any_arch || item.multi_arch == "allowed")
-                        && satisfies(&item.version, required)? => vec![key],
+                if let Some(item) = self.catalog.get(&key) {
+                    return Ok(if (!required.any_arch || item.multi_arch == "allowed")
+                        && satisfies(&item.version, required)? { vec![key] } else { Vec::new() });
+                }
+                // A signed Architecture: all leaf is also a valid dependency
+                // identity for a native owner. Require Multi-Arch: foreign
+                // until general all-binary graph semantics are implemented.
+                let universal = PackageKey {
+                    name: required.name.clone(), architecture: "all".into(),
+                };
+                return Ok(match self.catalog.get(&universal) {
+                    Some(item) if item.multi_arch == "foreign"
+                        && !required.any_arch
+                        && item.depends.trim().is_empty()
+                        && item.pre_depends.trim().is_empty()
+                        && satisfies(&item.version, required)? => vec![universal],
                     _ => Vec::new(),
                 });
             }
@@ -885,7 +903,12 @@ impl Solver<'_> {
                         requested_arch: Some(option.architecture.clone()),
                     }
                 };
-                if branch.resolve_concrete(&option, &actual).is_ok()
+                let strict = branch.pre_depends_groups.get(owner)
+                    .is_some_and(|count| index < *count);
+                if strict { branch.strict_pre_depends_depth += 1; }
+                let resolved = branch.resolve_concrete(&option, &actual).is_ok();
+                if strict { branch.strict_pre_depends_depth -= 1; }
+                if resolved
                     && branch.resolve_groups(owner, groups, index + 1, soft).is_ok() {
                     if multiple_virtual && chosen.is_some() {
                         bail!("ambiguous virtual package {}: multiple viable providers",
@@ -1014,6 +1037,9 @@ impl Solver<'_> {
             return Ok(());
         }
         if self.visiting.contains(key) {
+            if self.strict_pre_depends_depth > 0 {
+                bail!("dependency cycle crosses a Pre-Depends edge; configure ordering unsupported");
+            }
             // Read-only package-set preview: a Depends cycle does not require
             // resolving the same binary twice. Never relax version constraints.
             let current = self.catalog.get(key)
@@ -1069,28 +1095,24 @@ impl Solver<'_> {
         } else {
             current.architecture.clone()
         };
-        // Native dependency recursion is read-only and restricted to ordinary
-        // Depends; introducing native Pre-Depends needs ordering semantics.
-        if self.external_native.as_ref().is_some_and(|(native, _)|
-            current.architecture == *native && !current.pre_depends.trim().is_empty()) {
-            bail!("native Pre-Depends in foreign plan require transaction ordering");
-        }
         let pre_groups = parse_groups_for_arch(&current.pre_depends, &dependency_arch)?;
         // A Pre-Depends back-edge cannot be safely represented by a simple
         // package set: configuring the target before unpacking the source
         // requires an execution-order model.
         for group in &pre_groups {
             for dependency in group {
-                if let Some(target) = self.concrete(dependency)? {
-                    if self.visiting.contains(&target) {
-                        bail!("Pre-Depends cycle requires transaction ordering");
-                    }
+                let possible = self.candidates_for_owner(key, dependency)?;
+                if possible.len() > 1 {
+                    bail!("ambiguous Pre-Depends virtual provider");
                 }
             }
         }
+        let pre_count = pre_groups.len();
         let groups = pre_groups.into_iter()
             .chain(parse_groups_for_arch(&current.depends, &dependency_arch)?).collect::<Vec<_>>();
+        self.pre_depends_groups.insert(key.clone(), pre_count);
         self.resolve_groups(key, &groups, 0, false)?;
+        self.pre_depends_groups.remove(key);
         self.visiting.remove(key);
         self.done.insert(key.clone());
         let installed = self.installed.get(key).cloned();
@@ -1119,6 +1141,15 @@ impl Solver<'_> {
                 version: current.version.clone(), installed,
             });
             self.check_negative_relations()?;
+            // Reject a conflicting installed-native alternative inside the
+            // search branch, so the bounded solver can select its sibling.
+            if let Some((native_arch, all_installed)) = self.external_native {
+                reject_foreign_negative_relations_with_native(
+                    self.catalog, all_installed,
+                    std::slice::from_ref(self.plan.last().context("new staged step missing")?),
+                    &self.architecture, Some(native_arch),
+                )?;
+            }
             if self.include_recommends {
                 // APT recommends are soft dependencies. Preserve every
                 // mandatory change even if this suggestion cannot be
@@ -1443,10 +1474,6 @@ pub fn preview_explicit_architecture_with_policy(
             } else {
                 foreign_architecture
             };
-            if item.architecture == native_architecture
-                && !item.pre_depends.trim().is_empty() {
-                bail!("nested native Pre-Depends are unsupported");
-            }
             if item.pre_depends.contains(":native") || item.depends.contains(":native") {
                 bail!("foreign preview does not support :native dependencies");
             }
@@ -1470,6 +1497,17 @@ pub fn preview_explicit_architecture_with_policy(
                         };
                         if catalog.contains_key(&native_key) {
                             mandatory.insert(native_key);
+                        } else {
+                            let universal = PackageKey {
+                                name: dep.name.clone(), architecture: "all".into(),
+                            };
+                            if catalog.get(&universal).is_some_and(|item|
+                                item.multi_arch == "foreign"
+                                && item.depends.trim().is_empty()
+                                && item.pre_depends.trim().is_empty()
+                                && !dep.any_arch) {
+                                mandatory.insert(universal);
+                            }
                         }
                         continue;
                     }
@@ -1521,9 +1559,6 @@ pub fn preview_explicit_architecture_with_policy(
             if step.architecture == native_architecture {
                 let candidate = catalog.get(&identity)
                     .context("native dependency missing signed metadata")?;
-                if !candidate.pre_depends.trim().is_empty() {
-                    bail!("native Pre-Depends are not supported by foreign preview");
-                }
             }
             if !validated.contains(&identity) {
                 bail!("foreign dependency was not policy-validated");
@@ -1658,6 +1693,8 @@ fn solve_catalog_many_options_with_external<'a>(
         installed_provider_proofs: Vec::new(),
         replay_rules: replay_rules.clone(),
         replay_trace: Vec::new(),
+        pre_depends_groups: BTreeMap::new(),
+        strict_pre_depends_depth: 0,
     };
     for package in packages {
         if let Some(key) = solver.key_for(package)? {
@@ -2069,6 +2106,8 @@ mod tests {
             installed_provider_proofs: Vec::new(),
             replay_rules: BTreeMap::new(),
             replay_trace: Vec::new(),
+            pre_depends_groups: BTreeMap::new(),
+            strict_pre_depends_depth: 0,
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -3299,6 +3338,8 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             installed_provider_proofs: Vec::new(),
             replay_rules: BTreeMap::new(),
             replay_trace: Vec::new(),
+            pre_depends_groups: BTreeMap::new(),
+            strict_pre_depends_depth: 0,
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
