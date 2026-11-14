@@ -69,8 +69,8 @@ pub async fn inspect_recovery(root: &Path, journal: &Path) -> Result<NativeRecov
     }
     let status_before = hex::encode(Sha256::digest(status(&root)?));
     let inspection = recovery_inspector::inspect(&journal)?;
-    let process = tokio::process::Command::new("dpkg")
-        .arg(format!("--root={}", root.display()))
+    let mut process = tokio::process::Command::new("dpkg");
+    process.arg(format!("--root={}", root.display()))
         .arg("--audit")
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(15), process.output())
