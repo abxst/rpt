@@ -222,6 +222,44 @@ Filename: pool/rpt-joint-blocker_1.0_all.deb
 Size: 1
 Description: explicitly requested mandatory root
 
+Package: rpt-global-first
+Version: 1.0
+Architecture: all
+Depends: rpt-global-preferred | rpt-global-fallback
+Filename: pool/rpt-global-first_1.0_all.deb
+Size: 1
+Description: earlier root with locally viable but globally bad alternative
+
+Package: rpt-global-preferred
+Version: 1.0
+Architecture: all
+Conflicts: rpt-global-blocker
+Filename: pool/rpt-global-preferred_1.0_all.deb
+Size: 1
+Description: preferred dependency conflicts with later root transitive dependency
+
+Package: rpt-global-fallback
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-global-fallback_1.0_all.deb
+Size: 1
+Description: dependency alternative compatible with full requested graph
+
+Package: rpt-global-second
+Version: 1.0
+Architecture: all
+Depends: rpt-global-blocker
+Filename: pool/rpt-global-second_1.0_all.deb
+Size: 1
+Description: later mandatory root whose dependency exposes global conflict
+
+Package: rpt-global-blocker
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-global-blocker_1.0_all.deb
+Size: 1
+Description: blocker indirectly required by later root
+
 Package: rpt-multi-virtual-app
 Version: 1.0
 Architecture: all
@@ -1037,6 +1075,38 @@ for ordering in app-first blocker-first; do
   fi
 done
 echo "PASS signed APT/RPT mandatory-root dependency backtracking, both orders"
+
+# The conflict is NOT with the later explicitly requested root itself:
+# it arises only from that root's transitive mandatory Depends. RPT must
+# revisit a choice already committed for an earlier root rather than
+# stopping after the locally viable first alternative.
+for ordering in first-second second-first; do
+  if [[ "$ordering" == first-second ]]; then
+    roots=(rpt-global-first rpt-global-second)
+  else
+    roots=(rpt-global-second rpt-global-first)
+  fi
+  apt-get "${opts[@]}" -s -y install "${roots[@]}" \
+    >"$root/apt-global-backtrack"
+  ./target/debug/rpt plan-install-batch-policy \
+    --cache "$root/rpt-cache" --status "$root/apt/status" \
+    --apt-root "$root/rpt-apt" --architecture "$arch" \
+    "${roots[@]}" >"$root/rpt-global-backtrack"
+  sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-global-backtrack" \
+    | LC_ALL=C sort -u >"$root/apt-global-versions"
+  sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-global-backtrack" \
+    | LC_ALL=C sort -u >"$root/rpt-global-versions"
+  test -s "$root/apt-global-versions"
+  diff -u "$root/apt-global-versions" "$root/rpt-global-versions"
+  for pkg in rpt-global-first rpt-global-second rpt-global-fallback rpt-global-blocker; do
+    grep -Fxq "$pkg 1.0" "$root/rpt-global-versions"
+  done
+  if grep -Fq 'rpt-global-preferred ' "$root/rpt-global-versions"; then
+    echo "RPT retained an earlier conflicting dependency branch" >&2; exit 1
+  fi
+done
+echo "PASS signed APT/RPT global backtracking across transitive later root (both orders)"
+
 
 # When several versioned virtual providers exist, a separate explicitly
 # requested package may make all but one infeasible. Compare the exact signed
