@@ -437,6 +437,16 @@ fn scoped_relations(
 
 /// A replayable dependency alternative is identified by its owning binary
 /// and group ordinal, not by plan position (which changes while backtracking).
+/// A newly selected native binary may satisfy an unqualified foreign
+/// Depends only with Multi-Arch: foreign, or :any with Multi-Arch: allowed.
+/// This first read-only milestone admits leaf candidates only.
+fn eligible_native_foreign_leaf(item: &PackageSummary, required: &Requirement) -> bool {
+    required.requested_arch.is_none()
+        && item.multi_arch == if required.any_arch { "allowed" } else { "foreign" }
+        && item.pre_depends.trim().is_empty()
+        && item.depends.trim().is_empty()
+}
+
 /// Read-only proof that an installed native binary can satisfy a foreign
 /// dependency without staging another architecture. This uses the installed
 /// dpkg status (not a repository candidate) and never matches virtual Provides.
@@ -627,6 +637,24 @@ impl Solver<'_> {
             return Ok(if satisfies(&real.version, required)? {
                 vec![key]
             } else { Vec::new() });
+        }
+        // Exact signed native leaf candidates can resolve foreign Depends.
+        // Native-only planning is unchanged; upgrading an already-installed
+        // native binary through a foreign root remains prohibited.
+        if let Some((native_arch, full_status)) = self.external_native {
+            let key = PackageKey {
+                name: required.name.clone(), architecture: native_arch.into(),
+            };
+            if let Some(native) = self.catalog.get(&key) {
+                let installed = cache_query::InstalledKey {
+                    name: key.name.clone(), architecture: key.architecture.clone(),
+                };
+                if eligible_native_foreign_leaf(native, required)
+                    && !full_status.contains_key(&installed)
+                    && satisfies(&native.version, required)? {
+                    return Ok(vec![key]);
+                }
+            }
         }
         if required.any_arch {
             bail!("virtual Provides with :any require a full Multi-Arch resolver");
@@ -1039,8 +1067,23 @@ fn reject_foreign_negative_relations(
     plan: &[PlanStep],
     architecture: &str,
 ) -> Result<()> {
+    reject_foreign_negative_relations_with_native(
+        catalog, installed, plan, architecture, None,
+    )
+}
+
+/// A read-only foreign plan may include new native leaves. Check each native
+/// step against ALL installed package identities, not only the target arch.
+fn reject_foreign_negative_relations_with_native(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    plan: &[PlanStep],
+    architecture: &str,
+    native_architecture: Option<&str>,
+) -> Result<()> {
     for step in plan {
-        if step.architecture != architecture && step.architecture != "all" {
+        let native_step = native_architecture == Some(step.architecture.as_str());
+        if step.architecture != architecture && step.architecture != "all" && !native_step {
             bail!("foreign-architecture transaction step requires a complete foreign resolver");
         }
         let staged_key = PackageKey {
@@ -1054,7 +1097,11 @@ fn reject_foreign_negative_relations(
             bail!("inconsistent planned version for {}:{}", step.package, step.architecture);
         }
         for (key, foreign) in installed {
-            if key.architecture == architecture || key.architecture == "all" { continue; }
+            if !native_step && (key.architecture == architecture || key.architecture == "all") { continue; }
+            if native_step && key.name == step.package
+                && key.architecture == step.architecture {
+                bail!("native installed dependency cannot be upgraded in foreign preview");
+            }
             if !matches!(foreign.multi_arch.as_str(), "no" | "same" | "foreign" | "allowed") {
                 bail!("invalid installed Multi-Arch declaration for {}:{}", key.name, key.architecture);
             }
@@ -1146,7 +1193,9 @@ pub fn preview_explicit_architecture(
     )?;
     // Validate against every installed identity outside the target architecture,
     // including the native host. No removals or version synchronization inferred.
-    reject_foreign_negative_relations(&catalog, &relations, &plan, foreign_architecture)?;
+    reject_foreign_negative_relations_with_native(
+        &catalog, &relations, &plan, foreign_architecture, Some(native_architecture),
+    )?;
     Ok(plan)
 }
 
@@ -1174,6 +1223,23 @@ fn foreign_dependency_identity(
         },
         (false, false) => Ok(None),
     }
+}
+
+/// Discover an exact native leaf only if no foreign or all candidate
+/// occupies that name. Explicit architecture qualifiers are never rewritten.
+fn foreign_dependency_identity_with_native(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    required: &Requirement, foreign_arch: &str, native_arch: &str,
+) -> Result<Option<PackageKey>> {
+    if let Some(key) = foreign_dependency_identity(catalog, &required.name, foreign_arch)? {
+        return Ok(Some(key));
+    }
+    let native = PackageKey {
+        name: required.name.clone(), architecture: native_arch.to_owned(),
+    };
+    Ok(catalog.get(&native)
+        .filter(|item| eligible_native_foreign_leaf(item, required))
+        .map(|_| native))
 }
 
 /// Policy-checked diagnostic for an explicit foreign-architecture request.
@@ -1254,7 +1320,8 @@ pub fn preview_explicit_architecture_with_policy(
                     key.name, key.architecture);
             }
             let origins = crate::package_provenance::verified_version_origins(
-                cache, &key.name, foreign_architecture,
+                cache, &key.name,
+                if key.architecture == "all" { foreign_architecture } else { &key.architecture },
             )?.into_iter().filter(|origin| origin.architecture == key.architecture)
                 .collect::<Vec<_>>();
             let candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
@@ -1297,8 +1364,8 @@ pub fn preview_explicit_architecture_with_policy(
                     )? {
                         continue;
                     }
-                    if let Some(identity) = foreign_dependency_identity(
-                        &catalog, &dep.name, foreign_architecture,
+                    if let Some(identity) = foreign_dependency_identity_with_native(
+                        &catalog, dep, foreign_architecture, native_architecture,
                     )? {
                         mandatory.insert(identity);
                     }
@@ -1319,12 +1386,16 @@ pub fn preview_explicit_architecture_with_policy(
             }) { discovered = true; }
         }
         if changed || discovered { continue; }
-        reject_foreign_negative_relations(&catalog, &relations, &plan, foreign_architecture)?;
-        // A package recorded as Architecture: all must be verified from
-        // signed metadata as all, not relabeled as an i386 package.
+        reject_foreign_negative_relations_with_native(
+            &catalog, &relations, &plan, foreign_architecture, Some(native_architecture),
+        )?;
+        // Every staged identity must have an authenticated policy candidate.
+        // No architecture rewrite or automatic live execution is permitted.
         for step in &plan {
-            if step.architecture != foreign_architecture && step.architecture != "all" {
-                bail!("foreign policy preview cannot stage a native binary");
+            if step.architecture != foreign_architecture
+                && step.architecture != "all"
+                && step.architecture != native_architecture {
+                bail!("foreign policy preview contains an unapproved architecture");
             }
             let identity = PackageKey {
                 name: step.package.clone(), architecture: step.architecture.clone(),
@@ -1332,6 +1403,14 @@ pub fn preview_explicit_architecture_with_policy(
             if step.architecture == "all"
                 && catalog.get(&identity).is_none_or(|item| item.multi_arch != "foreign") {
                 bail!("foreign dependency on Architecture: all requires Multi-Arch: foreign");
+            }
+            if step.architecture == native_architecture {
+                let candidate = catalog.get(&identity).context("native staged leaf missing metadata")?;
+                if !matches!(candidate.multi_arch.as_str(), "foreign" | "allowed")
+                    || !candidate.depends.trim().is_empty()
+                    || !candidate.pre_depends.trim().is_empty() {
+                    bail!("native foreign-policy dependency is not an allowed leaf");
+                }
             }
             if !validated.contains(&identity) {
                 bail!("foreign dependency was not policy-validated");
