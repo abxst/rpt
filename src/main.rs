@@ -1030,7 +1030,8 @@ async fn execute(cli: Cli) -> Result<()> {
                 cascade, purge, timeout_seconds,
             }).await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
-            println!("Native disposable-rootfs removal complete; live host dpkg untouched.");
+            println!("Native disposable-rootfs {} complete; live host dpkg untouched.",
+                if purge { "purge" } else { "removal" });
         }
         Command::NativeRootfsMark { rootfs, id, journal_dir, timeout_seconds, mode, packages } => {
             rpt::native_rootfs::mark(&rootfs, &journal_dir, &id, &mode,
