@@ -203,16 +203,25 @@ done
 
 /// Explicit removal is conservatively planned from the *guest* installed
 /// state. A refuse/blocker never reaches dpkg, including Essential packages.
-pub async fn remove_planned(root: &Path, journal: &Path, id: &str,
-    architecture: &str, packages: &[String], cascade: bool, purge: bool,
-    timeout_seconds: u64) -> Result<crate::removal_planner::RemovalPlan> {
-    let root = rootfs(root)?;
+pub struct Remove<'a> {
+    pub rootfs: &'a Path,
+    pub journal: &'a Path,
+    pub id: &'a str,
+    pub architecture: &'a str,
+    pub packages: &'a [String],
+    pub cascade: bool,
+    pub purge: bool,
+    pub timeout_seconds: u64,
+}
+pub async fn remove_planned(opts: Remove<'_>) -> Result<crate::removal_planner::RemovalPlan> {
+    let root = rootfs(opts.rootfs)?;
     let before = status(&root)?;
     let plan = crate::removal_planner::remove_snapshot(
-        &before, architecture, packages, cascade)?;
+        &before, opts.architecture, opts.packages, opts.cascade)?;
     if !plan.removable { bail!("unsafe native removal: {}", plan.blockers.join("; ")); }
-    execute_remove(&root, journal, id, &before, None, &plan.remove,
-        purge, timeout_seconds).await?;
+    execute_remove(&root, Run {
+        journal: opts.journal, id: opts.id, timeout_seconds: opts.timeout_seconds,
+    }, &before, None, &plan.remove, opts.purge).await?;
     Ok(plan)
 }
 
@@ -232,21 +241,26 @@ pub async fn autoremove_planned(root: &Path, journal: &Path, id: &str,
     let plan = crate::removal_planner::autoremove_snapshot(&before, &marks, architecture)?;
     if !plan.removable { bail!("native autoremove denied: {}", plan.blockers.join("; ")); }
     if !plan.remove.is_empty() {
-        execute_remove(&root, journal, id, &before, Some(&marks),
-            &plan.remove, false, timeout_seconds).await?;
+        execute_remove(&root, Run { journal, id, timeout_seconds }, &before,
+            Some(&marks), &plan.remove, false).await?;
     }
     Ok(plan)
 }
 
-async fn execute_remove(root: &Path, journal_path: &Path, id: &str,
+struct Run<'a> {
+    journal: &'a Path,
+    id: &'a str,
+    timeout_seconds: u64,
+}
+async fn execute_remove(root: &Path, run: Run<'_>,
     before: &[u8], marks: Option<&[u8]>, packages: &[String],
-    purge: bool, timeout_seconds: u64) -> Result<()> {
-    if !valid_id(id) || !(10..=3600).contains(&timeout_seconds)
+    purge: bool) -> Result<()> {
+    if !valid_id(run.id) || !(10..=3600).contains(&run.timeout_seconds)
         || packages.is_empty() || packages.len() > 128 {
         bail!("invalid native rootfs removal id, timeout or closure size");
     }
-    fs::create_dir_all(journal_path)?;
-    let journal = fs::canonicalize(journal_path)?;
+    fs::create_dir_all(run.journal)?;
+    let journal = fs::canonicalize(run.journal)?;
     if journal == Path::new("/") || journal.starts_with(root) {
         bail!("native removal journal must be outside rootfs");
     }
@@ -260,8 +274,8 @@ async fn execute_remove(root: &Path, journal_path: &Path, id: &str,
     ];
     args.extend(packages.iter().cloned());
     DryRunExecutor::new(journal, 1)?.submit_command(
-        id.to_owned(), "/bin/sh".into(), args,
-        Duration::from_secs(timeout_seconds), Duration::from_secs(5),
+        run.id.to_owned(), "/bin/sh".into(), args,
+        Duration::from_secs(run.timeout_seconds), Duration::from_secs(5),
     ).await
 }
 
