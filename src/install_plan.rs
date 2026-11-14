@@ -2288,6 +2288,69 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).is_err());
     }
     #[test]
+    fn foreign_preview_selects_new_native_signed_leaf_without_native_upgrades() {
+        let mut app = item("foreign-user", "1", "native-tool (>= 2)");
+        app.architecture = "i386".into();
+        let mut tool = item("native-tool", "2", "");
+        tool.multi_arch = "foreign".into();
+        let build = |tool: PackageSummary, app: PackageSummary| {
+            test_keyed(&BTreeMap::from([
+                ("foreign-user".into(), app), ("native-tool".into(), tool),
+            ]))
+        };
+        let catalog = build(tool.clone(), app.clone());
+        let no_installed = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            "foreign-user:i386", 20, ("i386", "amd64"), &no_installed).unwrap();
+        assert_eq!(plan.iter().map(|step| (step.package.as_str(), step.architecture.as_str()))
+            .collect::<Vec<_>>(), [("native-tool", "amd64"), ("foreign-user", "i386")]);
+        assert!(reject_foreign_negative_relations_with_native(
+            &catalog, &no_installed, &plan, "i386", Some("amd64"),
+        ).is_ok());
+        // No implicit upgrade when installed native status is too old.
+        let native_status = BTreeMap::from([(
+            cache_query::InstalledKey { name: "native-tool".into(), architecture: "amd64".into() },
+            InstalledRelations { version: "1".into(), multi_arch: "foreign".into(), ..Default::default() },
+        )]);
+        assert!(solve_catalog_foreign(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            "foreign-user:i386", 20, ("i386", "amd64"), &native_status).is_err());
+        // A mismatched flag cannot authorize an implicit native install.
+        tool.multi_arch = "no".into();
+        assert!(solve_catalog_foreign(&build(tool.clone(), app.clone()),
+            &BTreeMap::new(), &BTreeMap::new(), "foreign-user:i386", 20,
+            ("i386", "amd64"), &no_installed).is_err());
+        tool.multi_arch = "foreign".into();
+        tool.depends = "nested-lib".into();
+        assert!(solve_catalog_foreign(&build(tool.clone(), app.clone()),
+            &BTreeMap::new(), &BTreeMap::new(), "foreign-user:i386", 20,
+            ("i386", "amd64"), &no_installed).is_err());
+        tool.depends.clear();
+        app.depends = "native-tool:i386 (>= 2)".into();
+        assert!(solve_catalog_foreign(&build(tool.clone(), app.clone()),
+            &BTreeMap::new(), &BTreeMap::new(), "foreign-user:i386", 20,
+            ("i386", "amd64"), &no_installed).is_err());
+        // :any requires allowed, not foreign; it may still select an
+        // authenticated native package if the declaration is correct.
+        app.depends = "native-tool:any (>= 2)".into();
+        tool.multi_arch = "allowed".into();
+        let allowed = solve_catalog_foreign(&build(tool.clone(), app.clone()),
+            &BTreeMap::new(), &BTreeMap::new(), "foreign-user:i386", 20,
+            ("i386", "amd64"), &no_installed).unwrap();
+        assert_eq!(allowed.len(), 2);
+        tool.multi_arch = "foreign".into();
+        assert!(solve_catalog_foreign(&build(tool, app), &BTreeMap::new(),
+            &BTreeMap::new(), "foreign-user:i386", 20,
+            ("i386", "amd64"), &no_installed).is_err());
+        // Both directions of installed negative relations remain enforced.
+        let reverse_status = BTreeMap::from([(
+            cache_query::InstalledKey { name: "legacy".into(), architecture: "i386".into() },
+            InstalledRelations { version: "1".into(), conflicts: "native-tool".into(), ..Default::default() },
+        )]);
+        assert!(reject_foreign_negative_relations_with_native(
+            &catalog, &reverse_status, &plan, "i386", Some("amd64"),
+        ).is_err());
+    }
+    #[test]
     fn foreign_depends_reuses_only_qualified_native_installed_satisfiers() {
         let mut app = item("rpt-foreign-app", "1",
             "rpt-host-tool (>= 2), rpt-host-interpreter:any (>= 2)");
