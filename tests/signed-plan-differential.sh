@@ -651,6 +651,56 @@ if sudo ./target/debug/rpt native-rootfs-recovery-inspect \
 fi
 echo "PASS native read-only recovery report, interrupted journal and live-root refusal"
 
+# Full disposable rootfs snapshot and restore to a NEW directory; source
+# remains mutable only in isolation, snapshot bytes are rehashed against
+# a durable receipt and an interrupted original is never auto-unlocked.
+sudo ./target/debug/rpt native-rootfs-snapshot-create \
+  --rootfs "$mark_guest" --snapshot-rootfs "$root/native-checkpoint" \
+  --journal-dir "$root/native-mark-journal" --id native-pre-fault \
+  >"$root/native-checkpoint-create.json"
+snapshot_receipt="$root/native-mark-journal/native-rootfs-snapshots/native-pre-fault.json"
+sudo ./target/debug/rpt native-rootfs-snapshot-verify \
+  --receipt "$snapshot_receipt" >"$root/native-checkpoint-verify.json"
+python3 - "$root/native-checkpoint-create.json" "$root/native-checkpoint-verify.json" <<'PY'
+import json,sys
+a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]))
+assert a==b
+assert len(a['tree_sha256'])==64 and len(a['status_sha256'])==64
+PY
+receipt_before="$(sudo sha256sum "$snapshot_receipt" | cut -d' ' -f1)"
+journal_before="$(sudo sha256sum "$root/native-mark-journal/native-mark-only.json" | cut -d' ' -f1)"
+# Simulate changed/broken original only after checkpoint is verified.
+sudo chroot "$mark_guest" /usr/bin/apt-mark auto rpt-mark-root
+sudo chroot "$mark_guest" /usr/bin/apt-mark showauto rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+sudo ./target/debug/rpt native-rootfs-snapshot-restore \
+  --receipt "$snapshot_receipt" --new-rootfs "$root/native-restored" \
+  >"$root/native-restore.json"
+sudo chroot "$root/native-restored" /usr/bin/apt-mark showmanual rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+sudo chroot "$mark_guest" /usr/bin/apt-mark showauto rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+test -z "$(sudo dpkg --root="$root/native-restored" --audit)"
+test "$(sudo sha256sum "$snapshot_receipt" | cut -d' ' -f1)" = "$receipt_before"
+test "$(sudo sha256sum "$root/native-mark-journal/native-mark-only.json" | cut -d' ' -f1)" = "$journal_before"
+if sudo ./target/debug/rpt native-rootfs-snapshot-restore \
+  --receipt "$snapshot_receipt" --new-rootfs "$root/native-restored" >/dev/null 2>&1; then
+  echo "Snapshot restore overwrote an existing guest" >&2; exit 1
+fi
+if sudo ./target/debug/rpt native-rootfs-snapshot-create \
+  --rootfs / --snapshot-rootfs "$root/native-live-snapshot" \
+  --journal-dir "$root/native-mark-journal" --id native-live >/dev/null 2>&1; then
+  echo "Native snapshot unexpectedly accepted live root" >&2; exit 1
+fi
+# Any snapshot content modification invalidates future verification.
+sudo sh -c "echo tampered >> '$root/native-checkpoint/usr/share/rpt-mark-test/rpt-mark-root.txt'"
+if sudo ./target/debug/rpt native-rootfs-snapshot-verify \
+  --receipt "$snapshot_receipt" >/dev/null 2>&1; then
+  echo "Native snapshot missed post-capture payload tampering" >&2; exit 1
+fi
+echo "PASS native checkpoint/verify/restore-to-new-rootfs, tamper and overwrite refusal"
+
+
 
 
 # Install/remove and install/purge exercise actual dpkg operations in the
