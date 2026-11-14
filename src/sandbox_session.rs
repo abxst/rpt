@@ -276,20 +276,27 @@ pub async fn plan_install(
     session: &str, cache: &Path, apt_root: &Path, architecture: &str,
     max_packages: usize, packages: &[String],
 ) -> Result<Vec<PlanStep>> {
+    plan_install_with_options(session, cache, apt_root, architecture, max_packages, packages, false).await
+}
+
+pub async fn plan_install_with_options(
+    session: &str, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String], include_recommends: bool,
+) -> Result<Vec<PlanStep>> {
     let (_, status) = status_snapshot(session).await?;
-    plan_install_snapshot(&status, cache, apt_root, architecture, max_packages, packages)
+    plan_install_snapshot(&status, cache, apt_root, architecture, max_packages, packages, include_recommends)
 }
 
 fn plan_install_snapshot(
     status: &[u8], cache: &Path, apt_root: &Path, architecture: &str,
-    max_packages: usize, packages: &[String],
+    max_packages: usize, packages: &[String], include_recommends: bool,
 ) -> Result<Vec<PlanStep>> {
     let mut temporary = tempfile::NamedTempFile::new()
         .context("creating private sandbox status snapshot")?;
     temporary.write_all(status)?;
     temporary.flush()?;
-    install_plan::preview_many_with_policy(
-        cache, temporary.path(), apt_root, packages, architecture, max_packages,
+    install_plan::preview_many_with_policy_options(
+        cache, temporary.path(), apt_root, packages, architecture, max_packages, include_recommends,
     )
 }
 
@@ -299,7 +306,18 @@ pub async fn prepare_download_plan(
     session: &str, cache: &Path, apt_root: &Path, architecture: &str,
     max_packages: usize, packages: &[String],
 ) -> Result<ExactManifest> {
-    let steps = plan_install(session, cache, apt_root, architecture, max_packages, packages).await?;
+    prepare_download_plan_with_options(
+        session, cache, apt_root, architecture, max_packages, packages, false,
+    ).await
+}
+
+pub async fn prepare_download_plan_with_options(
+    session: &str, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String], include_recommends: bool,
+) -> Result<ExactManifest> {
+    let steps = plan_install_with_options(
+        session, cache, apt_root, architecture, max_packages, packages, include_recommends,
+    ).await?;
     package_provenance::prepare_exact(cache, &steps, architecture)
 }
 
@@ -313,6 +331,8 @@ pub struct BoundTransaction {
     pub status_sha256: String,
     pub requested: Vec<String>,
     pub max_packages: usize,
+    #[serde(default)]
+    pub include_recommends: bool,
     pub steps: Vec<PlanStep>,
     #[serde(flatten)]
     pub manifest: ExactManifest,
@@ -323,15 +343,23 @@ pub async fn prepare_bound(
     session: &str, cache: &Path, apt_root: &Path, architecture: &str,
     max_packages: usize, packages: &[String],
 ) -> Result<BoundTransaction> {
+    prepare_bound_with_options(session, cache, apt_root, architecture,
+        max_packages, packages, false).await
+}
+
+pub async fn prepare_bound_with_options(
+    session: &str, cache: &Path, apt_root: &Path, architecture: &str,
+    max_packages: usize, packages: &[String], include_recommends: bool,
+) -> Result<BoundTransaction> {
     let (_, status) = status_snapshot(session).await?;
     let steps = plan_install_snapshot(
-        &status, cache, apt_root, architecture, max_packages, packages,
+        &status, cache, apt_root, architecture, max_packages, packages, include_recommends,
     )?;
     let manifest = package_provenance::prepare_exact(cache, &steps, architecture)?;
     Ok(BoundTransaction {
         schema_version: 1, session: session.into(), architecture: architecture.into(),
         status_sha256: hex::encode(Sha256::digest(&status)),
-        requested: packages.to_vec(), max_packages, steps, manifest,
+        requested: packages.to_vec(), max_packages, include_recommends, steps, manifest,
     })
 }
 
