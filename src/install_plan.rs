@@ -2518,6 +2518,110 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).is_err());
     }
     #[test]
+    fn foreign_native_virtual_provider_uses_native_capability_version() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "2", "host-cap (>= 7)");
+        tool.multi_arch = "foreign".into();
+        let mut native_provider = item("host-impl", "1", "");
+        native_provider.provides = "host-cap (= 7)".into();
+        let mut foreign_decoy = item("foreign-decoy", "99", "");
+        foreign_decoy.architecture = "i386".into();
+        foreign_decoy.provides = "host-cap (= 99)".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "host-impl".into(), architecture: "amd64".into() }, native_provider),
+            (PackageKey { name: "foreign-decoy".into(), architecture: "i386".into() }, foreign_decoy),
+        ]);
+        let empty = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).unwrap();
+        assert_eq!(plan.iter().map(|p| (p.package.as_str(), p.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+                ("host-impl", "amd64"), ("host-tool", "amd64"), ("foreign-app", "i386"),
+            ]);
+        // The provider's binary version 1 must not be compared against the
+        // virtual capability's advertised version 7.
+        let provider_key = PackageKey {
+            name: "host-impl".into(), architecture: "amd64".into(),
+        };
+        catalog.get_mut(&provider_key).unwrap().provides = "host-cap".into();
+        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        catalog.get_mut(&provider_key).unwrap().provides = "host-cap (= 6)".into();
+        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        catalog.remove(&provider_key);
+        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+    }
+
+    #[test]
+    fn foreign_native_installed_virtual_requires_exact_status_proof() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "2", "host-cap (>= 7)");
+        tool.multi_arch = "foreign".into();
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+        ]);
+        let provider_key = cache_query::InstalledKey {
+            name: "installed-host-provider".into(), architecture: "amd64".into(),
+        };
+        let mut installed = BTreeMap::from([(
+            provider_key.clone(),
+            InstalledRelations {
+                version: "1".into(), multi_arch: "no".into(),
+                provides: "host-cap (= 7)".into(), ..Default::default()
+            },
+        )]);
+        let empty_binary = BTreeMap::new();
+        let empty_scoped = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty_binary, &empty_scoped,
+            "foreign-app:i386", 20, ("i386", "amd64"), &installed).unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["host-tool", "foreign-app"]);
+        installed.get_mut(&provider_key).unwrap().provides = "host-cap".into();
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &empty_scoped,
+            "foreign-app:i386", 20, ("i386", "amd64"), &installed).is_err());
+        installed.get_mut(&provider_key).unwrap().provides = "host-cap (= 6)".into();
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &empty_scoped,
+            "foreign-app:i386", 20, ("i386", "amd64"), &installed).is_err());
+        // Native installed Provides never means the foreign i386 owner may
+        // consume it: the provider has Multi-Arch: no.
+        let mut direct = catalog.clone();
+        direct.get_mut(&PackageKey {
+            name: "foreign-app".into(), architecture: "i386".into(),
+        }).unwrap().depends = "host-cap (>= 7)".into();
+        installed.get_mut(&provider_key).unwrap().provides = "host-cap (= 7)".into();
+        assert!(solve_catalog_foreign(&direct, &empty_binary, &empty_scoped,
+            "foreign-app:i386", 20, ("i386", "amd64"), &installed).is_err());
+    }
+
+    #[test]
+    fn foreign_native_virtual_multiple_providers_remain_ambiguous() {
+        let mut app = item("foreign-app", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "2", "host-cap (>= 7)");
+        tool.multi_arch = "foreign".into();
+        let mut first = item("host-provider-a", "1", "");
+        first.provides = "host-cap (= 7)".into();
+        let mut second = item("host-provider-b", "2", "");
+        second.provides = "host-cap (= 7)".into();
+        let catalog = BTreeMap::from([
+            (PackageKey { name: "foreign-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "host-provider-a".into(), architecture: "amd64".into() }, first),
+            (PackageKey { name: "host-provider-b".into(), architecture: "amd64".into() }, second),
+        ]);
+        let empty = BTreeMap::new();
+        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+    }
+
+    #[test]
     fn foreign_native_predepends_is_ordered_and_cycles_fail_closed() {
         let mut app = item("foreign-app", "1", "host-tool (>= 2)");
         app.architecture = "i386".into();
