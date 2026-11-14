@@ -838,6 +838,47 @@ Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\
     }
 
     #[test]
+    fn automatic_removal_blockers_use_only_verified_new_candidate_conflicts() {
+        let status = b"Package: upgrade-tool\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: old-provider\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: unrelated\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let mut candidate = signed_candidate("upgrade-tool", "2", "");
+        candidate.conflicts = "old-provider (>= 1)".into();
+        let blockers = signed_upgrade_removal_blockers(status, "amd64",
+            &[candidate.clone()]).unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].name, "old-provider");
+        assert_eq!(blockers[0].architecture, "amd64");
+
+        candidate.conflicts.clear();
+        assert!(signed_upgrade_removal_blockers(status, "amd64", &[candidate.clone()])
+            .unwrap().is_empty());
+        let reverse = b"Package: upgrade-tool\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: old-provider\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nBreaks: upgrade-tool (>= 2)\n\n";
+        assert_eq!(signed_upgrade_removal_blockers(reverse, "amd64",
+            &[candidate.clone()]).unwrap()[0].name, "old-provider");
+
+        candidate.version = "1".into();
+        assert!(signed_upgrade_removal_blockers(status, "amd64", &[candidate.clone()]).is_err());
+        candidate.version = "2".into();
+        candidate.conflicts = "old-provider".into();
+        let protected = b"Package: upgrade-tool\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: old-provider\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nEssential: yes\n\n";
+        assert!(signed_upgrade_removal_blockers(protected, "amd64", &[candidate]).is_err());
+    }
+
+    #[test]
+    fn automatic_removal_cannot_nominate_an_upgraded_binary() {
+        let status = b"Package: upgrade-tool\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: second-tool\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let mut a = signed_candidate("upgrade-tool", "2", "");
+        a.conflicts = "second-tool (<< 2)".into();
+        let b = signed_candidate("second-tool", "2", "");
+        assert!(signed_upgrade_removal_blockers(status, "amd64", &[a,b])
+            .unwrap().is_empty());
+    }
+
+    #[test]
     fn removal_projection_preserves_multiline_records_and_unrelated_state() {
         let status = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDescription: old package\n .\n second paragraph\n\n\
 Package: keeppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDescription: remaining package\n .\n retained paragraph\n\n\
