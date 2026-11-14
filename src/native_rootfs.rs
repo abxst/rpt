@@ -163,6 +163,108 @@ pub async fn apply(opts: Apply<'_>) -> Result<()> {
     ).await
 }
 
+
+/// Native remove, purge, and autoremove share the same rootfs guard, durable
+/// transaction journal and supervision as signed install/upgrade.
+const REMOVE_SCRIPT: &str = r#"set -eu
+root="$1"; expected="$2"; mode="$3"; expected_marks="$4"; shift 4
+test "$(cat "$root/.rpt-disposable-rootfs")" = "rpt-disposable-rootfs-v1"
+actual="$(sha256sum "$root/var/lib/dpkg/status" | cut -d ' ' -f1)"
+if [ "$actual" != "$expected" ]; then
+    echo "stale native rootfs removal plan" >&2; exit 1
+fi
+if [ "$expected_marks" != "ignore" ]; then
+    file="$root/var/lib/apt/extended_states"
+    if [ ! -f "$file" ] || [ -L "$file" ] ||
+       [ "$(sha256sum "$file" | cut -d ' ' -f1)" != "$expected_marks" ]; then
+        echo "APT auto marks changed since autoremove plan" >&2; exit 1
+    fi
+fi
+if [ -n "$(dpkg --root="$root" --audit)" ]; then
+    echo "native rootfs dpkg audit failed before removal" >&2; exit 1
+fi
+case "$mode" in
+    remove) dpkg --root="$root" --remove -- "$@" ;;
+    purge) dpkg --root="$root" --purge -- "$@" ;;
+    *) echo "unsupported removal mode" >&2; exit 1 ;;
+esac
+if [ -n "$(dpkg --root="$root" --audit)" ]; then
+    echo "native rootfs dpkg audit failed after removal" >&2; exit 1
+fi
+for package in "$@"; do
+    installed="$(dpkg-query --admindir="$root/var/lib/dpkg" -W \
+        '-f=${Status}' "$package" 2>/dev/null)" || installed=""
+    if [ "$installed" = "install ok installed" ]; then
+        echo "package remained installed after native rootfs removal: $package" >&2
+        exit 1
+    fi
+done
+"#;
+
+/// Explicit removal is conservatively planned from the *guest* installed
+/// state. A refuse/blocker never reaches dpkg, including Essential packages.
+pub async fn remove_planned(root: &Path, journal: &Path, id: &str,
+    architecture: &str, packages: &[String], cascade: bool, purge: bool,
+    timeout_seconds: u64) -> Result<crate::removal_planner::RemovalPlan> {
+    let root = rootfs(root)?;
+    let before = status(&root)?;
+    let plan = crate::removal_planner::remove_snapshot(
+        &before, architecture, packages, cascade)?;
+    if !plan.removable { bail!("unsafe native removal: {}", plan.blockers.join("; ")); }
+    execute_remove(&root, journal, id, &before, None, &plan.remove,
+        purge, timeout_seconds).await?;
+    Ok(plan)
+}
+
+/// Orphan cleanup uses the same guest dpkg status and guest auto-mark
+/// database. A nonexistent mark database is an error, not an empty set.
+pub async fn autoremove_planned(root: &Path, journal: &Path, id: &str,
+    architecture: &str, timeout_seconds: u64)
+    -> Result<crate::removal_planner::RemovalPlan> {
+    let root = rootfs(root)?;
+    let before = status(&root)?;
+    let marks_path = root.join("var/lib/apt/extended_states");
+    let meta = fs::symlink_metadata(&marks_path)?;
+    if !meta.file_type().is_file() || meta.len() > 64 * 1024 * 1024 {
+        bail!("guest APT marks must be a regular file <=64 MiB");
+    }
+    let marks = fs::read(marks_path)?;
+    let plan = crate::removal_planner::autoremove_snapshot(&before, &marks, architecture)?;
+    if !plan.removable { bail!("native autoremove denied: {}", plan.blockers.join("; ")); }
+    if !plan.remove.is_empty() {
+        execute_remove(&root, journal, id, &before, Some(&marks),
+            &plan.remove, false, timeout_seconds).await?;
+    }
+    Ok(plan)
+}
+
+async fn execute_remove(root: &Path, journal_path: &Path, id: &str,
+    before: &[u8], marks: Option<&[u8]>, packages: &[String],
+    purge: bool, timeout_seconds: u64) -> Result<()> {
+    if !valid_id(id) || !(10..=3600).contains(&timeout_seconds)
+        || packages.is_empty() || packages.len() > 128 {
+        bail!("invalid native rootfs removal id, timeout or closure size");
+    }
+    fs::create_dir_all(journal_path)?;
+    let journal = fs::canonicalize(journal_path)?;
+    if journal == Path::new("/") || journal.starts_with(root) {
+        bail!("native removal journal must be outside rootfs");
+    }
+    let digest = hex::encode(Sha256::digest(before));
+    let marks_hash = marks.map_or_else(
+        || "ignore".to_owned(), |bytes| hex::encode(Sha256::digest(bytes)));
+    let mode = if purge { "purge" } else { "remove" };
+    let mut args = vec![
+        "-euc".into(), REMOVE_SCRIPT.into(), "rpt-native-remove".into(),
+        root.to_string_lossy().into_owned(), digest, mode.into(), marks_hash,
+    ];
+    args.extend(packages.iter().cloned());
+    DryRunExecutor::new(journal, 1)?.submit_command(
+        id.to_owned(), "/bin/sh".into(), args,
+        Duration::from_secs(timeout_seconds), Duration::from_secs(5),
+    ).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
