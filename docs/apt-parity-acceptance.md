@@ -36,6 +36,28 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Disposable Linux VM-hosted transaction acceptance
+
+The separate `.github/workflows/vm-transaction-acceptance.yml` workflow
+runs on GitHub-managed Ubuntu 22.04 and Ubuntu 24.04 **VM hosts** and
+executes the full signed RPT transaction/recovery fixture in isolated
+Docker guest root filesystems (Ubuntu Jammy and Debian Bookworm).
+It exercises package install, dependency ordering, real upgrade,
+failure/SIGKILL, Docker snapshot restoration and journal assertions.
+
+The wrapper `tests/vm-host-transaction-acceptance.sh` compares the VM
+host's `/var/lib/dpkg/status`, APT extended states, hold list and dpkg
+audit before and after the entire fixture, including on failure. A changed
+host package database fails CI. The sandbox guest image is limited to
+an explicit CI allowlist and defaults to Debian Bookworm.
+
+**Scope:** The runner itself is a disposable VM but the dpkg transaction
+runs inside a Docker guest. This is **not** native package execution or
+filesystem rollback on the VM host, and should not be misrepresented as
+such. Production-host transaction parity, transactional rollback and
+maintenance-script side effects outside the guest remain untested.
+Native host mutation continues to be disabled in RPT.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
