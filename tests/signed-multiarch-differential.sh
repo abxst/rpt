@@ -48,6 +48,22 @@ Filename: pool/rpt-foreign-lib_1.0_i386.deb
 Size: 1
 Description: foreign dependency
 
+Package: rpt-host-tool-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-host-tool (>= 2.0)
+Filename: pool/rpt-host-tool-user_1.0_i386.deb
+Size: 1
+Description: foreign app satisfied by installed native foreign tool
+
+Package: rpt-host-interpreter-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-host-interpreter:any (>= 2.0)
+Filename: pool/rpt-host-interpreter-user_1.0_i386.deb
+Size: 1
+Description: foreign app satisfied by installed native allowed interpreter
+
 Package: rpt-pair
 Version: 1.0
 Architecture: i386
@@ -162,6 +178,43 @@ grep -Fxq 'rpt-common-data 1.0' "$root/rpt-foreign-selected"
 grep -Fq 'rpt-common-data:all 1.0' "$root/rpt-foreign"
 compare_plan pair "$root/native-installed" rpt-pair:i386
 grep -Fxq 'rpt-pair:i386 1.0' "$root/rpt-pair-selected"
+cat >"$root/native-cross-installed" <<'EOF'
+Package: rpt-host-tool
+Status: install ok installed
+Architecture: amd64
+Version: 2.0
+Multi-Arch: foreign
+Description: native tool already installed
+
+Package: rpt-host-interpreter
+Status: install ok installed
+Architecture: amd64
+Version: 2.0
+Multi-Arch: allowed
+Description: native interpreter already installed
+
+EOF
+compare_plan host-tool "$root/native-cross-installed" rpt-host-tool-user:i386
+compare_plan host-any "$root/native-cross-installed" rpt-host-interpreter-user:i386
+grep -Fxq 'rpt-host-tool-user:i386 1.0' "$root/rpt-host-tool-selected"
+grep -Fxq 'rpt-host-interpreter-user:i386 1.0' "$root/rpt-host-any-selected"
+test "$(wc -l <"$root/rpt-host-tool-selected")" -eq 1
+test "$(wc -l <"$root/rpt-host-any-selected")" -eq 1
+# Wrong installed Multi-Arch flags must never be treated as proof.
+sed 's/Multi-Arch: foreign/Multi-Arch: no/' "$root/native-cross-installed" >"$root/invalid-foreign-status"
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/invalid-foreign-status" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-host-tool-user:i386 >"$root/invalid-foreign.log" 2>&1; then
+  echo 'RPT accepted native Multi-Arch: no as a foreign dependency' >&2; exit 1
+fi
+sed 's/Multi-Arch: allowed/Multi-Arch: no/' "$root/native-cross-installed" >"$root/invalid-any-status"
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/invalid-any-status" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-host-interpreter-user:i386 >"$root/invalid-any.log" 2>&1; then
+  echo 'RPT accepted native Multi-Arch: no for :any' >&2; exit 1
+fi
 sed 's/Version: 1.0/Version: 2.0/' "$root/native-installed" >"$root/mismatch"
 if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   --status "$root/mismatch" --apt-root "$root/rpt-apt" \
@@ -178,4 +231,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS authenticated APT/RPT Multi-Arch dependency/coinstall parity and index tamper refusal'
+echo 'PASS authenticated APT/RPT Multi-Arch dependencies, installed native foreign/allowed, coinstall and tamper refusal'
