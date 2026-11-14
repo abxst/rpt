@@ -114,6 +114,58 @@ gates, restore filesystem files, or imply it is safe to retry. This is an
 **observational snapshot** (a transaction could change state concurrently),
 not a cryptographic snapshot or a rollback guarantee.
 
+## Copy-based native checkpoint and restore to a NEW guest
+
+Before a planned disposable-guest transaction, capture its current filesystem.
+This operation acquires the same cooperative journal lock used by RPT
+transactions and **refuses to snapshot an unfinished or corrupt journal**:
+
+    sudo rpt native-rootfs-snapshot-create \
+      --rootfs /tmp/my-guest \
+      --snapshot-rootfs /tmp/my-guest-checkpoint \
+      --journal-dir ./rpt-native-journal --id tx001-baseline
+
+The destination must be absent, under /tmp or /var/tmp, outside the source
+and journal, and must never contain a mount. The source must be a marked,
+mount-free disposable rootfs with a clean dpkg audit. Checkpoints are
+**full, copy-based rootfs clones**, using GNU cp's archive and
+reflink-if-available mode. RPT hashes the source tree before copying, verifies
+the copied tree (regular file bytes, relative names, symlink targets,
+mode/uid/gid and device type), and rehashes the source afterward while
+holding the cooperative lock. It refuses a changed source, a failed copy,
+or a divergent snapshot. Partial copies are left for manual inspection.
+
+A durable, exclusively created checkpoint receipt is written to
+\`JOURNAL_DIR/native-rootfs-snapshots/tx001-baseline.json\`; it contains
+source/snapshot path identities, tree hash, dpkg status hash, guest APT
+marks hash and creation time. Verify it any time:
+
+    sudo rpt native-rootfs-snapshot-verify \
+      --receipt ./rpt-native-journal/native-rootfs-snapshots/tx001-baseline.json
+
+If the original guest later fails a transaction, inspect its dpkg/journal
+before manually restoring the checkpoint **to a fresh directory**:
+
+    sudo rpt native-rootfs-snapshot-restore \
+      --receipt ./rpt-native-journal/native-rootfs-snapshots/tx001-baseline.json \
+      --new-rootfs /tmp/my-guest-restored
+
+The original guest, journal and checkpoint remain untouched. The restored
+guest must reproduce the exact tree hash, dpkg status and a clean dpkg audit.
+An existing destination or modified checkpoint fails closed. The snapshot
+can be created before the failure and restored even when the original's
+journal contains an interrupted transaction; it **never clears that gate**.
+
+**Limitations:** This is a trusted, *offline/disposable* filesystem copy,
+not an atomic Btrfs/ZFS/LVM snapshot or an ACID package transaction. The
+tree witness does not prove hardlink topology, xattrs, ACLs, application
+process state, external device effects or power-loss persistence. The
+journal lock coordinates RPT processes only, not arbitrary host writers.
+GNU cp and the guest filesystem must be trusted; privileged maintainer
+scripts are still not contained by chroot. Never use this to snapshot live
+\`/\` or enable host package mutation. A checkpoint is **explicit** and does
+not automatically wrap every RPT transaction.
+
 ## Optional WSL2 smoke test (Ubuntu amd64)
 
 Run from the RPT repository in a **disposable Ubuntu WSL2 distro**, as an
@@ -163,8 +215,10 @@ or that all APT semantics are supported.
   This is not a flag away from host mutation.
 - Not an unprivileged sandbox: chroot does not confine privileged scripts.
 - The journal is cooperative and does not substitute for dpkg locking,
-  full filesystem snapshots, or reliable automatic rollback. No production
-  host execution and no general power-loss recovery is provided.
+  atomic filesystem snapshots, or reliable automatic rollback. The explicit,
+  verified full-tree clone/restore workflow creates a **new guest**; it does
+  not provide a crash-atomic commit or restore the live host. No production
+  host execution or general power-loss recovery is provided.
 - RPT does not yet implement full APT policy, conffile prompting semantics,
   Multi-Arch transactions, or all dependency edge cases. Native install marking
   is verified against the signed transaction and the guest APT database, but
