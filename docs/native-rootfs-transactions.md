@@ -82,11 +82,19 @@ that marking does not alter dpkg status. Dependencies already installed
 before this transaction keep their original marks (including `manual`).
 Postflight requires all exact installed versions and a clean dpkg audit.
 
-This changes the install contract: a rootfs must include `/usr/bin/apt-mark`
-and usable APT state. A failure during marking leaves the guest for inspection
-and is not automatically rolled back. A **mark-only install** where no
-package archive is needed is still unsupported by the native transaction
-executor; use `native-rootfs-mark manual` explicitly for that case.
+The native install contract requires a guest `/usr/bin/apt-mark` and
+usable APT state. If all requested roots are **already installed at the
+verified candidate versions**, `native-rootfs-prepare-transaction` produces
+an empty archive plan. That plan can now be applied as a **journaled mark-only
+transaction**: it rechecks the exact guest dpkg status snapshot, signed
+candidate policy and preflight guest APT marks, and calls only the guest
+`apt-mark manual` (no dpkg `--configure`, maintainer scripts, or `.deb`
+artifacts). A dummy `--artifacts` directory is not required for this
+zero-archive operation.
+
+A failed mark or interrupted install leaves the disposable guest and journal
+for inspection; no automatic rollback is promised. A mark-only plan cannot
+change installed package versions or bypass the rootfs/path guard.
 
 A journaled and supervised command handles SIGINT/SIGTERM/timeouts, including
 process-group shutdown verification. On failure, the rootfs may be broken.
@@ -102,7 +110,10 @@ ordinary user (sudo is required for the separate guest filesystem):
 It uses `debootstrap` to create a separate Ubuntu rootfs, tests the signed
 `hello` installation, removal, reinstallation, guest `apt-mark` manual/auto,
 orphan autoremove and purge. A directly requested `hello` package must
-become `manual` during install itself. It also installs a script-free local
+become `manual` during install itself; the extended test also marks
+`hello` auto, prepares a zero-archive install for the already installed
+candidate, then applies it as mark-only while verifying that the guest dpkg
+status hash never changes. It also installs a script-free local
 conffile fixture **only into the disposable guest** and asserts that remove
 retains its config while a separate `--purge` removes the residual
 config-only state without reinstalling, and checks the **live WSL dpkg
@@ -116,12 +127,12 @@ verifies the resulting rootfs; it does **not** remount the host or suppress
 the diagnostic. An unsuccessful bootstrap or failed guest checks still fail
 the test.
 
-Real Ubuntu 26.04 `resolute` WSL2 v3 passed signed archive
-verification, install/remove/reinstall, manual/auto marking, autoremove,
-and conffile retention/deletion with unchanged live WSL dpkg status.
-The earlier v3 fixture reinstalled a removed package before purging it;
-this extended test instead purges a **config-files-only** package directly
-after remove. The script is a disposable-rootfs acceptance test, not evidence
+Real Ubuntu 26.04 `resolute` WSL2 v5 passed signed archive
+verification, install/remove/reinstall, automatic manual marking during install,
+autoremove, and direct purge of **config-files-only** packages, with unchanged
+live WSL dpkg status. The new zero-archive mark-only path has not yet been
+exercised by the operator's WSL; that requires running the expanded script
+independently. This remains a disposable-rootfs acceptance test, not evidence
 that privileged maintainer scripts are confined or that all APT semantics
 are supported.
 
