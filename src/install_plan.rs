@@ -1271,7 +1271,11 @@ pub fn preview_many_with_policy_options(
         let mut mandatory = BTreeSet::new();
         for name in &roots {
             if !validated.contains(name) { continue; }
-            let key = metadata_query::native_key_for(&catalog, name, architecture)?;
+            let key = match metadata_query::native_key_for(&catalog, name, architecture) {
+                Ok(key) => key,
+                Err(_) if optional_names.contains(name) => continue,
+                Err(err) => return Err(err),
+            };
             let summary = catalog.get(&key).context("validated candidate missing catalog metadata")?;
             for group in parse_groups_for_arch(&summary.pre_depends, architecture)?.into_iter()
                 .chain(parse_groups_for_arch(&summary.depends, architecture)?) {
@@ -1903,6 +1907,53 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["good", "app"]);
     }
+    #[test]
+    fn recommendations_can_be_selected_without_changing_mandatory_default() {
+        let mut app = item("app", "1", "lib");
+        app.recommends = "extra".into();
+        let mut catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), app),
+            ("lib".into(), item("lib", "1", "")),
+            ("extra".into(), item("extra", "1", "")),
+        ]));
+        let roots = &["app".to_owned()];
+        let ordinary = solve_catalog_many_options(
+            &catalog, &BTreeMap::new(), &BTreeMap::new(), roots, 30, "amd64", false,
+        ).unwrap();
+        assert_eq!(ordinary.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+            ["lib", "app"]);
+        let with_recommends = solve_catalog_many_options(
+            &catalog, &BTreeMap::new(), &BTreeMap::new(), roots, 30, "amd64", true,
+        ).unwrap();
+        assert_eq!(with_recommends.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+            ["lib", "app", "extra"]);
+        catalog.remove(&PackageKey {name:"extra".into(),architecture:"amd64".into()});
+        let absent = solve_catalog_many_options(
+            &catalog, &BTreeMap::new(), &BTreeMap::new(), roots, 30, "amd64", true,
+        ).unwrap();
+        assert_eq!(absent.iter().map(|s| s.package.as_str()).collect::<Vec<_>>(),
+            ["lib", "app"]);
+    }
+
+    #[test]
+    fn recommendations_do_not_force_conflicting_or_broken_packages() {
+        let mut app = item("app", "1", "");
+        app.recommends = "badpkg | goodpkg, absentpkg".into();
+        let mut bad = item("badpkg", "1", "");
+        bad.conflicts = "app".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), app),
+            ("badpkg".into(), bad),
+            ("goodpkg".into(), item("goodpkg", "1", "")),
+        ]));
+        let result = solve_catalog_many_options(
+            &catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["app".into()], 40, "amd64", true,
+        ).unwrap();
+        assert_eq!(result.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["app", "goodpkg"]);
+    }
+
     #[test]
     fn ordered_alternatives_choose_first_fully_viable_branch() {
         let catalog = BTreeMap::from([
