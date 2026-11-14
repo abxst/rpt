@@ -463,6 +463,59 @@ fn installed_native_satisfies_foreign(
     Ok(installed.multi_arch == expected && satisfies(&installed.version, required)?)
 }
 
+/// A native installed provider's virtual capabilities inherit Multi-Arch:
+/// foreign, while :any may use only Multi-Arch: allowed. The installed
+/// dpkg status is authoritative; do not substitute repository Provides.
+fn installed_native_virtual_satisfies_foreign(
+    installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    required: &Requirement, native_arch: &str,
+) -> Result<bool> {
+    if required.requested_arch.is_some() {
+        return Ok(false);
+    }
+    let contract = if required.any_arch { "allowed" } else { "foreign" };
+    for (key, status) in installed {
+        if key.architecture != native_arch || status.multi_arch != contract {
+            continue;
+        }
+        for cap in provides_fields(&key.name, &status.provides)? {
+            if capability_satisfies(&cap, required)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// A signed native provider may satisfy an unqualified foreign virtual
+/// Depends when Multi-Arch: foreign; :any requires Multi-Arch: allowed.
+/// Versioned virtual dependencies compare the Provides version, not the
+/// provider's binary Version. Never accept a foreign-qualified atom.
+fn foreign_native_virtual_candidates(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    required: &Requirement, native_arch: &str,
+) -> Result<Vec<PackageKey>> {
+    if required.requested_arch.is_some() { return Ok(Vec::new()); }
+    let contract = if required.any_arch { "allowed" } else { "foreign" };
+    let mut result = Vec::new();
+    for (key, item) in catalog {
+        if key.architecture != native_arch || item.multi_arch != contract {
+            continue;
+        }
+        for cap in provides(item)? {
+            if capability_satisfies(&cap, required)? {
+                result.push(key.clone());
+                break;
+            }
+        }
+        if result.len() > 32 {
+            bail!("foreign virtual dependency {} exceeds bounded native provider search (32)",
+                required.name);
+        }
+    }
+    Ok(result)
+}
+
 /// A native package's ordinary dependencies are resolved against its own
 /// architecture, not the foreign requester's. Installed native state is
 /// authoritative for this read-only shortcut; installed older versions
@@ -733,8 +786,18 @@ impl Solver<'_> {
                 }
             }
         }
+        // Keep a foreign/all virtual provider in the requester's scope
+        // preferred to a cross-architecture native provider. Native lookup
+        // happens only when no local provider can satisfy this requirement.
+        let native_providers = if let Some((native_arch, _)) = self.external_native {
+            foreign_native_virtual_candidates(self.catalog, required, native_arch)?
+        } else {
+            Vec::new()
+        };
         if required.any_arch {
-            bail!("virtual Provides with :any require a full Multi-Arch resolver");
+            // A :any virtual request can cross to an allowed native provider,
+            // but other virtual :any ranking is not implemented.
+            return Ok(native_providers);
         }
         let mut providers = Vec::new();
         for (key, item) in self.catalog {
@@ -752,7 +815,11 @@ impl Solver<'_> {
                     required.name);
             }
         }
-        Ok(providers)
+        if providers.is_empty() {
+            Ok(native_providers)
+        } else {
+            Ok(providers)
+        }
     }
 
     /// A native package selected by a foreign binary owns its next dependency
@@ -891,6 +958,8 @@ impl Solver<'_> {
             if let Some((native_arch, native_relations)) = self.external_native {
                 if installed_native_satisfies_foreign(
                     native_relations, alternative, native_arch, &self.architecture,
+                )? || installed_native_virtual_satisfies_foreign(
+                    native_relations, alternative, native_arch,
                 )? {
                     return self.resolve_groups(owner, groups, index + 1, soft);
                 }
@@ -1592,6 +1661,8 @@ pub fn preview_explicit_architecture_with_policy(
                     }
                     if installed_native_satisfies_foreign(
                         &relations, dep, native_architecture, foreign_architecture,
+                    )? || installed_native_virtual_satisfies_foreign(
+                        &relations, dep, native_architecture,
                     )? {
                         continue;
                     }
@@ -1599,6 +1670,31 @@ pub fn preview_explicit_architecture_with_policy(
                         &catalog, dep, foreign_architecture, native_architecture,
                     )? {
                         mandatory.insert(identity);
+                    } else {
+                        // Preserve same-architecture virtual providers first;
+                        // only discover signed native providers for a truly
+                        // cross-architecture virtual requirement.
+                        let mut local_provider = false;
+                        if !dep.any_arch && dep.requested_arch.is_none() {
+                            for (key, item) in &catalog {
+                                if key.architecture != foreign_architecture
+                                    && key.architecture != "all" { continue; }
+                                for cap in provides(item)? {
+                                    if capability_satisfies(&cap, dep)? {
+                                        local_provider = true;
+                                        break;
+                                    }
+                                }
+                                if local_provider { break; }
+                            }
+                        }
+                        if !local_provider {
+                            for provider in foreign_native_virtual_candidates(
+                                &catalog, dep, native_architecture,
+                            )? {
+                                mandatory.insert(provider);
+                            }
+                        }
                     }
                 }
             }
@@ -2517,6 +2613,101 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             )?.candidate)
         }).is_err());
     }
+    #[test]
+    fn foreign_virtual_provider_requires_signed_multiarch_contract() {
+        let mut app = item("cross-virtual-app", "1", "foreign-cap (>= 7)");
+        app.architecture = "i386".into();
+        let mut impl_native = item("host-virtual-impl", "1", "host-leaf");
+        impl_native.multi_arch = "foreign".into();
+        impl_native.provides = "foreign-cap (= 7)".into();
+        let leaf = item("host-leaf", "2", "");
+        let mut decoy = item("i386-decoy", "99", "");
+        decoy.architecture = "i386".into();
+        decoy.provides = "foreign-cap (= 6)".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "cross-virtual-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-virtual-impl".into(), architecture: "amd64".into() }, impl_native),
+            (PackageKey { name: "host-leaf".into(), architecture: "amd64".into() }, leaf),
+            (PackageKey { name: "i386-decoy".into(), architecture: "i386".into() }, decoy),
+        ]);
+        let run = |entries: &BTreeMap<PackageKey, PackageSummary>| {
+            solve_catalog_foreign(entries, &BTreeMap::new(), &BTreeMap::new(),
+                "cross-virtual-app:i386", 20, ("i386", "amd64"), &BTreeMap::new())
+        };
+        let planned = run(&catalog).unwrap();
+        assert_eq!(planned.iter().map(|step| (step.package.as_str(), step.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+                ("host-leaf", "amd64"), ("host-virtual-impl", "amd64"),
+                ("cross-virtual-app", "i386"),
+            ]);
+        let provider = PackageKey { name: "host-virtual-impl".into(), architecture: "amd64".into() };
+        catalog.get_mut(&provider).unwrap().multi_arch = "no".into();
+        assert!(run(&catalog).is_err());
+        catalog.get_mut(&provider).unwrap().multi_arch = "allowed".into();
+        assert!(run(&catalog).is_err());
+        catalog.get_mut(&provider).unwrap().multi_arch = "foreign".into();
+        catalog.get_mut(&provider).unwrap().provides = "foreign-cap (= 6)".into();
+        assert!(run(&catalog).is_err());
+    }
+
+    #[test]
+    fn foreign_any_virtual_provider_requires_multiarch_allowed() {
+        let mut app = item("cross-any-app", "1", "interpreter-cap:any (>= 7)");
+        app.architecture = "i386".into();
+        let mut impl_native = item("host-interpreter-impl", "1", "");
+        impl_native.multi_arch = "allowed".into();
+        impl_native.provides = "interpreter-cap (= 7)".into();
+        let provider = PackageKey {
+            name: "host-interpreter-impl".into(), architecture: "amd64".into(),
+        };
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "cross-any-app".into(), architecture: "i386".into() }, app),
+            (provider.clone(), impl_native),
+        ]);
+        let run = |entries: &BTreeMap<PackageKey, PackageSummary>| {
+            solve_catalog_foreign(entries, &BTreeMap::new(), &BTreeMap::new(),
+                "cross-any-app:i386", 20, ("i386", "amd64"), &BTreeMap::new())
+        };
+        let plan = run(&catalog).unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["host-interpreter-impl", "cross-any-app"]);
+        catalog.get_mut(&provider).unwrap().multi_arch = "foreign".into();
+        assert!(run(&catalog).is_err());
+        catalog.get_mut(&provider).unwrap().multi_arch = "no".into();
+        assert!(run(&catalog).is_err());
+    }
+
+    #[test]
+    fn foreign_installed_virtual_uses_exact_native_provides_and_multiarch() {
+        let mut app = item("foreign-status-app", "1", "host-virtual-cap (>= 7)");
+        app.architecture = "i386".into();
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "foreign-status-app".into(), architecture: "i386".into() }, app,
+        )]);
+        let id = cache_query::InstalledKey {
+            name: "status-provider".into(), architecture: "amd64".into(),
+        };
+        let mut installed = BTreeMap::from([(
+            id.clone(), InstalledRelations {
+                version: "1".into(), provides: "host-virtual-cap (= 7)".into(),
+                multi_arch: "foreign".into(), ..Default::default()
+            },
+        )]);
+        let run = |status: &BTreeMap<cache_query::InstalledKey, InstalledRelations>| {
+            solve_catalog_foreign(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+                "foreign-status-app:i386", 20, ("i386", "amd64"), status)
+        };
+        assert_eq!(run(&installed).unwrap().iter().map(|p| p.package.as_str())
+            .collect::<Vec<_>>(), ["foreign-status-app"]);
+        installed.get_mut(&id).unwrap().multi_arch = "no".into();
+        assert!(run(&installed).is_err());
+        installed.get_mut(&id).unwrap().multi_arch = "allowed".into();
+        assert!(run(&installed).is_err());
+        installed.get_mut(&id).unwrap().multi_arch = "foreign".into();
+        installed.get_mut(&id).unwrap().provides = "host-virtual-cap (= 6)".into();
+        assert!(run(&installed).is_err());
+    }
+
     #[test]
     fn foreign_native_virtual_provider_uses_native_capability_version() {
         let mut app = item("foreign-app", "1", "host-tool");
