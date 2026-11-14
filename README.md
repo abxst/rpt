@@ -413,7 +413,7 @@ suite tests RPT execution in a separate extracted Debian/Ubuntu rootfs.
 This is **not production host execution**. Live `/` is rejected;
 `/tmp` or `/var/tmp` rootfs trees must be explicitly marked, with no
 submounts. Maintainer scripts are privileged and chroot is not a security
-boundary. Conservative guest-only remove/purge/autoremove is also available. No automated
+boundary. Conservative guest-only remove/purge, auto/manual marking and autoremove are also available. No automated
 rollback, host mutations or full APT parity are claimed.
 See [native rootfs transactions](docs/native-rootfs-transactions.md).
 
