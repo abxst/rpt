@@ -2598,11 +2598,17 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             name: "native-helper".into(), architecture: "amd64".into(),
         });
         assert!(run(&no_native, &empty).is_err());
-        let mut bad = catalog.clone();
-        bad.get_mut(&PackageKey {
+        // Native Pre-Depends is now supported when its ordering remains
+        // acyclic; this previously rejected case is a valid package set.
+        let mut with_predepends = catalog.clone();
+        with_predepends.get_mut(&PackageKey {
             name: "native-tool".into(), architecture: "amd64".into(),
         }).unwrap().pre_depends = "native-bottom".into();
-        assert!(run(&bad, &empty).is_err());
+        let ordered = run(&with_predepends, &empty).unwrap();
+        assert_eq!(ordered.iter().map(|step| step.package.as_str())
+            .collect::<Vec<_>>(), [
+                "native-bottom", "native-helper", "native-tool", "cross-app",
+            ]);
         // A regular native helper needs no Multi-Arch: foreign/allowed flag,
         // but a foreign i386 package cannot consume it across the boundary.
         let mut direct = catalog.clone();
