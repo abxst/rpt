@@ -62,7 +62,7 @@ fn tree_hash(root: &Path) -> Result<String> {
         for path in paths {
             *count += 1;
             if *count > MAX_ENTRIES { bail!("rootfs snapshot exceeds {MAX_ENTRIES} entries"); }
-            if *count % 5_000 == 0 {
+            if (*count).is_multiple_of(5_000) {
                 eprintln!("RPT native snapshot: verified {count} filesystem entries...");
             }
             let meta = fs::symlink_metadata(&path)?;
