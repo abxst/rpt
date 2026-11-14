@@ -36,6 +36,47 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Global installed transition safety and apply-time replay (M4 large batch)
+
+A successful dependency solve for the requested upgrade roots does **not**
+imply that the rest of the installed operating system remains consistent.
+The M4 read-only global transition audit projects every selected signed
+`name:architecture=version` into a copy of the entire installed dpkg
+status and independently verifies the **resulting installed state**:
+
+- Every installed `Depends`/`Pre-Depends` group remains satisfiable by a
+  real binary or exact versioned virtual `Provides`, including installed
+  reverse dependents that were *not* selected into the joint solver roots
+- Existing alternatives and second installed providers can preserve an old
+  virtual capability after another provider upgrades
+- Both directions of `Conflicts`/`Breaks` involving any staged binary
+  must remain free of newly introduced conflicts with unchanged installed
+  binaries; unrelated old-old conflicts are not newly attributed to the plan
+- Holds, Essential/Protected upgrades, stale installed versions, exact
+  signed binary identity/version mismatches and native/all collisions are
+  rejected, not silently coerced
+
+The JSON `plan-system-upgrade-policy` report now includes `post_state`
+with the full installed/staged counts and relationship checks, always
+`executable: false`. Unsupported relationship syntax fails closed. This
+check reuses Debian relation parsing and versioned virtual satisfiers from
+the existing read-only removal planner. It cannot yet prove file ownership,
+maintainer-script behavior, full co-installation or arbitrary APT ranking.
+
+For **system-upgrade native-rootfs intents only**, a new optional
+`system_upgrade` intent flag (default `false` for existing transactions)
+causes `native-rootfs-apply-transaction` to **repeat the full
+signed-candidate/system-wide reverse dependency audit immediately before
+artifact staging and dpkg execution**, and reject an altered root set,
+dependency plan, changed dpkg status, or outdated metadata. The gate remains
+limited to disposable rootfs and does not permit host execution.
+
+CI signed APT/RPT fixtures include a retained installed consumer that pins
+a virtual capability to its old version, a second installed virtual provider
+that keeps the transition safe, and an installed reverse `Conflicts` on a
+new staged binary. Isolated native-rootfs execution/recovery tests remain
+mandatory. Gates D/F/G/H stay incomplete until broader acceptance passes.
+
 ## Integrated no-removal system upgrade audit (M3 major batch)
 
 The new read-only command `rpt plan-system-upgrade-policy` discovers all
