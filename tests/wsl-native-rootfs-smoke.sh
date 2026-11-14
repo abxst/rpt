@@ -47,6 +47,20 @@ mkdir -p "$work/apt"
 printf 'deb [signed-by=%s] https://archive.ubuntu.com/ubuntu %s main\n' \
   "$keyring" "$VERSION_CODENAME" > "$work/apt/sources.list"
 host_before="$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)"
+# Even on a failed fixture, verify that WSL's live dpkg status was not
+# modified. Never remove the guest rootfs automatically after a failure.
+check_live_dpkg_on_exit() {
+  local result=$?
+  trap - EXIT
+  local actual
+  actual="$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)" || result=1
+  if [[ "$actual" != "$host_before" ]]; then
+    echo "FAIL: live WSL dpkg status differs from the pre-test snapshot!" >&2
+    result=1
+  fi
+  exit "$result"
+}
+trap check_live_dpkg_on_exit EXIT
 sudo debootstrap --variant=minbase --arch=amd64 \
   "$VERSION_CODENAME" "$guest" https://archive.ubuntu.com/ubuntu
 printf 'rpt-disposable-rootfs-v1\n' \
