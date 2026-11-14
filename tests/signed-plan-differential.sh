@@ -1070,6 +1070,59 @@ for ordering in app-first blocker-first; do
 done
 echo "PASS signed APT/RPT forced-unique virtual provider with joint roots (both orders)"
 
+# Candidate policy must be applied BEFORE virtual-provider ambiguity checks.
+# With no explicit blocker, multiple repository providers exist, but pinning
+# provider A to -1 leaves only B installable. Compare actual APT and RPT
+# binary/version selections on the same signed metadata.
+mkdir -p "$root/rpt-apt/preferences.d" "$root/apt/etc/preferences.d"
+cat >"$root/rpt-apt/preferences" <<'PREF'
+Package: rpt-multi-virtual-a
+Pin: version 1.0
+Pin-Priority: -1
+
+PREF
+pin_opts=("${opts[@]}"
+  -o "Dir::Etc::preferences=$root/rpt-apt/preferences"
+  -o "Dir::Etc::preferencesparts=$root/apt/etc/preferences.d")
+apt-get "${pin_opts[@]}" -s -y install rpt-multi-virtual-app \
+  >"$root/apt-pinned-virtual"
+./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/apt/status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  rpt-multi-virtual-app >"$root/rpt-pinned-virtual"
+sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-pinned-virtual" \
+  | LC_ALL=C sort -u >"$root/apt-pinned-virtual-versions"
+sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-pinned-virtual" \
+  | LC_ALL=C sort -u >"$root/rpt-pinned-virtual-versions"
+test -s "$root/apt-pinned-virtual-versions"
+diff -u "$root/apt-pinned-virtual-versions" "$root/rpt-pinned-virtual-versions"
+grep -Fxq 'rpt-multi-virtual-b 1.0' "$root/rpt-pinned-virtual-versions"
+if grep -Fq 'rpt-multi-virtual-a ' "$root/rpt-pinned-virtual-versions"; then
+  echo "RPT selected a virtual provider forbidden by APT pin -1" >&2
+  exit 1
+fi
+cat >>"$root/rpt-apt/preferences" <<'PREF'
+Package: rpt-multi-virtual-b
+Pin: version 1.0
+Pin-Priority: -1
+
+PREF
+if apt-get "${pin_opts[@]}" -s -y install rpt-multi-virtual-app \
+  >"$root/apt-double-pinned-virtual" 2>&1; then
+  echo "APT unexpectedly selected a provider when both are pinned out" >&2
+  exit 1
+fi
+if ./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/apt/status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  rpt-multi-virtual-app >"$root/rpt-double-pinned-virtual" 2>&1; then
+  echo "RPT selected a provider when both are pinned out" >&2
+  exit 1
+fi
+rm "$root/rpt-apt/preferences"
+echo "PASS signed APT/RPT pinned virtual providers (-1, both forbidden)"
+
+
 
 # The installed dpkg provider is intentionally ABSENT from the signed index.
 # Its actual dpkg Status/Provides satisfies a versioned virtual dependency:

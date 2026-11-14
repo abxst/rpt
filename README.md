@@ -444,6 +444,19 @@ Explicit virtual roots, ambiguous virtual `Pre-Depends`, full APT
 candidate-provider ranking and production install execution remain
 unsupported.
 
+### Virtual-provider candidate pin filtering (read-only)
+
+For a singular mandatory virtual dependency, RPT now validates each
+advertising provider's candidate against signed repository metadata and
+the supported APT preference subset **before** deciding if the provider
+search is ambiguous. A provider pinned to priority `-1` is excluded
+from new downloads; an installed binary's actual dpkg `Provides`
+remains separate. A signed `apt-get -s` fixture checks both the
+single eligible-provider and all-providers-pinned-out cases.
+
+This does not implement full APT preferences or arbitrary provider
+ranking, and it never changes the host package database.
+
 ### Native disposable-rootfs install/upgrade (development only)
 
 The `native-rootfs-prepare-transaction` and

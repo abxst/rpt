@@ -1498,6 +1498,75 @@ pub fn preview_many_with_policy_options(
             // A mandatory relationship upgrades this identity from optional.
             optional_names.remove(&name);
         }
+        // A virtual dependency may advertise several *repository* providers.
+        // Validate every matching provider against authenticated candidate
+        // policy BEFORE the solver decides that two providers are equally
+        // viable. Otherwise a provider prohibited by an APT pin can cause
+        // false ambiguity (or a non-candidate version could be selected).
+        // This discovery is intentionally limited to singular mandatory
+        // virtual Depends; alternative groups and virtual Pre-Depends still
+        // retain their more conservative resolution semantics.
+        let mut virtual_candidates = BTreeSet::new();
+        for name in &roots {
+            if !validated.contains(name) || optional_names.contains(name) {
+                continue;
+            }
+            let key = metadata_query::native_key_for(&catalog, name, architecture)?;
+            let summary = catalog.get(&key)
+                .context("missing verified dependency owner for virtual provider discovery")?;
+            let dep_arch = if summary.architecture == "all" {
+                architecture
+            } else { &summary.architecture };
+            for group in parse_groups_for_arch(&summary.depends, dep_arch)? {
+                if group.len() != 1 { continue; }
+                let required = &group[0];
+                if required.any_arch || required.requested_arch.is_some()
+                    || metadata_query::native_key_for(&catalog, &required.name, architecture).is_ok() {
+                    continue;
+                }
+                for (provider_key, provider) in &catalog {
+                    if provider_key.architecture != architecture
+                        && provider_key.architecture != "all" { continue; }
+                    for capability in provides(provider)? {
+                        if capability_satisfies(&capability, required)? {
+                            virtual_candidates.insert(provider_key.name.clone());
+                            if virtual_candidates.len() > 128 {
+                                bail!("virtual candidate-policy discovery exceeds 128 provider identities");
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for name in virtual_candidates {
+            if validated.contains(&name) { continue; }
+            let origins = crate::package_provenance::verified_version_origins(
+                cache, &name, architecture)?;
+            let chosen = crate::apt_pin_eval::preview_candidate_with_phasing(
+                &name, &origins, &preferences,
+                installed.iter().find(|(key, _)| key.name == name)
+                    .map(|(_, version)| version.as_str()),
+                target_release.as_deref(), None,
+            )?.candidate;
+            let key = metadata_query::native_key_for(&catalog, &name, architecture)?;
+            if let Some(version) = chosen {
+                if !origins.iter().any(|origin| origin.version == version) {
+                    bail!("virtual provider {name} has no authenticated policy candidate {version}");
+                }
+                let summary = metadata_query::verified_exact_version(
+                    cache, architecture, &name, &version, &origins)?;
+                if catalog.get(&key) != Some(&summary) { changed = true; }
+                metadata_query::insert_native_candidate(&mut catalog, summary, architecture)?;
+            } else {
+                // A negative pin can make a provider ineligible. Do NOT
+                // remove an installed provider's actual dpkg Provides: the
+                // solver reads that independent evidence from dpkg status.
+                catalog.remove(&key);
+                changed = true;
+            }
+            validated.insert(name);
+        }
         if include_recommends {
             let mut recommended = BTreeSet::new();
             for name in &roots {
