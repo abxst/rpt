@@ -126,6 +126,25 @@ pub(crate) fn mark_state_digest(root: &Path) -> Result<String> {
     }
 }
 
+/// Explicit pre-transaction checkpoint. It is deliberately opt-in and never
+/// performs automatic rollback. If guest state differs from the plan that was
+/// already checked, refuse to start dpkg and retain the checkpoint as evidence.
+fn checkpoint_before(root: &Path, journal: &Path, id: &str,
+    destination: Option<&Path>, status_before: &[u8], marks_before: Option<&str>)
+    -> Result<()> {
+    let Some(destination) = destination else { return Ok(()); };
+    if !valid_id(id) || id.len() > 57 {
+        bail!("checkpointed transaction ID must be 1..=57 safe characters");
+    }
+    let receipt = crate::native_snapshot::create(
+        root, destination, journal, &format!("{id}-before"))?;
+    if receipt.status_sha256 != hex::encode(Sha256::digest(status_before))
+        || marks_before.is_some_and(|expected| receipt.apt_marks_sha256 != expected) {
+        bail!("guest state changed before checkpoint; no package operation started");
+    }
+    Ok(())
+}
+
 fn write_mark_targets(path: &Path, targets: &[String]) -> Result<()> {
     let mut contents = String::new();
     for package in targets {
@@ -269,6 +288,7 @@ pub struct Apply<'a> {
     pub journal: &'a Path,
     pub id: &'a str,
     pub timeout_seconds: u64,
+    pub checkpoint_rootfs: Option<&'a Path>,
 }
 
 /// Failure leaves the rootfs and journal for operator inspection; no
@@ -340,6 +360,8 @@ pub async fn apply(opts: Apply<'_>) -> Result<ApplyOutcome> {
     let (automatic, manual) = install_mark_targets(&bound.requested, &bound.steps);
     write_mark_targets(&stage.join("auto-marks.txt"), &automatic)?;
     write_mark_targets(&stage.join("manual-marks.txt"), &manual)?;
+    checkpoint_before(&root, &journal, opts.id, opts.checkpoint_rootfs,
+        &guest_status, Some(&expected_marks))?;
     let stage = fs::canonicalize(stage)?;
     let mut args = vec![
         "-euc".into(), INSTALL_SCRIPT.into(), "rpt-native-rootfs".into(),
@@ -410,6 +432,7 @@ pub struct Remove<'a> {
     pub cascade: bool,
     pub purge: bool,
     pub timeout_seconds: u64,
+    pub checkpoint_rootfs: Option<&'a Path>,
 }
 pub async fn remove_planned(opts: Remove<'_>) -> Result<crate::removal_planner::RemovalPlan> {
     let root = rootfs(opts.rootfs)?;
@@ -422,6 +445,11 @@ pub async fn remove_planned(opts: Remove<'_>) -> Result<crate::removal_planner::
             &before, opts.architecture, opts.packages, opts.cascade)?
     };
     if !plan.removable { bail!("unsafe native removal: {}", plan.blockers.join("; ")); }
+    if opts.checkpoint_rootfs.is_some() {
+        let marks = mark_state_digest(&root)?;
+        checkpoint_before(&root, opts.journal, opts.id, opts.checkpoint_rootfs,
+            &before, Some(&marks))?;
+    }
     execute_remove(&root, Run {
         journal: opts.journal, id: opts.id, timeout_seconds: opts.timeout_seconds,
     }, &before, None, &plan.remove, opts.purge).await?;
@@ -435,6 +463,13 @@ pub async fn remove_planned(opts: Remove<'_>) -> Result<crate::removal_planner::
 pub async fn autoremove_planned(root: &Path, journal: &Path, id: &str,
     architecture: &str, timeout_seconds: u64)
     -> Result<crate::removal_planner::RemovalPlan> {
+    autoremove_planned_with_checkpoint(root, journal, id, architecture,
+        timeout_seconds, None).await
+}
+
+pub async fn autoremove_planned_with_checkpoint(root: &Path, journal: &Path, id: &str,
+    architecture: &str, timeout_seconds: u64, checkpoint_rootfs: Option<&Path>)
+    -> Result<crate::removal_planner::RemovalPlan> {
     let root = rootfs(root)?;
     let before = status(&root)?;
     let marks_path = root.join("var/lib/apt/extended_states");
@@ -446,6 +481,9 @@ pub async fn autoremove_planned(root: &Path, journal: &Path, id: &str,
     let plan = crate::removal_planner::autoremove_snapshot(&before, &marks, architecture)?;
     if !plan.removable { bail!("native autoremove denied: {}", plan.blockers.join("; ")); }
     if !plan.remove.is_empty() {
+        let marks_digest = hex::encode(Sha256::digest(&marks));
+        checkpoint_before(&root, journal, id, checkpoint_rootfs,
+            &before, Some(&marks_digest))?;
         execute_remove(&root, Run { journal, id, timeout_seconds }, &before,
             Some(&marks), &plan.remove, false).await?;
     }
@@ -520,6 +558,12 @@ fi
 
 pub async fn mark(root: &Path, journal_path: &Path, id: &str, mode: &str,
     packages: &[String], timeout_seconds: u64) -> Result<()> {
+    mark_with_checkpoint(root, journal_path, id, mode,
+        packages, timeout_seconds, None).await
+}
+
+pub async fn mark_with_checkpoint(root: &Path, journal_path: &Path, id: &str, mode: &str,
+    packages: &[String], timeout_seconds: u64, checkpoint_rootfs: Option<&Path>) -> Result<()> {
     if !matches!(mode, "auto" | "manual") || !valid_id(id)
         || !(10..=3600).contains(&timeout_seconds) {
         bail!("invalid native APT mark mode, ID or timeout");
@@ -536,6 +580,8 @@ pub async fn mark(root: &Path, journal_path: &Path, id: &str, mode: &str,
     if journal == Path::new("/") || journal.starts_with(&root) {
         bail!("native APT marking journal must be outside rootfs");
     }
+    checkpoint_before(&root, &journal, id, checkpoint_rootfs,
+        &before, Some(&digest))?;
     let mut args = vec![
         "-euc".into(), MARK_SCRIPT.into(), "rpt-native-mark".into(),
         root.to_string_lossy().into_owned(), hex::encode(Sha256::digest(&before)),

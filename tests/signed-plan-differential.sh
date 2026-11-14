@@ -22,7 +22,8 @@ cleanup() {
   if [[ -d "$root" && ! -L "$root" && "$root" == /tmp/rpt-signed.* ]]; then
     sudo rm -rf -- "$root/native-guest" "$root/native-journal" \
       "$root/native-mark-guest" "$root/native-mark-journal" \
-      "$root/native-checkpoint" "$root/native-restored"
+      "$root/native-checkpoint" "$root/native-restored" \
+      "$root/native-auto-remove" "$root/native-auto-mark"
   fi
   rm -rf "$root"
 }
@@ -452,7 +453,13 @@ if sudo ./target/debug/rpt native-rootfs-remove-planned \
 fi
 sudo ./target/debug/rpt native-rootfs-remove-planned \
   --rootfs "$native_guest" --id native-remove \
+  --checkpoint-rootfs "$root/native-auto-remove" \
   --journal-dir "$root/native-journal" --architecture "$arch" rpt-sandbox-demo
+remove_receipt="$root/native-journal/native-rootfs-snapshots/native-remove-before.json"
+sudo ./target/debug/rpt native-rootfs-snapshot-verify \
+  --receipt "$remove_receipt" >"$root/native-auto-remove-verify.json"
+test "$(sudo dpkg-query --admindir="$root/native-auto-remove/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-sandbox-demo)" = 'install ok installed'
 grep -Fq '"phase": "succeeded"' "$root/native-journal/native-remove.json"
 # Remove leaves configuration and a dpkg config-files record.
 test -f "$native_guest/etc/rpt-test/rpt-demo.conf"
@@ -498,7 +505,13 @@ assert 'rpt-sandbox-demo:all' not in json.load(open(sys.argv[1]))['remove']
 PY
 sudo ./target/debug/rpt native-rootfs-mark \
   --rootfs "$native_guest" --id native-mark-auto \
+  --checkpoint-rootfs "$root/native-auto-mark" \
   --journal-dir "$root/native-journal" auto rpt-sandbox-demo
+sudo ./target/debug/rpt native-rootfs-snapshot-verify \
+  --receipt "$root/native-journal/native-rootfs-snapshots/native-mark-auto-before.json" \
+  >"$root/native-auto-mark-verify.json"
+sudo chroot "$root/native-auto-mark" /usr/bin/apt-mark showmanual rpt-sandbox-demo \
+  | grep -Fxq rpt-sandbox-demo
 sudo chroot "$native_guest" /usr/bin/apt-mark showauto rpt-sandbox-demo \
   | grep -Fxq rpt-sandbox-demo
 # Debian slim exports may mark apt itself automatic. This acceptance fixture

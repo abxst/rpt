@@ -136,7 +136,7 @@ holding the cooperative lock. It refuses a changed source, a failed copy,
 or a divergent snapshot. Partial copies are left for manual inspection.
 
 A durable, exclusively created checkpoint receipt is written to
-\`JOURNAL_DIR/native-rootfs-snapshots/tx001-baseline.json\`; it contains
+`JOURNAL_DIR/native-rootfs-snapshots/tx001-baseline.json`; it contains
 source/snapshot path identities, tree hash, dpkg status hash, guest APT
 marks hash and creation time. Verify it any time:
 
@@ -156,6 +156,37 @@ An existing destination or modified checkpoint fails closed. The snapshot
 can be created before the failure and restored even when the original's
 journal contains an interrupted transaction; it **never clears that gate**.
 
+### Opt-in pre-transaction checkpoint hook
+
+Native `native-rootfs-apply-transaction`, `native-rootfs-remove-planned`
+(including `--purge`), `native-rootfs-mark`, and
+`native-rootfs-autoremove-planned` also accept
+`--checkpoint-rootfs /tmp/NEW-GUEST-BEFORE`. This **opt-in** option
+creates and verifies a full guest checkpoint **after plan/preflight checks
+but before launching the mutating dpkg/apt-mark command**. The transaction
+ID must be 1–57 safe characters. Receipts are written as
+`JOURNAL_DIR/native-rootfs-snapshots/<TRANSACTION_ID>-before.json`.
+
+For example:
+
+    sudo rpt native-rootfs-remove-planned \
+      --rootfs /tmp/my-guest --architecture amd64 --id remove001 \
+      --journal-dir ./rpt-native-journal \
+      --checkpoint-rootfs /tmp/pre-remove001 demo-package
+
+If checkpoint creation or verification fails, no package mutation is started.
+A nonempty autoremove gets a checkpoint; an empty removal plan has nothing to
+mutate and therefore takes no checkpoint. Existing commands **without** this
+option behave as before.
+
+An installed-state or APT-marks mismatch detected after checkpoint creation
+also aborts the package operation, retaining the copied guest and receipt
+for investigation. These operations remain separately journaled; there is
+a window after the cooperative checkpoint lock is released and before the
+package transaction lock is acquired. RPT rechecks state as part of
+transaction execution, but the copy and dpkg commit are **not an atomic
+all-or-nothing operation**. Recovery is always manual into a different guest.
+
 **Limitations:** This is a trusted, *offline/disposable* filesystem copy,
 not an atomic Btrfs/ZFS/LVM snapshot or an ACID package transaction. The
 tree witness does not prove hardlink topology, xattrs, ACLs, application
@@ -163,7 +194,7 @@ process state, external device effects or power-loss persistence. The
 journal lock coordinates RPT processes only, not arbitrary host writers.
 GNU cp and the guest filesystem must be trusted; privileged maintainer
 scripts are still not contained by chroot. Never use this to snapshot live
-\`/\` or enable host package mutation. A checkpoint is **explicit** and does
+`/` or enable host package mutation. A checkpoint is **explicit** and does
 not automatically wrap every RPT transaction.
 
 ## Optional WSL2 smoke test (Ubuntu amd64)

@@ -160,7 +160,13 @@ sudo "$rpt" native-rootfs-mark \
 sudo chroot "$guest" /usr/bin/apt-mark showauto hello | grep -Fxq hello
 sudo "$rpt" native-rootfs-autoremove-planned \
   --rootfs "$guest" --id wsl-autoremove --journal-dir "$journal" \
+  --checkpoint-rootfs "$work/wsl-before-autoremove" \
   --architecture amd64 --timeout-seconds 300
+auto_receipt="$journal/native-rootfs-snapshots/wsl-autoremove-before.json"
+sudo "$rpt" native-rootfs-snapshot-verify --receipt "$auto_receipt" \
+  >"$work/auto-snapshot-verify.json"
+test "$(sudo dpkg-query --admindir="$work/wsl-before-autoremove/var/lib/dpkg" \
+  -W '-f=${Status}' hello)" = 'install ok installed'
 
 # Exercise purge after reinstallation, distinct from remove/autoremove.
 "$rpt" native-rootfs-prepare-transaction \
