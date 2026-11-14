@@ -499,6 +499,35 @@ enum Command {
         #[arg(long, default_value_t = 200)] max_packages: usize,
         #[arg(long)] output: PathBuf,
     },
+    /// Prepare a bound combined removal + upgrade intent for a disposable rootfs.
+    /// Explicit --remove or --automatic selection; never mutates dpkg.
+    NativeRootfsPrepareFullUpgrade {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = 3)] max_removals: usize,
+        #[arg(long, conflicts_with = "remove")] automatic: bool,
+        #[arg(long = "remove", required_unless_present = "automatic")] remove: Vec<String>,
+        #[arg(long)] output: PathBuf,
+    },
+    /// Apply a signed combined remove + upgrade under ONE journal to a marked
+    /// disposable rootfs. Mandatory verified checkpoint and exact SHA approval.
+    /// NOT an executor for the live host or a full APT dist-upgrade.
+    NativeRootfsApplyFullUpgrade {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long)] transaction: PathBuf,
+        #[arg(long)] approve_intent_sha256: String,
+        #[arg(long)] checkpoint_rootfs: PathBuf,
+        #[arg(long, default_value = "./rpt-artifacts")] artifacts: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
     /// Apply signed install/upgrade to a marked disposable native rootfs, NEVER live /.
     NativeRootfsApplyTransaction {
         #[arg(long)] rootfs: PathBuf,
@@ -1120,6 +1149,35 @@ async fn execute(cli: Cli) -> Result<()> {
             tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
                 .context("writing native rootfs system upgrade intent")?;
             println!("Disposable rootfs signed system-upgrade intent: {count} archives; NO dpkg changes");
+        }
+        Command::NativeRootfsPrepareFullUpgrade {
+            rootfs, cache, apt_root, architecture, max_roots, max_packages,
+            max_removals, automatic, remove, output,
+        } => {
+            let mode = if automatic { "automatic" } else { "explicit" };
+            let intent = rpt::native_full_upgrade::prepare(rpt::native_full_upgrade::Prepare {
+                root: &rootfs, cache: &cache, apt_root: &apt_root,
+                architecture: &architecture, mode, requested: &remove,
+                max_roots, max_packages, max_removals,
+            }).context(ErrorCategory::System)?;
+            let count = intent.manifest.packages.len();
+            let removals = intent.selected_removals.len();
+            tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
+                .context("writing native combined full-upgrade intent")?;
+            println!("Nonexecutable native full-upgrade intent: {removals} removals, {count} authenticated archives; guest unchanged");
+        }
+        Command::NativeRootfsApplyFullUpgrade {
+            rootfs, id, transaction, approve_intent_sha256, checkpoint_rootfs,
+            artifacts, cache, apt_root, journal_dir, timeout_seconds,
+        } => {
+            rpt::native_full_upgrade::apply(rpt::native_full_upgrade::Apply {
+                rootfs: &rootfs, id: &id, transaction: &transaction,
+                artifacts: &artifacts, cache: &cache, apt_root: &apt_root,
+                journal: &journal_dir, timeout_seconds,
+                checkpoint_rootfs: &checkpoint_rootfs,
+                approved_intent_sha256: &approve_intent_sha256,
+            }).await.context(ErrorCategory::System)?;
+            println!("Combined removal + signed upgrade verified and applied in disposable rootfs under one journal; live host dpkg untouched.");
         }
         Command::NativeRootfsApplyTransaction {
             rootfs, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds,

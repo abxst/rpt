@@ -33,6 +33,12 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   (`plan-auto-full-upgrade`): finds the unique minimum-cardinality valid
   removal set, or refuses an ambiguous/unsafe result. No host or guest dpkg
   execution; not complete APT dist-upgrade ranking parity.
+- **M7 combined signed removal + upgrade canary**, guest-only:
+  `native-rootfs-prepare-full-upgrade` builds a status/marks-bound intent,
+  and `native-rootfs-apply-full-upgrade` replays policy, verifies exact
+  artifacts, requires an approved SHA256 and a full-tree checkpoint, then
+  runs remove→upgrade in ONE supervised journal with a full installed
+  inventory postflight. No live-host dpkg permission or automatic rollback.
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

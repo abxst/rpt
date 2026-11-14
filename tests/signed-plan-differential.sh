@@ -24,7 +24,9 @@ cleanup() {
       "$root/native-mark-guest" "$root/native-mark-journal" \
       "$root/native-checkpoint" "$root/native-restored" \
       "$root/native-auto-remove" "$root/native-auto-mark" \
-      "$root/native-upgrade-guest" "$root/native-auto-journal"
+      "$root/native-upgrade-guest" "$root/native-auto-journal" \
+      "$root/native-combined-guest" "$root/native-combined-checkpoint" \
+      "$root/native-combined-restored" "$root/native-combined-journal"
   fi
   rm -rf "$root"
 }
@@ -1360,6 +1362,7 @@ Package: rpt-sandbox-demo
 Version: 2.0
 Architecture: all
 Pre-Depends: rpt-sandbox-helper (>= 1.0)
+Conflicts: rpt-sandbox-obsolete
 Maintainer: RPT CI <rpt-test@example.invalid>
 Description: real dpkg upgrade with predependency
 CONTROL
@@ -1388,6 +1391,7 @@ for spec in rpt-sandbox-helper:1.0 rpt-sandbox-demo:2.0; do
     "$name" "$ver" "$file" "$checksum" "$length" >>"$index"
   if [[ "$name" == "rpt-sandbox-demo" ]]; then
     printf 'Pre-Depends: rpt-sandbox-helper (>= 1.0)\n' >>"$index"
+    printf 'Conflicts: rpt-sandbox-obsolete\n' >>"$index"
   fi
   printf 'Description: signed upgrade artifact\n\n' >>"$index"
 done
@@ -1472,6 +1476,125 @@ if ./target/debug/rpt native-rootfs-prepare-system-upgrade \
   echo 'Native auto-upgrade created a no-op execution intent' >&2; exit 1
 fi
 echo 'PASS signed native-rootfs auto-upgrade discovery, dependency closure, real dpkg, replay and live-root refusal'
+
+# M7 integrated canary acceptance: one supervised native guest command
+# removes a deliberately obsolete installed package, installs signed helper,
+# upgrades demo v1->v2, verifies all installed binaries, and publishes ONE
+# journal. The maintainer script runs only inside a disposable rootfs.
+mkdir -p "$root/obsolete-v1/DEBIAN" "$root/obsolete-v1/usr/share/rpt-test"
+cat >"$root/obsolete-v1/DEBIAN/control" <<'CONTROL'
+Package: rpt-sandbox-obsolete
+Version: 1.0
+Architecture: all
+Maintainer: RPT CI <rpt-test@example.invalid>
+Description: obsolete guest package to be removed with signed upgrade
+CONTROL
+printf 'obsolete 1\n' >"$root/obsolete-v1/usr/share/rpt-test/obsolete.txt"
+dpkg-deb --build --root-owner-group "$root/obsolete-v1" \
+  "$root/www/pool/rpt-sandbox-obsolete_1.0_all.deb" >/dev/null
+combined_guest="$root/native-combined-guest"
+sudo mkdir -p "$combined_guest"
+combined_container="rpt-native-combined-export-$(basename "$root")"
+docker create --name "$combined_container" --network=none \
+  --entrypoint /bin/sh "$sandbox_image" -c true >/dev/null
+docker export "$combined_container" | sudo tar -xpf - -C "$combined_guest"
+docker rm "$combined_container" >/dev/null
+printf 'rpt-disposable-rootfs-v1\n' \
+  | sudo tee "$combined_guest/.rpt-disposable-rootfs" >/dev/null
+sudo dpkg --root="$combined_guest" --install \
+  "$root/www/pool/rpt-sandbox-demo_1.0_all.deb" \
+  "$root/www/pool/rpt-sandbox-obsolete_1.0_all.deb"
+combined_before="$(sudo sha256sum "$combined_guest/var/lib/dpkg/status" | cut -d' ' -f1)"
+if ./target/debug/rpt native-rootfs-prepare-full-upgrade --rootfs / \
+    --automatic --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+    --output "$root/native-combined-live.json" >"$root/combined-live.log" 2>&1; then
+  echo 'Combined full-upgrade accepted the live host root' >&2; exit 1
+fi
+./target/debug/rpt native-rootfs-prepare-full-upgrade \
+  --rootfs "$combined_guest" --cache "$root/rpt-cache-v2" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  --max-roots 128 --max-packages 200 --max-removals 3 \
+  --automatic --output "$root/native-combined-intent.json"
+python3 - "$root/native-combined-intent.json" "$combined_guest" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert x['schema_version']==1 and x['session']=='native-rootfs:'+sys.argv[2]
+assert x['selection_mode']=='automatic'
+assert x['requested_removals']==[]
+assert x['requested_upgrades']==['rpt-sandbox-demo']
+assert x['selected_removals']==[{
+  'name':'rpt-sandbox-obsolete','architecture':'all','installed_version':'1.0'}]
+assert [(v['package'],v['version']) for v in x['steps']]==[
+  ('rpt-sandbox-helper','1.0'),('rpt-sandbox-demo','2.0')]
+assert [(v['name'],v['version']) for v in x['packages']]==[
+  ('rpt-sandbox-helper','1.0'),('rpt-sandbox-demo','2.0')]
+assert x['executable'] is False and len(x['scenario_sha256'])==64
+PY
+combined_approved="$(sha256sum "$root/native-combined-intent.json" | cut -d' ' -f1)"
+if sudo ./target/debug/rpt native-rootfs-apply-full-upgrade \
+  --rootfs "$combined_guest" --id combined-wrong-sha \
+  --transaction "$root/native-combined-intent.json" \
+  --approve-intent-sha256 "$(printf '0%.0s' {1..64})" \
+  --checkpoint-rootfs "$root/native-combined-invalid-checkpoint" \
+  --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-combined-journal" \
+  >"$root/native-combined-wrong-sha.log" 2>&1; then
+  echo 'Combined executor accepted wrong explicit intent approval' >&2; exit 1
+fi
+test "$(sudo sha256sum "$combined_guest/var/lib/dpkg/status" | cut -d' ' -f1)" = "$combined_before"
+test ! -e "$root/native-combined-invalid-checkpoint"
+./target/debug/rpt fetch --manifest "$root/native-combined-intent.json" \
+  --output "$root/native-combined-artifacts" --workers 2 --segments 1 \
+  >"$root/native-combined-fetch.log"
+sudo ./target/debug/rpt native-rootfs-apply-full-upgrade \
+  --rootfs "$combined_guest" --id combined-upgrade \
+  --transaction "$root/native-combined-intent.json" \
+  --approve-intent-sha256 "$combined_approved" \
+  --checkpoint-rootfs "$root/native-combined-checkpoint" \
+  --artifacts "$root/native-combined-artifacts" \
+  --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-combined-journal" --timeout-seconds 180 \
+  >"$root/native-combined-apply.log"
+grep -Fq '"phase": "succeeded"' \
+  "$root/native-combined-journal/combined-upgrade.json"
+test -d "$root/native-combined-checkpoint"
+test "$(sudo dpkg-query --admindir="$combined_guest/var/lib/dpkg" \
+  -W '-f=${Status}|${Version}' rpt-sandbox-demo)" = 'install ok installed|2.0'
+test "$(sudo dpkg-query --admindir="$combined_guest/var/lib/dpkg" \
+  -W '-f=${Status}|${Version}' rpt-sandbox-helper)" = 'install ok installed|1.0'
+if test "$(sudo dpkg-query --admindir="$combined_guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-sandbox-obsolete 2>/dev/null)" = 'install ok installed'; then
+  echo 'Combined executor left obsolete package installed' >&2; exit 1
+fi
+test -z "$(sudo dpkg --root="$combined_guest" --audit)"
+if sudo ./target/debug/rpt native-rootfs-apply-full-upgrade \
+  --rootfs "$combined_guest" --id combined-stale-replay \
+  --transaction "$root/native-combined-intent.json" \
+  --approve-intent-sha256 "$combined_approved" \
+  --checkpoint-rootfs "$root/native-combined-replay-checkpoint" \
+  --artifacts "$root/native-combined-artifacts" \
+  --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-combined-journal" \
+  >"$root/native-combined-stale.log" 2>&1; then
+  echo 'Combined executor accepted stale post-upgrade intent' >&2; exit 1
+fi
+test ! -e "$root/native-combined-replay-checkpoint"
+# Checkpoint must recover to a NEW guest, never overwrite the altered source.
+receipt="$(find "$root/native-combined-journal" -type f -name 'combined-upgrade-before.json' | head -n1)"
+test -s "$receipt"
+if ./target/debug/rpt native-rootfs-snapshot-restore \
+  --receipt "$receipt" --new-rootfs "$combined_guest" >/dev/null 2>&1; then
+  echo 'Combined checkpoint unexpectedly overwrote the original guest' >&2; exit 1
+fi
+sudo ./target/debug/rpt native-rootfs-snapshot-restore \
+  --receipt "$receipt" --new-rootfs "$root/native-combined-restored" \
+  >"$root/native-combined-restore.json"
+test "$(sudo dpkg-query --admindir="$root/native-combined-restored/var/lib/dpkg" \
+  -W '-f=${Status}|${Version}' rpt-sandbox-demo)" = 'install ok installed|1.0'
+test "$(sudo dpkg-query --admindir="$root/native-combined-restored/var/lib/dpkg" \
+  -W '-f=${Status}|${Version}' rpt-sandbox-obsolete)" = 'install ok installed|1.0'
+test -z "$(sudo dpkg --root="$root/native-combined-restored" --audit)"
+echo 'PASS M7 combined signed remove+upgrade single journal, mandatory checkpoint, SHA approval, postflight inventory and separate restoration'
 
 # Seed v1 in a new persistent sandbox; reject an intent created before seeding.
 ./target/debug/rpt sandbox-session-create --session "$session" --image "$sandbox_image"
