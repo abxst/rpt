@@ -259,6 +259,16 @@ enum Command {
         #[arg(long, default_value_t = 200)] max_packages: usize,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Read-only, exact foreign-architecture candidate-policy diagnostic.
+    PlanInstallForeignPolicy {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] native_architecture: String,
+        #[arg(long)] foreign_architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        package: String,
+    },
     /// Joint candidate-policy-verified plan for multiple roots; never executes dpkg.
     PlanInstallBatchPolicy {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
@@ -770,6 +780,18 @@ async fn execute(cli: Cli) -> Result<()> {
             let report = rpt::transaction_plan_audit::classify(&steps)
                 .context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::PlanInstallForeignPolicy { cache, status, apt_root, native_architecture, foreign_architecture, max_packages, package } => {
+            let steps = rpt::install_plan::preview_explicit_architecture_with_policy(
+                &cache, &status, &apt_root, &package, &native_architecture,
+                &foreign_architecture, max_packages,
+            ).context(ErrorCategory::System)?;
+            println!("RPT POLICY-VERIFIED FOREIGN-ARCHITECTURE READ-ONLY PLAN");
+            for step in &steps {
+                println!("  {}:{} {} (installed: {})", step.package, step.architecture,
+                    step.version, step.installed.as_deref().unwrap_or("none"));
+            }
+            println!("Foreign plan preview: {} package(s); NO CHANGES MADE", steps.len());
         }
         Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, include_recommends, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy_options(

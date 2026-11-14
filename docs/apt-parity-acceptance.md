@@ -36,6 +36,29 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Explicit foreign-architecture candidate-policy preview
+
+The existing restricted foreign-architecture resolver is exposed through the
+read-only command `plan-install-foreign-policy`. Example:
+
+    rpt plan-install-foreign-policy --native-architecture amd64 \
+      --foreign-architecture i386 --cache ./rpt-lists \
+      --status ./dpkg-status --apt-root ./apt-config libsample:i386
+
+The root package must have an explicit `:i386` identity. Its candidate
+version and every resolved dependency must be backed by signed repository
+metadata for that **exact foreign architecture**. The planner validates the
+foreign/native architecture pair, max transaction size, installed status,
+cross-architecture Conflicts/Breaks and Multi-Arch: same co-installation rules.
+It refuses implicit substitutions and unsupported Multi-Arch semantics.
+
+CI exercises invalid scopes, traversal-looking architecture strings and
+package-count bounds through the public CLI; existing resolver tests cover
+foreign identity pairing and incompatible installed versions. There is not
+yet a full signed APT/RPT foreign-architecture differential and this
+preview **never authorizes host or sandbox dpkg execution**. Gate D remains
+incomplete.
+
 ## Held packages and negative pinning differential
 
 The signed `tests/signed-plan-differential.sh` fixture checks that an exact

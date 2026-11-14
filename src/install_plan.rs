@@ -926,6 +926,18 @@ pub fn preview_explicit_architecture_with_policy(
     native_architecture: &str, foreign_architecture: &str,
     max_packages: usize,
 ) -> Result<Vec<PlanStep>> {
+    if max_packages == 0 || max_packages > 5000 {
+        bail!("max_packages must be 1..=5000");
+    }
+    if foreign_architecture == native_architecture {
+        bail!("foreign policy preview requires distinct native and foreign architectures");
+    }
+    for arch in [native_architecture, foreign_architecture] {
+        if arch.is_empty() || arch == "all"
+            || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            bail!("invalid concrete preview architecture: {arch}");
+        }
+    }
     let target_release = crate::policy::read_default_release(apt_root)?;
     let preferences = crate::apt_preferences::load(apt_root)?;
     // Resolve the explicitly requested root against its policy-selected
@@ -1503,6 +1515,24 @@ mod tests {
         assert!(solve_catalog(&root, &installed, &BTreeMap::new(), "app", 20, "amd64").is_err());
     }
 
+    #[test]
+    fn foreign_policy_validation_rejects_invalid_scope_before_metadata_io() {
+        let invalid_cache = Path::new("/nonexistent/rpt-foreign-cache");
+        let status = Path::new("/nonexistent/rpt-foreign-status");
+        let apt_root = Path::new("/nonexistent/rpt-foreign-apt");
+        for (native, foreign, max) in [
+            ("amd64", "amd64", 20),
+            ("amd64", "all", 20),
+            ("amd64", "../i386", 20),
+            ("", "i386", 20),
+            ("amd64", "i386", 0),
+            ("amd64", "i386", 5001),
+        ] {
+            assert!(preview_explicit_architecture_with_policy(
+                invalid_cache, status, apt_root, "sample:i386", native, foreign, max,
+            ).is_err());
+        }
+    }
     #[test]
     fn explicit_foreign_preview_requires_qualified_request_and_safe_catalog() {
         let root = std::env::temp_dir().join(format!("rpt-foreign-preview-{}", std::process::id()));
