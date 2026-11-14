@@ -24,7 +24,9 @@ cleanup() {
       "$root/native-mark-guest" "$root/native-mark-journal" \
       "$root/native-checkpoint" "$root/native-restored" \
       "$root/native-auto-remove" "$root/native-auto-mark" \
-      "$root/native-upgrade-guest" "$root/native-auto-journal"
+      "$root/native-upgrade-guest" "$root/native-auto-journal" \
+      "$root/native-combined-guest" "$root/native-combined-checkpoint" \
+      "$root/native-combined-restored" "$root/native-combined-journal"
   fi
   rm -rf "$root"
 }
