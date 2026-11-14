@@ -23,12 +23,20 @@ Filename: pool/rpt-pair_1.0_amd64.deb
 Size: 1
 Description: native library pair
 
+Package: rpt-common-data
+Version: 1.0
+Architecture: all
+Multi-Arch: foreign
+Filename: pool/rpt-common-data_1.0_all.deb
+Size: 1
+Description: architecture independent dependency of i386 binary
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
 Version: 1.0
 Architecture: i386
-Depends: rpt-foreign-lib (>= 1.0)
+Depends: rpt-foreign-lib (>= 1.0), rpt-common-data (>= 1.0)
 Filename: pool/rpt-foreign-app_1.0_i386.deb
 Size: 1
 Description: foreign application
@@ -47,6 +55,14 @@ Multi-Arch: same
 Filename: pool/rpt-pair_1.0_i386.deb
 Size: 1
 Description: foreign library pair
+
+Package: rpt-common-data
+Version: 1.0
+Architecture: all
+Multi-Arch: foreign
+Filename: pool/rpt-common-data_1.0_all.deb
+Size: 1
+Description: architecture independent dependency of i386 binary
 
 EOF
 payload_hash="$(printf x | sha256sum | cut -d' ' -f1)"
@@ -133,7 +149,8 @@ compare_plan() {
     "$package" >"$root/rpt-$label"
   sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-$label" | LC_ALL=C sort -u \
     >"$root/apt-$label-selected"
-  sed -nE 's/^  ([^ ]+) ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-$label" | LC_ALL=C sort -u \
+  sed -nE 's/^  ([^ ]+) ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-$label" |
+    sed -E 's/:all ([^ ]+)$/ \1/' | LC_ALL=C sort -u \
     >"$root/rpt-$label-selected"
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
@@ -141,6 +158,8 @@ compare_plan() {
 compare_plan foreign "$root/empty-status" rpt-foreign-app:i386
 grep -Fxq 'rpt-foreign-app:i386 1.0' "$root/rpt-foreign-selected"
 grep -Fxq 'rpt-foreign-lib:i386 1.0' "$root/rpt-foreign-selected"
+grep -Fxq 'rpt-common-data 1.0' "$root/rpt-foreign-selected"
+grep -Fq 'rpt-common-data:all 1.0' "$root/rpt-foreign"
 compare_plan pair "$root/native-installed" rpt-pair:i386
 grep -Fxq 'rpt-pair:i386 1.0' "$root/rpt-pair-selected"
 sed 's/Version: 1.0/Version: 2.0/' "$root/native-installed" >"$root/mismatch"

@@ -917,6 +917,32 @@ pub fn preview_explicit_architecture(
     Ok(plan)
 }
 
+/// Resolve a foreign dependency to its real dpkg binary identity. A
+/// universal Architecture: all package is valid only when the foreign binary
+/// of the same name is absent; ambiguity remains fail-closed.
+fn foreign_dependency_identity(
+    catalog: &BTreeMap<PackageKey, PackageSummary>, name: &str, foreign: &str,
+) -> Result<Option<PackageKey>> {
+    let foreign_key = PackageKey { name: name.into(), architecture: foreign.into() };
+    let all_key = PackageKey { name: name.into(), architecture: "all".into() };
+    match (catalog.contains_key(&foreign_key), catalog.contains_key(&all_key)) {
+        (true, true) => bail!("ambiguous foreign/all dependency identity for {name}"),
+        (true, false) => Ok(Some(foreign_key)),
+        (false, true) => {
+            // In Debian a binary from Architecture: all does not satisfy a
+            // foreign-architecture dependency by default. An unqualified
+            // foreign Depends requires the provider to declare
+            // Multi-Arch: foreign (as confirmed by apt-get -s).
+            let item = &catalog[&all_key];
+            if item.multi_arch != "foreign" {
+                bail!("Architecture: all dependency {name} requires Multi-Arch: foreign");
+            }
+            Ok(Some(all_key))
+        },
+        (false, false) => Ok(None),
+    }
+}
+
 /// Policy-checked diagnostic for an explicit foreign-architecture request.
 /// Unlike the exploratory preview, this requires every staged version to be
 /// the APT-policy candidate from verified metadata for that exact architecture.
@@ -963,7 +989,8 @@ pub fn preview_explicit_architecture_with_policy(
     }
     let root_origins = crate::package_provenance::verified_version_origins(
         cache, &parsed.name, foreign_architecture,
-    )?;
+    )?.into_iter().filter(|origin| origin.architecture == foreign_architecture)
+        .collect::<Vec<_>>();
     let root_candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
         &parsed.name, &root_origins, &preferences,
         installed.get(&root_key).map(String::as_str), target_release.as_deref(), None,
@@ -976,85 +1003,98 @@ pub fn preview_explicit_architecture_with_policy(
     if root_summary.architecture != foreign_architecture {
         bail!("foreign root policy candidate has incorrect binary architecture");
     }
-    catalog.insert(root_key, root_summary);
+    catalog.insert(root_key.clone(), root_summary);
     // Candidate-select the dependency closure before returning a plan.
     // Repository latest is only a discovery seed: every discovered package
     // gets replaced with the verified policy candidate, then re-solved.
     // A bounded fixed point prevents cycles or endlessly changing closures.
     let mut validated = BTreeSet::new();
-    validated.insert(parsed.name.clone());
+    validated.insert(root_key.clone());
     let mut roots = BTreeSet::new();
-    roots.insert(parsed.name.clone());
+    roots.insert(root_key);
     for _ in 0..16 {
         let mut changed = false;
-        for name in &roots {
-            if validated.contains(name) { continue; }
-            let key = PackageKey {
-                name: name.clone(), architecture: foreign_architecture.to_owned(),
-            };
-            if !catalog.contains_key(&key) {
-                bail!("foreign dependency {}:{} has no exact-architecture metadata",
-                    name, foreign_architecture);
+        for key in &roots {
+            if validated.contains(key) { continue; }
+            if !catalog.contains_key(key) {
+                bail!("foreign dependency {}:{} has no architecture-qualified metadata",
+                    key.name, key.architecture);
             }
             let origins = crate::package_provenance::verified_version_origins(
-                cache, name, foreign_architecture,
-            )?;
+                cache, &key.name, foreign_architecture,
+            )?.into_iter().filter(|origin| origin.architecture == key.architecture)
+                .collect::<Vec<_>>();
             let candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
-                name, &origins, &preferences,
-                installed.get(&key).map(String::as_str), target_release.as_deref(), None,
+                &key.name, &origins, &preferences,
+                installed.get(key).map(String::as_str), target_release.as_deref(), None,
             )?.candidate.with_context(|| format!(
-                "APT policy has no candidate for foreign dependency {}:{}", name, foreign_architecture,
+                "APT policy has no candidate for foreign dependency {}:{}",
+                key.name, key.architecture,
             ))?;
             let summary = metadata_query::verified_exact_version(
-                cache, foreign_architecture, name, &candidate, &origins,
+                cache, &key.architecture, &key.name, &candidate, &origins,
             )?;
-            if summary.architecture != foreign_architecture {
-                bail!("foreign dependency candidate has incorrect architecture");
+            if summary.architecture != key.architecture {
+                bail!("foreign dependency candidate has incorrect binary architecture");
             }
-            if catalog.get(&key) != Some(&summary) { changed = true; }
-            catalog.insert(key, summary);
-            validated.insert(name.clone());
+            if catalog.get(key) != Some(&summary) { changed = true; }
+            catalog.insert(key.clone(), summary);
+            validated.insert(key.clone());
         }
         // Discover mandatory concrete dependencies of the policy-selected
         // packages before solving; otherwise a newer, unpinned dependency
         // can make an otherwise valid plan fail prematurely.
         let mut discovered = false;
         let mut mandatory = BTreeSet::new();
-        for name in &roots {
-            if !validated.contains(name) { continue; }
-            let key = PackageKey {
-                name: name.clone(), architecture: foreign_architecture.to_owned(),
-            };
-            let item = catalog.get(&key).context("validated foreign dependency missing catalog entry")?;
+        for key in &roots {
+            if !validated.contains(key) { continue; }
+            let item = catalog.get(key)
+                .context("validated foreign dependency missing catalog entry")?;
             for group in parse_groups_for_arch(&item.pre_depends, foreign_architecture)?.into_iter()
                 .chain(parse_groups_for_arch(&item.depends, foreign_architecture)?) {
                 if group.len() == 1 {
                     let dep = &group[0];
-                    let dep_key = PackageKey {
-                        name: dep.name.clone(), architecture: foreign_architecture.to_owned(),
-                    };
-                    if catalog.contains_key(&dep_key) { mandatory.insert(dep.name.clone()); }
+                    if let Some(requested_arch) = &dep.requested_arch {
+                        if requested_arch != foreign_architecture {
+                            bail!("explicit cross-architecture dependency needs full Multi-Arch resolver");
+                        }
+                    }
+                    if let Some(identity) = foreign_dependency_identity(
+                        &catalog, &dep.name, foreign_architecture,
+                    )? {
+                        mandatory.insert(identity);
+                    }
                 }
             }
         }
-        for name in mandatory {
-            if roots.insert(name) { discovered = true; }
+        for identity in mandatory {
+            if roots.insert(identity) { discovered = true; }
         }
         if discovered { continue; }
         let plan = solve_catalog(
             &catalog, &installed, &scoped, requested, max_packages, foreign_architecture,
         )?;
         for step in &plan {
-            if roots.insert(step.package.clone()) { discovered = true; }
+            if roots.insert(PackageKey {
+                name: step.package.clone(), architecture: step.architecture.clone(),
+            }) { discovered = true; }
         }
         if changed || discovered { continue; }
         reject_foreign_negative_relations(&catalog, &relations, &plan, foreign_architecture)?;
-        // Exact-architecture candidate validation is mandatory for every step.
+        // A package recorded as Architecture: all must be verified from
+        // signed metadata as all, not relabeled as an i386 package.
         for step in &plan {
-            if step.architecture != foreign_architecture {
-                bail!("foreign policy preview cannot stage another architecture");
+            if step.architecture != foreign_architecture && step.architecture != "all" {
+                bail!("foreign policy preview cannot stage a native binary");
             }
-            if !validated.contains(&step.package) {
+            let identity = PackageKey {
+                name: step.package.clone(), architecture: step.architecture.clone(),
+            };
+            if step.architecture == "all"
+                && catalog.get(&identity).is_none_or(|item| item.multi_arch != "foreign") {
+                bail!("foreign dependency on Architecture: all requires Multi-Arch: foreign");
+            }
+            if !validated.contains(&identity) {
                 bail!("foreign dependency was not policy-validated");
             }
         }
@@ -1513,6 +1553,31 @@ mod tests {
                 item("lib", "1", "")),
         ]);
         assert!(solve_catalog(&root, &installed, &BTreeMap::new(), "app", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn foreign_dependency_retains_all_identity_and_rejects_same_name_ambiguity() {
+        let mut all = item("toolkit", "1.0", "");
+        all.architecture = "all".into();
+        all.multi_arch = "foreign".into();
+        let mut entries = BTreeMap::from([(
+            PackageKey { name: "toolkit".into(), architecture: "all".into() }, all,
+        )]);
+        let key = foreign_dependency_identity(&entries, "toolkit", "i386").unwrap().unwrap();
+        assert_eq!(key.architecture, "all");
+        let mut unqualified = entries.clone();
+        unqualified.get_mut(&key).unwrap().multi_arch = "no".into();
+        assert!(foreign_dependency_identity(&unqualified, "toolkit", "i386").is_err());
+        assert!(foreign_dependency_identity(&entries, "missing", "i386").unwrap().is_none());
+        let foreign = item("toolkit", "1.0", "");
+        entries.insert(
+            PackageKey {name: "toolkit".into(), architecture: "amd64".into()}, foreign.clone(),
+        );
+        assert_eq!(foreign_dependency_identity(&entries, "toolkit", "i386").unwrap().unwrap().architecture, "all");
+        let mut foreign = foreign;
+        foreign.architecture = "i386".into();
+        entries.insert(PackageKey { name: "toolkit".into(), architecture: "i386".into() }, foreign);
+        assert!(foreign_dependency_identity(&entries, "toolkit", "i386").is_err());
     }
 
     #[test]
