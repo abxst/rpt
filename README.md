@@ -402,6 +402,20 @@ The read-only native dependency solver now uses exact `(name, architecture)` key
 
 RPT now preserves the Debian `Replaces` control field from repository metadata and installed dpkg status. When a planned binary declares a matching versioned or unversioned `Replaces` relationship with another installed (including foreign-architecture) or simultaneously staged binary, or a reverse installed relationship exists, dependency planning refuses that unsafe file-ownership transfer. Unsupported `Replaces` syntax also fails closed. Full dpkg file ownership checks (`/var/lib/dpkg/info/*.list`), `Conflicts` + `Replaces` transitions, overwrite rules and actual package transactions are **not implemented**; this guard prevents claiming an unsafe plan is installable.
 
+### Native disposable-rootfs install/upgrade (development only)
+
+The `native-rootfs-prepare-transaction` and
+`native-rootfs-apply-transaction` commands move the existing signed
+install/upgrade flow **outside Docker** using real `dpkg --root` on an
+explicitly marked, disposable Linux root filesystem. The signed differential
+suite tests RPT execution in a separate extracted Debian/Ubuntu rootfs.
+
+This is **not production host execution**. Live `/` is rejected;
+`/tmp` or `/var/tmp` rootfs trees must be explicitly marked, with no
+submounts. Maintainer scripts are privileged and chroot is not a security
+boundary. No automated rollback or full APT parity is claimed.
+See [native rootfs transactions](docs/native-rootfs-transactions.md).
+
 ## Primary goal: full APT behavioral replacement
 
 The release gate is defined in [APT replacement acceptance criteria](docs/apt-parity-acceptance.md).
