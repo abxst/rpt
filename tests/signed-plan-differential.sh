@@ -19,8 +19,8 @@ cleanup() {
   if [[ -n "$upgrade_pid" ]]; then kill "$upgrade_pid" 2>/dev/null || :; wait "$upgrade_pid" 2>/dev/null || :; fi
   docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
-  if [[ -d "$root/native-guest" && "$root/native-guest" == /tmp/rpt-signed.*/native-guest ]]; then
-    sudo rm -rf -- "$root/native-guest"
+  if [[ -d "$root" && ! -L "$root" && "$root" == /tmp/rpt-signed.* ]]; then
+    sudo rm -rf -- "$root/native-guest" "$root/native-journal"
   fi
   rm -rf "$root"
 }
