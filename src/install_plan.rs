@@ -199,16 +199,20 @@ fn satisfies(version_string: &str, required: &Requirement) -> Result<bool> {
 /// A conservative, single-name provider list. Debian versioned virtual
 /// Provides require an exact "=", not a range. Never use a provider's *own*
 /// version as proof of a versioned virtual capability.
-fn provides(summary: &PackageSummary) -> Result<Vec<Requirement>> {
-    if summary.provides.trim().is_empty() { return Ok(Vec::new()); }
-    summary.provides.split(',').map(|part| {
-        if part.contains('|') { bail!("unsupported alternatives in Provides for {}", summary.name); }
+fn provides_fields(owner: &str, raw: &str) -> Result<Vec<Requirement>> {
+    if raw.trim().is_empty() { return Ok(Vec::new()); }
+    raw.split(',').map(|part| {
+        if part.contains('|') { bail!("unsupported alternatives in Provides for {owner}"); }
         let cap = parse_atom(part)?;
         if cap.constraint.as_ref().is_some_and(|(op, _)| op != "=") {
-            bail!("unsupported version relation in Provides for {}", summary.name);
+            bail!("unsupported version relation in Provides for {owner}");
         }
         Ok(cap)
     }).collect()
+}
+
+fn provides(summary: &PackageSummary) -> Result<Vec<Requirement>> {
+    provides_fields(&summary.name, &summary.provides)
 }
 
 fn capability_satisfies(cap: &Requirement, required: &Requirement) -> Result<bool> {
@@ -447,6 +451,10 @@ struct Solver<'a> {
     /// constraints even before the solver reaches a later root. A dependency
     /// alternative must not defeat a root the user explicitly requested.
     requested_roots: BTreeSet<PackageKey>,
+    /// Proof that an installed binary satisfied a virtual Depends. Revalidate
+    /// against the FINAL staged package set so later upgrades cannot silently
+    /// remove its Provides capability.
+    installed_provider_proofs: Vec<(PackageKey, Requirement)>,
 }
 
 impl Solver<'_> {
@@ -478,6 +486,70 @@ impl Solver<'_> {
             found = Some((key, version));
         }
         Ok(found)
+    }
+
+    /// Use only the dpkg-installed *native or all* binary's own Provides
+    /// metadata. A repository's newer candidate is not evidence of what the
+    /// installed version provides. However, if this transaction upgrades the
+    /// provider, the new candidate must still advertise the capability.
+    fn effective_installed_provides(&self, key: &PackageKey) -> Result<Vec<Requirement>> {
+        let relation = self.installed_relations.get(key)
+            .context("installed provider missing dpkg relationship metadata")?;
+        let installed_version = self.installed.get(key)
+            .context("installed provider missing installed version")?;
+        if relation.version != *installed_version {
+            bail!("installed virtual provider has inconsistent dpkg metadata");
+        }
+        let staged = self.plan.iter().any(|step|
+            step.package == key.name && step.architecture == key.architecture);
+        let pending_root_upgrade = self.requested_roots.contains(key)
+            && self.catalog.get(key).is_some_and(|candidate|
+                candidate.version != *installed_version);
+        if staged || pending_root_upgrade {
+            let candidate = self.catalog.get(key)
+                .context("staged virtual provider missing verified candidate metadata")?;
+            provides(candidate)
+        } else {
+            provides_fields(&key.name, &relation.provides)
+        }
+    }
+
+    fn installed_virtual_provider(&self, required: &Requirement) -> Result<Option<PackageKey>> {
+        // Installed :any/foreign virtual substitution remains unsupported.
+        if required.any_arch || required.requested_arch.is_some() {
+            return Ok(None);
+        }
+        for key in self.installed.keys() {
+            if key.architecture != self.architecture && key.architecture != "all" {
+                continue;
+            }
+            if !self.installed_relations.contains_key(key) {
+                continue; // Only in-process synthetic solver fixtures omit status metadata.
+            }
+            for cap in self.effective_installed_provides(key)? {
+                if capability_satisfies(&cap, required)? {
+                    return Ok(Some(key.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn verify_installed_provider_proofs(&self) -> Result<()> {
+        for (key, required) in &self.installed_provider_proofs {
+            let mut matched = false;
+            for capability in self.effective_installed_provides(key)? {
+                if capability_satisfies(&capability, required)? {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                bail!("installed virtual provider {}:{} no longer satisfies {} after planned changes",
+                    key.name, key.architecture, required.name);
+            }
+        }
+        Ok(())
     }
 
     fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
@@ -575,6 +647,12 @@ impl Solver<'_> {
                     return self.resolve_groups(groups, index + 1);
                 }
             }
+            if let Some(provider) = self.installed_virtual_provider(alternative)? {
+                // Proof follows the branch state; later explicit upgrades
+                // cannot silently invalidate the installed capability.
+                self.installed_provider_proofs.push((provider, alternative.clone()));
+                return self.resolve_groups(groups, index + 1);
+            }
         }
 
         // Preserve dependency expression order, not BTreeSet lexical order.
@@ -613,6 +691,7 @@ impl Solver<'_> {
                 self.visiting = branch.visiting;
                 self.done = branch.done;
                 self.plan = branch.plan;
+                self.installed_provider_proofs = branch.installed_provider_proofs;
                 return Ok(());
             }
         }
@@ -828,6 +907,7 @@ impl Solver<'_> {
                         self.visiting = trial.visiting;
                         self.done = trial.done;
                         self.plan = trial.plan;
+                        self.installed_provider_proofs = trial.installed_provider_proofs;
                     }
                 }
             }
@@ -1224,6 +1304,7 @@ fn solve_catalog_many_options(
         architecture: architecture.to_owned(),
         branch_budget: Rc::new(Cell::new(4096)), include_recommends,
         requested_roots: BTreeSet::new(),
+        installed_provider_proofs: Vec::new(),
     };
     for package in packages {
         if let Some(key) = solver.key_for(package)? {
@@ -1233,6 +1314,9 @@ fn solve_catalog_many_options(
     for package in packages {
         solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
     }
+    // Dependencies satisfied by installed virtual providers must still hold
+    // after ALL explicitly requested root upgrades and dependency changes.
+    solver.verify_installed_provider_proofs()?;
     // Validate the entire staged set before exposing a read-only plan.
     // This does not authorize foreign-architecture package installation.
     validate_multiarch_plan(catalog, &solver.plan)?;
@@ -1525,6 +1609,7 @@ mod tests {
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
             requested_roots: BTreeSet::new(),
+            installed_provider_proofs: Vec::new(),
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -2189,6 +2274,86 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["good", "helper", "app"]);
     }
     #[test]
+    fn installed_native_virtual_provider_satisfies_without_new_download() {
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+        ]));
+        // This provider is installed but has NO repository candidate, so its
+        // actual dpkg Provides must suffice to avoid selecting any new binary.
+        let key = PackageKey { name: "local-provider".into(), architecture: "all".into() };
+        let installed = BTreeMap::from([(key.clone(), "9".into())]);
+        let relations = BTreeMap::from([(key, InstalledRelations {
+            version: "9".into(), provides: "virtual-api (= 2)".into(),
+            ..Default::default()
+        })]);
+        let plan = solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["app"]);
+    }
+
+    #[test]
+    fn installed_virtual_provider_checks_provided_version_not_binary_version() {
+        let mut available = item("new-provider", "1", "");
+        available.provides = "virtual-api (= 3)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+            ("new-provider".into(), available),
+        ]));
+        let key = PackageKey { name: "local-provider".into(), architecture: "all".into() };
+        let installed = BTreeMap::from([(key.clone(), "999".into())]);
+        let relations = BTreeMap::from([(key, InstalledRelations {
+            version: "999".into(), provides: "virtual-api (= 1)".into(),
+            ..Default::default()
+        })]);
+        let plan = solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["new-provider", "app"]);
+    }
+
+    #[test]
+    fn foreign_installed_virtual_provider_cannot_satisfy_native_dependency() {
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api")),
+        ]));
+        let key = PackageKey { name: "foreign-provider".into(), architecture: "i386".into() };
+        let installed = BTreeMap::from([(key.clone(), "1".into())]);
+        let relations = BTreeMap::from([(key, InstalledRelations {
+            version: "1".into(), provides: "virtual-api".into(),
+            ..Default::default()
+        })]);
+        assert!(solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into()], 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn later_root_upgrade_cannot_silently_remove_installed_virtual_capability() {
+        let mut upgraded = item("provider", "2", "");
+        upgraded.provides = String::new(); // New candidate drops the capability.
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+            ("provider".into(), upgraded.clone()),
+        ]));
+        let key = PackageKey { name: "provider".into(), architecture: "amd64".into() };
+        let installed = BTreeMap::from([(key.clone(), "1".into())]);
+        let relations = BTreeMap::from([(key.clone(), InstalledRelations {
+            version: "1".into(), provides: "virtual-api (= 2)".into(),
+            ..Default::default()
+        })]);
+        assert!(solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into(), "provider".into()], 20, "amd64").is_err());
+        // Retaining the virtual API in the chosen upgrade is allowed.
+        upgraded.provides = "virtual-api (= 3)".into();
+        let mut retained = catalog;
+        retained.insert(key, upgraded);
+        let plan = solve_catalog_many(&retained, &installed, &relations,
+            &["app".into(), "provider".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["app", "provider"]);
+    }
+
+    #[test]
     fn single_virtual_provider_with_explicit_version() {
         let mut provider = item("provider", "9.0", "");
         provider.provides = "virtual-api (= 2.1)".into();
@@ -2285,6 +2450,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
             requested_roots: BTreeSet::new(),
+            installed_provider_proofs: Vec::new(),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }

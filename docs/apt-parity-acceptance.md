@@ -287,6 +287,36 @@ globally nested alternative decisions, removal/replacement, foreign
 co-installation, installed virtual providers and full APT heuristics still
 need further validation. No production dpkg execution is authorized.
 
+## Installed virtual Provides in native-architecture dependency plans
+
+The read-only solver now checks the **actual installed dpkg status**
+`Provides` declarations before downloading another provider for a
+native or `Architecture: all` virtual dependency. Both unversioned
+capabilities and `Provides: virtual-api (= 2)` can satisfy a matching
+`Depends: virtual-api (>= 2)`; the provider's own package version is
+not substituted for the provided virtual version. An installed provider
+can satisfy the dependency even if it has no candidate in the signed
+repository, because no new binary is required.
+
+The solver keeps a proof of each installed virtual match and verifies it
+again against the *final planned* binary versions. If that provider is
+upgraded during the joint transaction or is an explicitly requested
+upgrade root, the verified target `Provides` declaration must still
+satisfy the dependency. It never treats a foreign installed provider
+as native, or implicitly applies `:any`/foreign architecture
+substitution. Unsupported or ambiguous provider selection remains
+fail-closed; no package removals or host mutations are authorized.
+
+A signed APT/RPT differential fixture simulates an installed provider
+that is intentionally absent from the repository and compares exact
+selected package/version sets with `apt-get -s`. A versioned dependency
+exceeding the provided capability must be rejected by both. Unit tests
+cover mismatched versions, foreign package identities, and a later
+requested upgrade dropping its original virtual capability.
+
+This is **partial Gate D parity** only, not full virtual-provider
+ranking, alternatives, Multi-Arch, or live APT replacement.
+
 ## Resolver and policy regression milestone
 
 The isolated `apt-cache policy` fixture exercises priority 999/1000/1001

@@ -415,6 +415,19 @@ root argument orders; the policy candidate is verified before planning.
 This is a scoped resolver improvement, **not** full multi-root search, host
 package execution or complete APT compatibility.
 
+### Already-installed virtual providers (read-only)
+
+RPT's native-only dependency resolver can recognize an installed binary's
+actual dpkg `Provides` metadata as satisfying a virtual `Depends`, including
+versioned capabilities. It will not schedule a replacement provider when
+the installed one already satisfies the dependency. The final transaction
+plan rechecks these proofs against any planned provider upgrade. Foreign
+providers and unsupported qualifiers remain fail-closed, and the signed
+APT/RPT differential fixture now covers this scenario.
+
+This improves policy planning only. It does not enable full APT virtual
+provider ranking or production dpkg execution.
+
 ### Native disposable-rootfs install/upgrade (development only)
 
 The `native-rootfs-prepare-transaction` and
