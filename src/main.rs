@@ -72,6 +72,9 @@ enum Command {
         /// Disable interactive index progress (also disabled automatically when redirected).
         #[arg(long)]
         no_progress: bool,
+        /// Opt-in acquisition of signed foreign Packages indexes; read-only.
+        #[arg(long = "additional-architecture")]
+        additional_architectures: Vec<String>,
         /// Supported apt-style option: Acquire::Retries=N. Others fail closed.
         #[arg(short = 'o', long = "option")]
         option: Vec<String>,
@@ -664,7 +667,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context("scanning APT package indexes").context(ErrorCategory::System)?;
             for version in versions { println!("{version}"); }
         }
-        Command::Update { driver, root, output, workers, quiet, no_progress, option } => {
+        Command::Update { driver, root, output, workers, quiet, no_progress, additional_architectures, option } => {
             let mut retries = 2usize;
             for setting in option {
                 let (name, value) = setting.split_once('=')
@@ -682,7 +685,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 progress: !no_progress && quiet == 0, log_format: format,
             };
             let kind = resolve_driver(&driver)?;
-            drivers::driver(kind).update_indexes(&root, &output, settings).await?;
+            if additional_architectures.is_empty() {
+                drivers::driver(kind).update_indexes(&root, &output, settings).await?;
+            } else {
+                if kind != drivers::DriverKind::Deb {
+                    anyhow::bail!("additional architecture metadata requires the Debian driver");
+                }
+                rpt::update::update_with_architectures(
+                    &root, &output, settings, &additional_architectures,
+                ).await?;
+            }
         }
         Command::CacheVersions { driver, cache, package, architecture } => {
             let kind = resolve_driver(&driver)?;
