@@ -2417,10 +2417,11 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             (PackageKey {name: "native-bottom".into(), architecture: "amd64".into()}, bottom),
             (PackageKey {name: "native-helper".into(), architecture: "i386".into()}, deceptive_foreign),
         ]);
-        let empty = BTreeMap::new();
+        let empty = BTreeMap::<cache_query::InstalledKey, InstalledRelations>::new();
+        let empty_binary = BTreeMap::<PackageKey, String>::new();
         let run = |entries: &BTreeMap<PackageKey, PackageSummary>,
                    statuses: &BTreeMap<cache_query::InstalledKey, InstalledRelations>| {
-            solve_catalog_foreign(entries, &empty, &empty, "cross-app:i386",
+            solve_catalog_foreign(entries, &empty_binary, &BTreeMap::new(), "cross-app:i386",
                 20, ("i386", "amd64"), statuses)
         };
         let plan = run(&catalog, &empty).unwrap();
