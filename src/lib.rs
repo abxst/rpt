@@ -20,6 +20,7 @@ pub mod artifact_store;
 pub mod sandbox_execution;
 pub mod sandbox_session;
 pub mod native_rootfs;
+pub mod native_full_upgrade;
 pub mod native_snapshot;
 pub mod package_index;
 pub mod index_catalog;
