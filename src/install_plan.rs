@@ -2274,6 +2274,86 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["good", "helper", "app"]);
     }
     #[test]
+    fn installed_native_virtual_provider_satisfies_without_new_download() {
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+        ]));
+        // This provider is installed but has NO repository candidate, so its
+        // actual dpkg Provides must suffice to avoid selecting any new binary.
+        let key = PackageKey { name: "local-provider".into(), architecture: "all".into() };
+        let installed = BTreeMap::from([(key.clone(), "9".into())]);
+        let relations = BTreeMap::from([(key, InstalledRelations {
+            version: "9".into(), provides: "virtual-api (= 2)".into(),
+            ..Default::default()
+        })]);
+        let plan = solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["app"]);
+    }
+
+    #[test]
+    fn installed_virtual_provider_checks_provided_version_not_binary_version() {
+        let mut available = item("new-provider", "1", "");
+        available.provides = "virtual-api (= 3)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+            ("new-provider".into(), available),
+        ]));
+        let key = PackageKey { name: "local-provider".into(), architecture: "all".into() };
+        let installed = BTreeMap::from([(key.clone(), "999".into())]);
+        let relations = BTreeMap::from([(key, InstalledRelations {
+            version: "999".into(), provides: "virtual-api (= 1)".into(),
+            ..Default::default()
+        })]);
+        let plan = solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["new-provider", "app"]);
+    }
+
+    #[test]
+    fn foreign_installed_virtual_provider_cannot_satisfy_native_dependency() {
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api")),
+        ]));
+        let key = PackageKey { name: "foreign-provider".into(), architecture: "i386".into() };
+        let installed = BTreeMap::from([(key.clone(), "1".into())]);
+        let relations = BTreeMap::from([(key, InstalledRelations {
+            version: "1".into(), provides: "virtual-api".into(),
+            ..Default::default()
+        })]);
+        assert!(solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into()], 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn later_root_upgrade_cannot_silently_remove_installed_virtual_capability() {
+        let mut upgraded = item("provider", "2", "");
+        upgraded.provides = String::new(); // New candidate drops the capability.
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-api (>= 2)")),
+            ("provider".into(), upgraded.clone()),
+        ]));
+        let key = PackageKey { name: "provider".into(), architecture: "amd64".into() };
+        let installed = BTreeMap::from([(key.clone(), "1".into())]);
+        let relations = BTreeMap::from([(key.clone(), InstalledRelations {
+            version: "1".into(), provides: "virtual-api (= 2)".into(),
+            ..Default::default()
+        })]);
+        assert!(solve_catalog_many(&catalog, &installed, &relations,
+            &["app".into(), "provider".into()], 20, "amd64").is_err());
+        // Retaining the virtual API in the chosen upgrade is allowed.
+        upgraded.provides = "virtual-api (= 3)".into();
+        let mut retained = catalog;
+        retained.insert(key, upgraded);
+        let plan = solve_catalog_many(&retained, &installed, &relations,
+            &["app".into(), "provider".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["app", "provider"]);
+    }
+
+    #[test]
     fn single_virtual_provider_with_explicit_version() {
         let mut provider = item("provider", "9.0", "");
         provider.provides = "virtual-api (= 2.1)".into();
