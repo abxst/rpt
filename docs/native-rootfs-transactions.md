@@ -1,18 +1,18 @@
 # Native disposable-rootfs install/upgrade (no Docker at execution)
 
 RPT can now prepare and execute a signed, exact-version install/upgrade plan
-against a **separate Linux root filesystem**, using real \`dpkg --root\`.
+against a **separate Linux root filesystem**, using real `dpkg --root`.
 This is a functional bridge from Docker-only sandbox sessions to native
 rootfs execution, not authorization to mutate the running host.
 
 ## Preconditions
 
-- Linux amd64/arm64 environment with \`dpkg\`, \`dpkg-deb\`, \`dpkg-query\`,
-  \`gpgv\`, root privileges for apply, and a complete disposable
+- Linux amd64/arm64 environment with `dpkg`, `dpkg-deb`, `dpkg-query`,
+  `gpgv`, root privileges for apply, and a complete disposable
   Debian/Ubuntu filesystem.
 - Rootfs is a **directory under /tmp or /var/tmp**, not /, not a symlink,
   and contains no mounts or bind mounts.
-- It contains \`/usr/bin/dpkg\`, \`/bin/sh\`, \`/var/lib/dpkg/status\`.
+- It contains `/usr/bin/dpkg`, `/bin/sh`, `/var/lib/dpkg/status`.
 - The test operator explicitly creates this exact marker **inside the guest
   filesystem** after verifying its location:
 
@@ -40,10 +40,24 @@ rootfs, e.g. exported from an official image.
       --cache ./rpt-lists --apt-root ./apt-config \
       --journal-dir ./rpt-native-journal
 
+The same **disposable rootfs** also supports removal after a separate
+dependency safety check (never a direct arbitrary dpkg invocation):
+
+    sudo rpt native-rootfs-remove-planned \
+      --rootfs /tmp/my-guest --architecture amd64 --id remove-001 \
+      --journal-dir ./rpt-native-journal demo-package
+
+For conffile cleanup, add `--purge`. For automatic orphans already marked
+in the **guest** `/var/lib/apt/extended_states`:
+
+    sudo rpt native-rootfs-autoremove-planned \
+      --rootfs /tmp/my-guest --architecture amd64 --id auto-001 \
+      --journal-dir ./rpt-native-journal
+
 The first command derives a verified candidate closure from the guest's dpkg
 status. The apply command rechecks the exact rootfs identity, dpkg status
 SHA256, policy, GPG/Release/index provenance, and SHA256/size of each
-archive, stages copies, then runs real dpkg with explicit \`--root\`. Postflight
+archive, stages copies, then runs real dpkg with explicit `--root`. Postflight
 requires all exact installed versions and a clean dpkg audit.
 
 A journaled and supervised command handles SIGINT/SIGTERM/timeouts, including
@@ -55,8 +69,10 @@ Do not rerun blindly; retain the rootfs and journal for manual inspection.
 - No Docker process is needed to *apply* the plan. The acceptance test
   exports official images to construct its test rootfs, but **RPT native
   execution does not call Docker**.
-- Native **install and explicit upgrade** only. Remove, purge, auto/manual,
-  autoremove, and full-upgrade are not yet implemented in this backend.
+- Native **install, explicit upgrade, planned remove, purge and autoremove**.
+  Auto/manual marking, full-upgrade and a native host executor remain unsupported.
+  Removal uses the conservative guest dpkg dependency planner; autoremove
+  additionally binds guest APT extended states and rejects changed marks.
 - Explicitly **refuses the live root /** and arbitrary host paths.
   This is not a flag away from host mutation.
 - Not an unprivileged sandbox: chroot does not confine privileged scripts.
