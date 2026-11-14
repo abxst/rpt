@@ -2,7 +2,7 @@
 
 **Priority: behavioral APT replacement first; Rust-specific performance features second.**
 
-RPT is currently experimental: it can execute dpkg only inside a disposable or persistent isolated Docker sandbox; host package execution is disabled. The existence of a command or a green build does **not** mean compatibility.
+RPT is currently experimental: it can execute dpkg inside isolated Docker sandboxes, and now inside a separately prepared **disposable native rootfs** with explicit test-only marking. **Live host package execution is disabled.** The existence of a command or a green build does **not** mean compatibility.
 
 ## Release policy
 
@@ -35,6 +35,26 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 4. Run RPT on the same fixture, normalize display-only differences, compare selected versions, install/remove set, dependency order, prompts, exit statuses, disk/network writes and resulting dpkg status.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
+
+## Native off-host rootfs execution milestone (test-only)
+
+RPT now offers `native-rootfs-prepare-transaction` and
+`native-rootfs-apply-transaction`. Unlike the independent semantics oracle,
+these commands invoke **RPT's own policy-bound signed package executor** using
+real `dpkg --root`, against a separate disposable Linux filesystem. The executor
+does not call Docker; the signed CI fixture may use Docker export to obtain a
+complete test filesystem, then uses RPT/dpkg for all mutations.
+
+The executor requires an explicit rootfs marker, a directory beneath
+`/tmp` or `/var/tmp`, no mounts or bind mounts, and explicitly refuses
+`/`. It rechecks the GPG-provenance-backed manifest, candidate policy,
+dpkg status digest, archive bytes, embedded Debian control identity,
+and exact installed versions before recording success. It is journaled and
+process supervised, but **does not provide live host execution, secure isolation
+of privileged maintainer scripts, automatic rootfs rollback, live-host transactions,
+or complete APT parity**. Failures leave the disposable rootfs for inspection.
+
+See [native rootfs transactions](native-rootfs-transactions.md).
 
 ## Native dpkg rootfs behavior oracle on disposable CI VMs
 

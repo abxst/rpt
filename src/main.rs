@@ -444,6 +444,56 @@ enum Command {
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Prepare authenticated install/upgrade for a marked, disposable native rootfs (no Docker).
+    NativeRootfsPrepareTransaction {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = false)] include_recommends: bool,
+        #[arg(long)] output: PathBuf,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Apply signed install/upgrade to a marked disposable native rootfs, NEVER live /.
+    NativeRootfsApplyTransaction {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long)] transaction: PathBuf,
+        #[arg(long, default_value = "./rpt-artifacts")] artifacts: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
+    /// Execute conservative planned remove/purge on a disposable native rootfs only.
+    NativeRootfsRemovePlanned {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(long, default_value_t = false)] purge: bool,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Mark auto/manual using APT inside a marked disposable native rootfs.
+    NativeRootfsMark {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(value_parser = ["auto", "manual"])] mode: String,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Execute verified orphan cleanup from guest dpkg and APT marks, not host.
+    NativeRootfsAutoremovePlanned {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
     /// Apply a previously bound, authenticated install/upgrade only inside Docker.
     SandboxSessionApplyTransaction {
         #[arg(long)] session: String,
@@ -948,6 +998,53 @@ async fn execute(cli: Cli) -> Result<()> {
             tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
                 .context("writing status-bound sandbox transaction intent")?;
             println!("Bound sandbox transaction: {count} authenticated artifacts; no dpkg changes");
+        }
+        Command::NativeRootfsPrepareTransaction {
+            rootfs, cache, apt_root, architecture, max_packages, include_recommends, output, packages,
+        } => {
+            let intent = rpt::native_rootfs::prepare(
+                &rootfs, &cache, &apt_root, &architecture, max_packages,
+                &packages, include_recommends,
+            ).context(ErrorCategory::System)?;
+            let count = intent.manifest.packages.len();
+            tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
+                .context("writing native rootfs signed transaction intent")?;
+            println!("Native disposable-rootfs transaction planned: {count} authenticated archives; no dpkg changes");
+        }
+        Command::NativeRootfsApplyTransaction {
+            rootfs, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds,
+        } => {
+            rpt::native_rootfs::apply(rpt::native_rootfs::Apply {
+                rootfs: &rootfs, id: &id, transaction: &transaction,
+                artifacts: &artifacts, cache: &cache, apt_root: &apt_root,
+                journal: &journal_dir, timeout_seconds,
+            }).await.context(ErrorCategory::System)?;
+            println!("Native disposable-rootfs install/upgrade verified and applied. Live host dpkg untouched.");
+        }
+        Command::NativeRootfsRemovePlanned {
+            rootfs, id, journal_dir, architecture, cascade, purge, timeout_seconds, packages,
+        } => {
+            let result = rpt::native_rootfs::remove_planned(rpt::native_rootfs::Remove {
+                rootfs: &rootfs, journal: &journal_dir, id: &id,
+                architecture: &architecture, packages: &packages,
+                cascade, purge, timeout_seconds,
+            }).await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("Native disposable-rootfs removal complete; live host dpkg untouched.");
+        }
+        Command::NativeRootfsMark { rootfs, id, journal_dir, timeout_seconds, mode, packages } => {
+            rpt::native_rootfs::mark(&rootfs, &journal_dir, &id, &mode,
+                &packages, timeout_seconds).await.context(ErrorCategory::System)?;
+            println!("Native rootfs APT {mode} marks applied and verified; live host unchanged.");
+        }
+        Command::NativeRootfsAutoremovePlanned {
+            rootfs, id, journal_dir, architecture, timeout_seconds,
+        } => {
+            let result = rpt::native_rootfs::autoremove_planned(
+                &rootfs, &journal_dir, &id, &architecture, timeout_seconds,
+            ).await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("Native disposable-rootfs autoremove complete; live host dpkg untouched.");
         }
         Command::SandboxSessionApplyTransaction { session, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds } => {
             rpt::sandbox_session::apply_bound(rpt::sandbox_session::BoundApply {
