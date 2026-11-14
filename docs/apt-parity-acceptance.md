@@ -128,6 +128,38 @@ APT preference rules. Explicit cross-architecture qualifiers, `:any`,
 virtual providers and mixed native/foreign transaction execution remain
 outside the supported subset. No foreign dpkg execution is enabled.
 
+## Native installed Multi-Arch satisfiers for foreign read-only plans
+
+The `plan-install-foreign-policy` and exploratory foreign preview now
+consider a **previously installed and configured native binary** when a
+foreign package declares a mandatory dependency and no native package needs
+to be staged:
+
+- For an unqualified `Depends: helper (>= 2)`, the installed
+  `helper:amd64` must declare `Multi-Arch: foreign`.
+- For `Depends: interpreter:any (>= 2)`, the installed
+  `interpreter:amd64` must declare `Multi-Arch: allowed`.
+- The exact installed version is checked using dpkg status, not any newer
+  package in signed repository metadata. A native installed satisfier
+  needs no download, is not added to the transaction, and does not need
+  to be present in the repository.
+- The policy closure skips acquiring a repository candidate for these
+  already satisfied dependencies. Both directions of cross-architecture
+  Conflicts/Breaks/Replaces remain guarded against installed state.
+
+An explicit `:i386` or `:native` dependency is **not** silently
+satisfied through this shortcut. Virtual `Provides`, automatic native
+installation, additional architecture ranking, missing/wrong Multi-Arch
+declarations, and cross-architecture upgrades remain unsupported and
+fail closed. A native satisfied dependency is accepted only in the
+read-only **explicit foreign** planner; native-only planning remains
+unchanged. This is not production transaction authorization.
+
+The authenticated APT/RPT differential fixture adds two foreign i386 apps
+whose dependencies are fulfilled solely by installed native amd64 binaries
+(`foreign` and `allowed`, respectively), then rejects wrong installed
+declarations. No host dpkg state is modified.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
