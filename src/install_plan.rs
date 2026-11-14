@@ -1036,41 +1036,50 @@ pub fn preview_explicit_architecture_with_policy(
         // can make an otherwise valid plan fail prematurely.
         let mut discovered = false;
         let mut mandatory = BTreeSet::new();
-        for name in &roots {
-            if !validated.contains(name) { continue; }
-            let key = PackageKey {
-                name: name.clone(), architecture: foreign_architecture.to_owned(),
-            };
-            let item = catalog.get(&key).context("validated foreign dependency missing catalog entry")?;
+        for key in &roots {
+            if !validated.contains(key) { continue; }
+            let item = catalog.get(key)
+                .context("validated foreign dependency missing catalog entry")?;
             for group in parse_groups_for_arch(&item.pre_depends, foreign_architecture)?.into_iter()
                 .chain(parse_groups_for_arch(&item.depends, foreign_architecture)?) {
                 if group.len() == 1 {
                     let dep = &group[0];
-                    let dep_key = PackageKey {
-                        name: dep.name.clone(), architecture: foreign_architecture.to_owned(),
-                    };
-                    if catalog.contains_key(&dep_key) { mandatory.insert(dep.name.clone()); }
+                    if let Some(requested_arch) = &dep.requested_arch {
+                        if requested_arch != foreign_architecture {
+                            bail!("explicit cross-architecture dependency needs full Multi-Arch resolver");
+                        }
+                    }
+                    if let Some(identity) = foreign_dependency_identity(
+                        &catalog, &dep.name, foreign_architecture,
+                    )? {
+                        mandatory.insert(identity);
+                    }
                 }
             }
         }
-        for name in mandatory {
-            if roots.insert(name) { discovered = true; }
+        for identity in mandatory {
+            if roots.insert(identity) { discovered = true; }
         }
         if discovered { continue; }
         let plan = solve_catalog(
             &catalog, &installed, &scoped, requested, max_packages, foreign_architecture,
         )?;
         for step in &plan {
-            if roots.insert(step.package.clone()) { discovered = true; }
+            if roots.insert(PackageKey {
+                name: step.package.clone(), architecture: step.architecture.clone(),
+            }) { discovered = true; }
         }
         if changed || discovered { continue; }
         reject_foreign_negative_relations(&catalog, &relations, &plan, foreign_architecture)?;
-        // Exact-architecture candidate validation is mandatory for every step.
+        // A package recorded as Architecture: all must be verified from
+        // signed metadata as all, not relabeled as an i386 package.
         for step in &plan {
-            if step.architecture != foreign_architecture {
-                bail!("foreign policy preview cannot stage another architecture");
+            if step.architecture != foreign_architecture && step.architecture != "all" {
+                bail!("foreign policy preview cannot stage a native binary");
             }
-            if !validated.contains(&step.package) {
+            if !validated.contains(&PackageKey {
+                name: step.package.clone(), architecture: step.architecture.clone(),
+            }) {
                 bail!("foreign dependency was not policy-validated");
             }
         }
