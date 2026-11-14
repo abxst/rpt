@@ -91,7 +91,7 @@ fn scenario(opts: &Prepare<'_>, status: &Path) -> Result<JointUpgradeScenario> {
 /// bind it to a globally checked, original-status full-upgrade scenario.
 pub fn prepare(opts: Prepare<'_>) -> Result<NativeCombinedIntent> {
     let Prepare {
-        root: requested_root, cache, apt_root, architecture, mode, requested,
+        root: requested_root, cache, apt_root: _, architecture, mode, requested,
         max_roots, max_packages, max_removals,
     } = &opts;
     let root = native_rootfs::rootfs(requested_root)?;
