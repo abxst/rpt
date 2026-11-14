@@ -389,8 +389,11 @@ This extends the previous direct-root lookahead: for example,
 `preferred Conflicts: blocker` is now solvable by choosing `fallback`
 even when `first` was processed first. Unit tests cover this and nested
 dependencies, reverse versioned Breaks and impossibility with
-`Replaces`. A signed `apt-get -s` fixture compares the exact
-package/version set for both root orders.
+`Replaces`. A signed `apt-get -s` fixture checks both root orders:
+when APT successfully resolves the same graph, binary/version sets must
+match exactly. Some APT resolver versions reject this graph despite
+there being a conflict-free alternative; that difference is explicitly
+reported as a **known compatibility gap**, never counted as parity.
 
 Global replay currently applies to mandatory textual choices with
 individual concrete candidate identities. It **does not** relax
