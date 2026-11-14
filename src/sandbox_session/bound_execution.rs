@@ -40,7 +40,7 @@ pub async fn apply_bound(opts: BoundApply<'_>) -> Result<()> {
     // Detect changes in signed repository policy or hand-edited plan fields.
     let recomputed = plan_install_snapshot(
         &status, cache, apt_root, &bound.architecture,
-        bound.max_packages, &bound.requested,
+        bound.max_packages, &bound.requested, bound.include_recommends,
     )?;
     if recomputed != bound.steps {
         bail!("bound package plan differs from current APT candidate policy");
@@ -95,7 +95,7 @@ mod tests {
         let bound = BoundTransaction {
             schema_version: 1, session: "dev01".into(), architecture: "amd64".into(),
             status_sha256: "a".repeat(64), requested: vec!["demopkg".into()],
-            max_packages: 20, steps: vec![],
+            max_packages: 20, include_recommends: false, steps: vec![],
             manifest: ExactManifest {
                 packages: vec![], executable: false, warning: "test".into(),
             },
