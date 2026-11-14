@@ -20,7 +20,8 @@ cleanup() {
   docker rm -f "rpt-session-$session" >/dev/null 2>&1 || :
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
   if [[ -d "$root" && ! -L "$root" && "$root" == /tmp/rpt-signed.* ]]; then
-    sudo rm -rf -- "$root/native-guest" "$root/native-journal"
+    sudo rm -rf -- "$root/native-guest" "$root/native-journal" \
+      "$root/native-mark-guest" "$root/native-mark-journal"
   fi
   rm -rf "$root"
 }
@@ -249,6 +250,42 @@ Size: $demo_size
 Description: intentionally inconsistent archive control fixture
 
 EOF
+# Signed install graph for native APT mark parity:
+# root -> new dependency + pre-existing explicitly manual dependency.
+# These real packages have no maintainer scripts and are never installed
+# onto the VM host.
+for pkg in rpt-mark-auto rpt-mark-preserved rpt-mark-root; do
+  mkdir -p "$root/$pkg/DEBIAN" "$root/$pkg/usr/share/rpt-mark-test"
+  printf '%s\n' "$pkg" > "$root/$pkg/usr/share/rpt-mark-test/$pkg.txt"
+  depends=""
+  if [[ "$pkg" == rpt-mark-root ]]; then
+    depends=$'\nDepends: rpt-mark-auto (= 1.0), rpt-mark-preserved (= 1.0)'
+  fi
+  cat > "$root/$pkg/DEBIAN/control" <<CONTROL
+Package: $pkg
+Version: 1.0
+Architecture: all
+Maintainer: RPT CI <rpt-test@example.invalid>
+Description: native automatic versus manual dependency mark fixture$depends
+CONTROL
+  deb="pool/$pkg"_1.0_all.deb
+  dpkg-deb --build --root-owner-group "$root/$pkg" "$root/www/$deb" >/dev/null
+  sha="$(sha256sum "$root/www/$deb" | cut -d' ' -f1)"
+  length="$(wc -c < "$root/www/$deb" | tr -d ' ')"
+  cat >> "$index" <<EOF
+Package: $pkg
+Version: 1.0
+Architecture: all
+Filename: $deb
+SHA256: $sha
+Size: $length
+EOF
+  if [[ "$pkg" == rpt-mark-root ]]; then
+    printf 'Depends: rpt-mark-auto (= 1.0), rpt-mark-preserved (= 1.0)\n' >> "$index"
+  fi
+  printf 'Description: signed native APT mark graph fixture\n\n' >> "$index"
+done
+
 gpg --homedir "$root/gnupg" --batch --pinentry-mode loopback --passphrase '' \
   --quick-generate-key 'RPT differential <rpt-diff@example.invalid>' ed25519 sign 0 >/dev/null 2>&1
 gpg --homedir "$root/gnupg" --batch --export 'RPT differential <rpt-diff@example.invalid>' > "$root/keyring.gpg"
@@ -463,10 +500,15 @@ sudo ./target/debug/rpt native-rootfs-mark \
   --journal-dir "$root/native-journal" auto rpt-sandbox-demo
 sudo chroot "$native_guest" /usr/bin/apt-mark showauto rpt-sandbox-demo \
   | grep -Fxq rpt-sandbox-demo
+# Debian slim exports may mark apt itself automatic. This acceptance fixture
+# reuses the guest for later signed installs, so retain the package manager
+# instead of letting its unrelated preexisting auto mark remove apt-mark.
+sudo chroot "$native_guest" /usr/bin/apt-mark manual apt
 sudo ./target/debug/rpt native-rootfs-autoremove-planned \
   --rootfs "$native_guest" --id native-autoremove \
   --journal-dir "$root/native-journal" --architecture "$arch" --timeout-seconds 180
 grep -Fq '"phase": "succeeded"' "$root/native-journal/native-autoremove.json"
+sudo test -x "$native_guest/usr/bin/apt-mark"
 ./target/debug/rpt native-rootfs-prepare-transaction \
   --rootfs "$native_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
   --architecture "$arch" --output "$root/native-purge-install.json" rpt-sandbox-demo
@@ -487,6 +529,49 @@ test -z "$purged_state" || test "$purged_state" = 'unknown ok not-installed'
 test -z "$(sudo dpkg --root="$native_guest" --audit)"
 test ! -e /var/lib/dpkg/info/rpt-sandbox-demo.list
 echo "PASS native rootfs install, remove, reinstall, autoremove, purge and no host changes"
+# Fresh signed dependency install has two different mark outcomes. The
+# already installed manual dependency must not be silently demoted to auto.
+mark_guest="$root/native-mark-guest"
+sudo mkdir -p "$mark_guest"
+mark_container="rpt-mark-export-$(basename "$root")"
+docker create --name "$mark_container" --network=none \
+  --entrypoint /bin/sh "$sandbox_image" -c true >/dev/null
+docker export "$mark_container" | sudo tar -xpf - -C "$mark_guest"
+docker rm "$mark_container" >/dev/null
+printf 'rpt-disposable-rootfs-v1\n' \
+  | sudo tee "$mark_guest/.rpt-disposable-rootfs" >/dev/null
+sudo dpkg --root="$mark_guest" --install \
+  "$root/www/pool/rpt-mark-preserved_1.0_all.deb"
+sudo chroot "$mark_guest" /usr/bin/apt-mark manual rpt-mark-preserved
+sudo chroot "$mark_guest" /usr/bin/apt-mark showmanual rpt-mark-preserved \
+  | grep -Fxq rpt-mark-preserved
+./target/debug/rpt native-rootfs-prepare-transaction \
+  --rootfs "$mark_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --output "$root/native-mark-intent.json" rpt-mark-root
+python3 - "$root/native-mark-intent.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert [(p['name'],p['version']) for p in x['packages']] == [
+  ('rpt-mark-auto','1.0'), ('rpt-mark-root','1.0')]
+PY
+./target/debug/rpt fetch --manifest "$root/native-mark-intent.json" \
+  --output "$root/native-mark-artifacts" --workers 2 --segments 1
+sudo ./target/debug/rpt native-rootfs-apply-transaction \
+  --rootfs "$mark_guest" --id native-mark-install \
+  --transaction "$root/native-mark-intent.json" \
+  --artifacts "$root/native-mark-artifacts" \
+  --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-mark-journal" --timeout-seconds 180
+sudo chroot "$mark_guest" /usr/bin/apt-mark showmanual rpt-mark-root \
+  | grep -Fxq rpt-mark-root
+sudo chroot "$mark_guest" /usr/bin/apt-mark showauto rpt-mark-auto \
+  | grep -Fxq rpt-mark-auto
+sudo chroot "$mark_guest" /usr/bin/apt-mark showmanual rpt-mark-preserved \
+  | grep -Fxq rpt-mark-preserved
+test -z "$(sudo dpkg --root="$mark_guest" --audit)"
+grep -Fq '"phase": "succeeded"' "$root/native-mark-journal/native-mark-install.json"
+echo "PASS native signed install auto dependency/manual root, preserved preinstalled manual dependency"
+
 
 # Install/remove and install/purge exercise actual dpkg operations in the
 # same isolated container; different journals and disposable roots each time.

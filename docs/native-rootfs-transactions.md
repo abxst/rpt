@@ -73,9 +73,20 @@ For automatic orphans already marked in the **guest**
 
 The first command derives a verified candidate closure from the guest's dpkg
 status. The apply command rechecks the exact rootfs identity, dpkg status
-SHA256, policy, GPG/Release/index provenance, and SHA256/size of each
-archive, stages copies, then runs real dpkg with explicit `--root`. Postflight
-requires all exact installed versions and a clean dpkg audit.
+SHA256, guest APT marks snapshot, policy, GPG/Release/index provenance,
+and SHA256/size of each archive, stages copies, then runs real dpkg with
+explicit `--root`. Within the **same supervised install journal**, it runs
+the **guest's** `apt-mark auto` for newly installed dependency packages and
+`apt-mark manual` for explicitly requested roots, verifying each mark and
+that marking does not alter dpkg status. Dependencies already installed
+before this transaction keep their original marks (including `manual`).
+Postflight requires all exact installed versions and a clean dpkg audit.
+
+This changes the install contract: a rootfs must include `/usr/bin/apt-mark`
+and usable APT state. A failure during marking leaves the guest for inspection
+and is not automatically rolled back. A **mark-only install** where no
+package archive is needed is still unsupported by the native transaction
+executor; use `native-rootfs-mark manual` explicitly for that case.
 
 A journaled and supervised command handles SIGINT/SIGTERM/timeouts, including
 process-group shutdown verification. On failure, the rootfs may be broken.
@@ -90,7 +101,8 @@ ordinary user (sudo is required for the separate guest filesystem):
 
 It uses `debootstrap` to create a separate Ubuntu rootfs, tests the signed
 `hello` installation, removal, reinstallation, guest `apt-mark` manual/auto,
-orphan autoremove and purge. It also installs a script-free local
+orphan autoremove and purge. A directly requested `hello` package must
+become `manual` during install itself. It also installs a script-free local
 conffile fixture **only into the disposable guest** and asserts that remove
 retains its config while a separate `--purge` removes the residual
 config-only state without reinstalling, and checks the **live WSL dpkg
@@ -129,7 +141,9 @@ are supported.
   full filesystem snapshots, or reliable automatic rollback. No production
   host execution and no general power-loss recovery is provided.
 - RPT does not yet implement full APT policy, conffile prompting semantics,
-  Multi-Arch transactions, or all dependency edge cases.
+  Multi-Arch transactions, or all dependency edge cases. Native install marking
+  is verified against the signed transaction and the guest APT database, but
+  is not a substitute for an all-or-nothing filesystem rollback.
 
 The signed differential integration fixture now runs the RPT native
 executor on a separate disposable rootfs and asserts that the VM host's

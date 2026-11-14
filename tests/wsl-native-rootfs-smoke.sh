@@ -93,6 +93,9 @@ sudo "$rpt" native-rootfs-apply-transaction \
   --journal-dir "$journal" --timeout-seconds 300
 sudo dpkg-query --admindir="$guest/var/lib/dpkg" -W \
   '-f=${Status}|${Version}\n' hello
+# A directly requested package is automatically marked manual in the same
+# native install journal, without a separate native-rootfs-mark call.
+sudo chroot "$guest" /usr/bin/apt-mark showmanual hello | grep -Fxq hello
 sudo "$rpt" native-rootfs-remove-planned \
   --rootfs "$guest" --id wsl-remove --journal-dir "$journal" \
   --architecture amd64 hello
@@ -105,6 +108,7 @@ sudo "$rpt" native-rootfs-apply-transaction \
   --rootfs "$guest" --id wsl-reinstall --transaction "$work/reinstall.json" \
   --artifacts "$work/artifacts" --cache "$work/lists" --apt-root "$work/apt" \
   --journal-dir "$journal" --timeout-seconds 300
+sudo chroot "$guest" /usr/bin/apt-mark showmanual hello | grep -Fxq hello
 
 # Verify native APT auto/manual transitions with the *guest* apt-mark.
 sudo "$rpt" native-rootfs-mark \
@@ -179,5 +183,5 @@ for transaction in wsl-install wsl-remove wsl-reinstall wsl-mark-manual \
   wsl-conffile-remove wsl-conffile-purge; do
   grep -Fq '"phase": "succeeded"' "$journal/$transaction.json"
 done
-echo "PASS native WSL signed lifecycle, remove then purge config-files-only and unchanged live dpkg"
+echo "PASS native WSL signed lifecycle, automatic manual root mark, config-only purge and unchanged live dpkg"
 echo "Inspect test artifacts: $work"
