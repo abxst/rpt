@@ -187,6 +187,9 @@ pub fn create(root: &Path, destination: &Path, journal: &Path,
     }
     let dest = checked_destination(destination, &[&root, &journal])?;
     let _lock = Journal::wait(&journal).context("checkpoint requires a clean, unlocked transaction journal")?;
+    if !dpkg_clean(&root)? {
+        bail!("guest dpkg changed or became incomplete before checkpoint lock");
+    }
     let receipts = snapshot_dir(&journal)?;
     let path = receipts.join(format!("{id}.json"));
     if fs::symlink_metadata(&path).is_ok() {
