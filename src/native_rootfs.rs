@@ -10,7 +10,7 @@ use std::{collections::BTreeSet, fs, path::{Path, PathBuf}, time::Duration};
 
 const MARKER: &str = "rpt-disposable-rootfs-v1\n";
 
-fn rootfs(path: &Path) -> Result<PathBuf> {
+pub(crate) fn rootfs(path: &Path) -> Result<PathBuf> {
     if !cfg!(target_os = "linux") { bail!("native rootfs requires Linux"); }
     if fs::symlink_metadata(path)?.file_type().is_symlink() { bail!("rootfs cannot be a symlink"); }
     let root = fs::canonicalize(path)?;
@@ -36,7 +36,7 @@ fn rootfs(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 fn root_identity(root: &Path) -> String { format!("native-rootfs:{}", root.display()) }
-fn status(root: &Path) -> Result<Vec<u8>> {
+pub(crate) fn status(root: &Path) -> Result<Vec<u8>> {
     let path = root.join("var/lib/dpkg/status");
     if !fs::symlink_metadata(&path)?.file_type().is_file() { bail!("dpkg status must be a regular file"); }
     fs::read(path).context("reading guest dpkg status")
@@ -116,7 +116,7 @@ fn install_mark_targets(requested: &[String], steps: &[install_plan::PlanStep])
 
 /// Exact guest APT mark-state identity, sampled before a dpkg transaction.
 /// The executor checks it again immediately before touching dpkg.
-fn mark_state_digest(root: &Path) -> Result<String> {
+pub(crate) fn mark_state_digest(root: &Path) -> Result<String> {
     let marks = root.join("var/lib/apt/extended_states");
     match fs::symlink_metadata(&marks) {
         Ok(meta) if meta.file_type().is_file() && meta.len() <= 64 * 1024 * 1024 =>
