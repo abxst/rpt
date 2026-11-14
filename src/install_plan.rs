@@ -2042,6 +2042,72 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             ["second", "fallback", "app"]);
     }
     #[test]
+    fn future_explicit_root_forces_fallback_even_when_requested_last() {
+        let mut first = item("first", "1", "");
+        first.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), first),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        for roots in [
+            vec!["app".into(), "blocker".into()],
+            vec!["blocker".into(), "app".into()],
+        ] {
+            let plan = solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+                &roots, 20, "amd64").unwrap();
+            let names = plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>();
+            assert!(names.contains(&"app") && names.contains(&"blocker"));
+            assert!(names.contains(&"fallback") && !names.contains(&"first"));
+            assert_eq!(names.len(), 3);
+        }
+        // A single root still prefers its first declared dependency.
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["first", "app"]);
+    }
+
+    #[test]
+    fn joint_root_lookahead_checks_reverse_breaks_and_version_constraints() {
+        let mut blocker = item("blocker", "3", "");
+        blocker.breaks = "first (>= 2)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), item("first", "2", "")),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("blocker".into(), blocker.clone()),
+        ]));
+        let roots = ["app".into(), "blocker".into()];
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &roots, 20, "amd64").unwrap();
+        assert!(plan.iter().any(|step| step.package == "fallback"));
+        blocker.breaks = "first (>> 2)".into();
+        let mut harmless = catalog;
+        harmless.insert(PackageKey { name: "blocker".into(), architecture: "amd64".into() }, blocker);
+        let plan = solve_catalog_many(&harmless, &BTreeMap::new(), &BTreeMap::new(),
+            &roots, 20, "amd64").unwrap();
+        assert!(plan.iter().any(|step| step.package == "first"));
+    }
+
+    #[test]
+    fn joint_root_lookahead_does_not_discard_roots_or_authorize_replaces() {
+        let mut first = item("first", "1", "");
+        first.replaces = "blocker".into();
+        let mut fallback = item("fallback", "1", "");
+        fallback.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), first),
+            ("fallback".into(), fallback),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        assert!(solve_catalog_many(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["app".into(), "blocker".into()], 20, "amd64").is_err());
+    }
+
+    #[test]
     fn backtracks_failed_branch_and_restores_full_partial_plan() {
         let catalog = BTreeMap::from([
             ("app".into(), item("app", "1", "bad | good")),
