@@ -616,6 +616,11 @@ impl Solver<'_> {
     /// binary version, and never substitutes a foreign architecture.
     fn concrete_candidates(&self, required: &Requirement) -> Result<Vec<PackageKey>> {
         if let Some(requested_arch) = &required.requested_arch {
+            // This preview supports implicit native leaves ONLY, never an
+            // explicit :amd64 dependency or an architecture rewrite.
+            if self.external_native.is_some() && requested_arch != &self.architecture {
+                return Ok(Vec::new());
+            }
             let explicit = PackageKey {
                 name: required.name.clone(), architecture: requested_arch.clone(),
             };
