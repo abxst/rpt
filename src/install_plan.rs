@@ -1815,14 +1815,14 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
     #[test]
     fn ordered_alternatives_choose_first_fully_viable_branch() {
         let catalog = BTreeMap::from([
-            ("app".into(), item("app", "1", "a | b")),
-            ("a".into(), item("a", "1", "helper")),
+            ("app".into(), item("app", "1", "alpha | beta")),
+            ("alpha".into(), item("alpha", "1", "helper")),
             ("helper".into(), item("helper", "1", "")),
-            ("b".into(), item("b", "1", "")),
+            ("beta".into(), item("beta", "1", "")),
         ]);
         let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
-            ["helper", "a", "app"]);
+            ["helper", "alpha", "app"]);
     }
     #[test]
     fn backtracking_considers_remaining_dependency_groups() {
