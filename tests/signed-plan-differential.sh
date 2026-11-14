@@ -543,6 +543,64 @@ if grep -Fq 'rpt-soft-extra' "$root/rpt-soft-off-versions"; then
 fi
 echo "PASS signed APT/RPT Install-Recommends true/false selected binary/version parity"
 
+# Exact negative APT pin: optional Recommends must disappear without aborting
+# the mandatory install. Pin files are scoped to this disposable fixture.
+mkdir -p "$root/rpt-apt/preferences.d" "$root/apt/etc/preferences.d"
+cat > "$root/rpt-apt/preferences" <<'PREF'
+Package: rpt-soft-extra
+Pin: version 1.0
+Pin-Priority: -1
+
+PREF
+apt-get "${opts[@]}" -o "Dir::Etc::preferences=$root/rpt-apt/preferences" \
+  -o "Dir::Etc::preferencesparts=$root/apt/etc/preferences.d" \
+  -o APT::Install-Recommends=true -s -y install rpt-soft-app >"$root/apt-soft-pinned"
+./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/apt/status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  --include-recommends rpt-soft-app >"$root/rpt-soft-pinned"
+sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-soft-pinned" \
+  | LC_ALL=C sort -u >"$root/apt-soft-pinned-versions"
+sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-soft-pinned" \
+  | LC_ALL=C sort -u >"$root/rpt-soft-pinned-versions"
+diff -u "$root/apt-soft-pinned-versions" "$root/rpt-soft-pinned-versions"
+grep -Fxq 'rpt-soft-app 1.0' "$root/rpt-soft-pinned-versions"
+if grep -Fq 'rpt-soft-extra' "$root/rpt-soft-pinned-versions"; then
+  echo "An optional candidate prohibited by APT pins was still planned" >&2
+  exit 1
+fi
+rm "$root/rpt-apt/preferences"
+
+# A held installed binary must not silently upgrade via explicit installation
+# without override. APT's -y mode refuses such operations; RPT has no override.
+cat > "$root/held-status" <<EOF
+Package: rpt-soft-app
+Status: hold ok installed
+Architecture: all
+Version: 0.9
+Description: held installed package
+
+EOF
+if apt-get "${opts[@]}" -o "Dir::State::status=$root/held-status" \
+  -o "Dir::Etc::preferences=$root/rpt-apt/preferences" \
+  -o "Dir::Etc::preferencesparts=$root/apt/etc/preferences.d" \
+  -o APT::Install-Recommends=false -s -y install rpt-soft-app \
+  >"$root/apt-held.log" 2>&1; then
+  echo "APT unexpectedly upgraded an explicitly held package without override" >&2
+  cat "$root/apt-held.log" >&2
+  exit 1
+fi
+if ./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/held-status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" rpt-soft-app \
+  >"$root/rpt-held.log" 2>&1; then
+  echo "RPT unexpectedly upgraded an explicitly held package without override" >&2
+  exit 1
+fi
+grep -Fq 'held package' "$root/rpt-held.log"
+echo "PASS signed APT/RPT negative optional pin and explicitly held package refusal"
+
+
 
 # Upgrade milestone: add two real packages to signed repository after
 # all original APT/RPT differential fixtures have completed.
