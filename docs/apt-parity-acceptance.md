@@ -36,6 +36,23 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Installed-state removal and autoremove differential
+
+The isolated `tests/apt-removal-autoremove-differential.sh` fixture now
+compares the **exact removal set** from `apt-get -s` with RPT's conservative
+read-only removal planners for a matched, disposable dpkg status graph.
+It covers removing a required library and its reverse dependency, preserving
+a dependent when a second alternative remains installed, removing both
+alternatives and their consumer, and autoremove reachability from manual roots.
+It additionally checks that RPT rejects removal of an Essential package.
+
+All comparisons use local empty APT sources and explicitly scoped dpkg status,
+auto/manual marks, cache and lists. Both inputs remain byte-for-byte unchanged.
+This adds evidence for **part** of Gates D and H. It does not imply that
+RPT's remove/autoremove behavior is generally equivalent to APT, particularly
+with Multi-Arch, versioned providers, protected packages, APT-specific
+autoremove rules, and broken installed state. Host dpkg mutation is disabled.
+
 ## Ordered alternative selection and joint-root differential
 
 RPT now considers dependency alternatives in Debian control-file order
