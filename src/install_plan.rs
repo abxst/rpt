@@ -443,7 +443,6 @@ fn scoped_relations(
 fn eligible_native_foreign_candidate(item: &PackageSummary, required: &Requirement) -> bool {
     required.requested_arch.is_none()
         && item.multi_arch == if required.any_arch { "allowed" } else { "foreign" }
-        && item.pre_depends.trim().is_empty()
 }
 
 /// Read-only proof that an installed native binary can satisfy a foreign
@@ -933,10 +932,14 @@ impl Solver<'_> {
                 return Ok(());
             }
         }
+        let descriptions = group.iter().map(|req| req.name.as_str())
+            .collect::<Vec<_>>().join(" | ");
         if let Some(error) = last_failure {
-            bail!("no viable dependency alternative after bounded ordered backtracking: {error:#}");
+            bail!("no viable alternative for {}:{} group {index} ({descriptions}): {error:#}",
+                owner.name, owner.architecture);
         }
-        bail!("no viable dependency alternative after bounded ordered backtracking")
+        bail!("no candidate for {}:{} group {index} ({descriptions})",
+            owner.name, owner.architecture)
     }
 
     /// Validate the final effective set (installed packages overridden by
