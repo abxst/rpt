@@ -57,9 +57,12 @@ host APT:
 For conffile cleanup, add `--purge`. Native purge runs `dpkg --purge`,
 reports `mode: purge`, and rejects a successful postflight that leaves
 residual `config-files` dpkg state. Unlike purge, normal remove keeps
-conffiles. The current conservative planner only targets **installed**
-packages; purging an already removed, config-files-only package remains
-an APT-parity gap.
+conffiles. The conservative native purge planner accepts explicitly selected
+**installed** binaries and `deinstall ok config-files` entries, including
+a mix of both, while still refusing ambiguous identities and any installed
+dependency closure that would break survivors. Ordinary `remove` refuses
+config-files-only entries; use `--purge` to clear them after removal. Both
+operations remain restricted to an explicitly marked, disposable rootfs.
 
 For automatic orphans already marked in the **guest**
 `/var/lib/apt/extended_states`:
@@ -89,7 +92,8 @@ It uses `debootstrap` to create a separate Ubuntu rootfs, tests the signed
 `hello` installation, removal, reinstallation, guest `apt-mark` manual/auto,
 orphan autoremove and purge. It also installs a script-free local
 conffile fixture **only into the disposable guest** and asserts that remove
-retains its config while purge deletes it, and checks the **live WSL dpkg
+retains its config while a separate `--purge` removes the residual
+config-only state without reinstalling, and checks the **live WSL dpkg
 status SHA256** on both success and failure. Workspaces under
 `/tmp/rpt-native-wsl.*` are kept for inspection.
 
@@ -100,13 +104,14 @@ verifies the resulting rootfs; it does **not** remount the host or suppress
 the diagnostic. An unsuccessful bootstrap or failed guest checks still fail
 the test.
 
-The real Ubuntu 26.04 `resolute` WSL2 v2 run confirmed signature
-verification, archive integrity, `hello` install/remove/reinstall,
-manual/auto marking, autoremove, and the successful `--purge` execution
-path with unchanged live WSL dpkg status. Because `hello` has no conffiles,
-the newly added conffile fixture must pass independently to demonstrate
-actual config-file deletion; CI also exercises a signed fixture with conffiles
-on Ubuntu and Debian guest roots.
+Real Ubuntu 26.04 `resolute` WSL2 v3 passed signed archive
+verification, install/remove/reinstall, manual/auto marking, autoremove,
+and conffile retention/deletion with unchanged live WSL dpkg status.
+The earlier v3 fixture reinstalled a removed package before purging it;
+this extended test instead purges a **config-files-only** package directly
+after remove. The script is a disposable-rootfs acceptance test, not evidence
+that privileged maintainer scripts are confined or that all APT semantics
+are supported.
 
 ## Scope and limitations
 
