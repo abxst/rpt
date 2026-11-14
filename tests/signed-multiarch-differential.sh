@@ -505,7 +505,9 @@ with open(sys.argv[2],'w') as f:
 PY
 apt-get "${opts[@]}" -o "Dir::State::status=$root/system-upgrade-status" \
   -o APT::Install-Recommends=false -s -y upgrade >"$root/apt-system-upgrade"
-sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-system-upgrade" | \
+# apt-get -s prints upgrades as "Inst name [old] (new ...)" and fresh
+# installs as "Inst name (new ...)"; retain both as candidate-version evidence.
+sed -nE 's/^Inst ([^ ]+) (\[[^]]+\] )?\(([^ )]+).*/\1 \3/p' "$root/apt-system-upgrade" | \
   LC_ALL=C sort -u >"$root/apt-system-upgrade-selected"
 diff -u "$root/apt-system-upgrade-selected" "$root/rpt-system-upgrade-selected"
 # The budget must fail closed; a partial upgrade of only the first binary
