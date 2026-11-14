@@ -62,6 +62,9 @@ fn tree_hash(root: &Path) -> Result<String> {
         for path in paths {
             *count += 1;
             if *count > MAX_ENTRIES { bail!("rootfs snapshot exceeds {MAX_ENTRIES} entries"); }
+            if *count % 5_000 == 0 {
+                eprintln!("RPT native snapshot: verified {count} filesystem entries...");
+            }
             let meta = fs::symlink_metadata(&path)?;
             let kind = meta.file_type();
             hash_bytes(hash, path.strip_prefix(root)?.as_os_str().as_bytes());
@@ -197,10 +200,13 @@ pub fn create(root: &Path, destination: &Path, journal: &Path,
     }
     // All evidence must describe the same source while the cooperative
     // transaction lock is held. Inconsistent copies never receive receipts.
+    eprintln!("RPT native snapshot: hashing source rootfs {}", root.display());
     let original_tree = tree_hash(&root)?;
     let status_sha = sha(&native_rootfs::status(&root)?);
     let marks_sha = native_rootfs::mark_state_digest(&root)?;
+    eprintln!("RPT native snapshot: copying and verifying checkpoint at {}", dest.display());
     copy_rootfs(&root, &dest, &original_tree)?;
+    eprintln!("RPT native snapshot: checking source is unchanged");
     if tree_hash(&root)? != original_tree
         || sha(&native_rootfs::status(&root)?) != status_sha
         || native_rootfs::mark_state_digest(&root)? != marks_sha {
@@ -224,6 +230,7 @@ pub fn create(root: &Path, destination: &Path, journal: &Path,
     file.write_all(b"\n")?;
     file.sync_all()?;
     File::open(&receipts)?.sync_all()?;
+    eprintln!("RPT native snapshot: receipt written and synced at {}", path.display());
     Ok(receipt)
 }
 
@@ -247,6 +254,7 @@ pub fn verify(path: &Path) -> Result<NativeSnapshotReceipt> {
         bail!("snapshot receipt path is not bound to the recorded journal");
     }
     let snapshot = native_rootfs::rootfs(Path::new(&receipt.snapshot_rootfs))?;
+    eprintln!("RPT native snapshot: verifying snapshot tree {}", snapshot.display());
     if snapshot.to_string_lossy() != receipt.snapshot_rootfs {
         bail!("snapshot path identity changed");
     }
@@ -256,21 +264,26 @@ pub fn verify(path: &Path) -> Result<NativeSnapshotReceipt> {
         bail!("checkpoint content has changed since its receipt was sealed");
     }
     if !dpkg_clean(&snapshot)? { bail!("snapshot dpkg database is broken"); }
+    eprintln!("RPT native snapshot: verified receipt {}", path.display());
     Ok(receipt)
 }
 
 /// Restores into a new path. The original (possibly failed) guest, its
 /// checkpoint and its unfinished journal are NEVER modified or unlocked.
 pub fn restore(receipt_path: &Path, destination: &Path) -> Result<NativeRestoreResult> {
+    eprintln!("RPT native snapshot: restore preflight, verifying receipt");
     let receipt = verify(receipt_path)?;
     let snapshot = native_rootfs::rootfs(Path::new(&receipt.snapshot_rootfs))?;
     let journal = fs::canonicalize(&receipt.journal_dir)?;
     let source = Path::new(&receipt.source_rootfs);
     let dest = checked_destination(destination, &[&snapshot, source, &journal])?;
+    eprintln!("RPT native snapshot: copying into fresh rootfs {}", dest.display());
     copy_rootfs(&snapshot, &dest, &receipt.tree_sha256)?;
+    eprintln!("RPT native snapshot: rechecking source checkpoint integrity");
     if tree_hash(&snapshot)? != receipt.tree_sha256 {
         bail!("checkpoint changed during restore; recovered copy is not trusted");
     }
+    eprintln!("RPT native snapshot: restore verified at {}", dest.display());
     Ok(NativeRestoreResult {
         source_snapshot: receipt.snapshot_rootfs,
         new_rootfs: dest.display().to_string(),
