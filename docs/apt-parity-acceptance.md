@@ -88,6 +88,25 @@ such. Production-host transaction parity, transactional rollback and
 maintenance-script side effects outside the guest remain untested.
 Native host mutation continues to be disabled in RPT.
 
+## Foreign dependency on Architecture: all binaries
+
+The read-only foreign candidate-policy planner now retains exact
+`PackageKey { name, architecture }` identities through its mandatory
+dependency closure. When an i386 package requires an unqualified binary
+that exists only as `Architecture: all`, the planner treats it as an
+`all` binary, verifies the candidate against authenticated repository
+origins and APT pinning, and reports the real architecture. It must never
+fabricate `:i386` metadata for an architecture-independent package.
+
+Signed APT/RPT differential tests include a foreign i386 application that
+depends on both a real i386 library and a common `all` binary. The
+selected packages and versions are compared to `apt-get -s`. If a
+same-name i386 and `all` candidate are both present, the conservative
+planner continues to refuse the ambiguous binary rather than inventing
+APT preference rules. Explicit cross-architecture qualifiers, `:any`,
+virtual providers and mixed native/foreign transaction execution remain
+outside the supported subset. No foreign dpkg execution is enabled.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
