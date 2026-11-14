@@ -222,6 +222,10 @@ Maintainer: RPT CI <rpt-test@example.invalid>
 Description: isolated real dpkg installation fixture
 CONTROL
 printf 'sandbox install succeeded\n' > "$root/sandbox-pkg/usr/share/rpt-test/installed.txt"
+# Real conffile fixture: remove must preserve it; purge must delete it.
+mkdir -p "$root/sandbox-pkg/etc/rpt-test"
+printf 'enabled=true\n' > "$root/sandbox-pkg/etc/rpt-test/rpt-demo.conf"
+printf '/etc/rpt-test/rpt-demo.conf\n' > "$root/sandbox-pkg/DEBIAN/conffiles"
 dpkg-deb --build --root-owner-group "$root/sandbox-pkg" \
   "$root/www/pool/rpt-sandbox-demo_1.0_all.deb" >/dev/null
 demo_artifact="$root/www/pool/rpt-sandbox-demo_1.0_all.deb"
@@ -412,6 +416,10 @@ sudo ./target/debug/rpt native-rootfs-remove-planned \
   --rootfs "$native_guest" --id native-remove \
   --journal-dir "$root/native-journal" --architecture "$arch" rpt-sandbox-demo
 grep -Fq '"phase": "succeeded"' "$root/native-journal/native-remove.json"
+# Remove leaves configuration and a dpkg config-files record.
+test -f "$native_guest/etc/rpt-test/rpt-demo.conf"
+test "$(sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-sandbox-demo)" = 'deinstall ok config-files'
 if sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
   -W '-f=${Status}' rpt-sandbox-demo 2>/dev/null | grep -Fxq 'install ok installed'; then
   echo "Native rootfs removal left package installed" >&2; exit 1
@@ -460,6 +468,10 @@ sudo ./target/debug/rpt native-rootfs-remove-planned \
   --journal-dir "$root/native-journal" --architecture "$arch" \
   --purge rpt-sandbox-demo
 grep -Fq '"phase": "succeeded"' "$root/native-journal/native-purge.json"
+test ! -e "$native_guest/etc/rpt-test/rpt-demo.conf"
+purged_state="$(sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-sandbox-demo 2>/dev/null || true)"
+test -z "$purged_state" || test "$purged_state" = 'unknown ok not-installed'
 test -z "$(sudo dpkg --root="$native_guest" --audit)"
 test ! -e /var/lib/dpkg/info/rpt-sandbox-demo.list
 echo "PASS native rootfs install, remove, reinstall, autoremove, purge and no host changes"
