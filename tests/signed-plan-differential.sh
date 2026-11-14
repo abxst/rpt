@@ -192,6 +192,38 @@ Filename: pool/rpt-alpha_1.0_all.deb
 Size: 1
 Description: second declared dependency but alphabetically first
 
+# Joint-root lookahead: a preferred dependency conflicts with the second
+# explicitly requested root, but the second alternative is installable.
+Package: rpt-joint-app
+Version: 1.0
+Architecture: all
+Depends: rpt-joint-first | rpt-joint-fallback
+Filename: pool/rpt-joint-app_1.0_all.deb
+Size: 1
+Description: joint requested-root dependency fixture
+
+Package: rpt-joint-first
+Version: 1.0
+Architecture: all
+Conflicts: rpt-joint-blocker
+Filename: pool/rpt-joint-first_1.0_all.deb
+Size: 1
+Description: preferred dependency incompatible with requested root
+
+Package: rpt-joint-fallback
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-joint-fallback_1.0_all.deb
+Size: 1
+Description: safe alternative dependency
+
+Package: rpt-joint-blocker
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-joint-blocker_1.0_all.deb
+Size: 1
+Description: explicitly requested mandatory root
+
 Package: rpt-soft-app
 Version: 1.0
 Architecture: all
