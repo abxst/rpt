@@ -928,7 +928,17 @@ fn foreign_dependency_identity(
     match (catalog.contains_key(&foreign_key), catalog.contains_key(&all_key)) {
         (true, true) => bail!("ambiguous foreign/all dependency identity for {name}"),
         (true, false) => Ok(Some(foreign_key)),
-        (false, true) => Ok(Some(all_key)),
+        (false, true) => {
+            // In Debian a binary from Architecture: all does not satisfy a
+            // foreign-architecture dependency by default. An unqualified
+            // foreign Depends requires the provider to declare
+            // Multi-Arch: foreign (as confirmed by apt-get -s).
+            let item = &catalog[&all_key];
+            if item.multi_arch != "foreign" {
+                bail!("Architecture: all dependency {name} requires Multi-Arch: foreign");
+            }
+            Ok(Some(all_key))
+        },
         (false, false) => Ok(None),
     }
 }
@@ -1544,11 +1554,15 @@ mod tests {
     fn foreign_dependency_retains_all_identity_and_rejects_same_name_ambiguity() {
         let mut all = item("toolkit", "1.0", "");
         all.architecture = "all".into();
+        all.multi_arch = "foreign".into();
         let mut entries = BTreeMap::from([(
             PackageKey { name: "toolkit".into(), architecture: "all".into() }, all,
         )]);
         let key = foreign_dependency_identity(&entries, "toolkit", "i386").unwrap().unwrap();
         assert_eq!(key.architecture, "all");
+        let mut unqualified = entries.clone();
+        unqualified.get_mut(&key).unwrap().multi_arch = "no".into();
+        assert!(foreign_dependency_identity(&unqualified, "toolkit", "i386").is_err());
         assert!(foreign_dependency_identity(&entries, "missing", "i386").unwrap().is_none());
         let foreign = item("toolkit", "1.0", "");
         entries.insert(
