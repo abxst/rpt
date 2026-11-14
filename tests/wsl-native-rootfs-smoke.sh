@@ -97,6 +97,22 @@ sudo dpkg-query --admindir="$guest/var/lib/dpkg" -W \
 # native install journal, without a separate native-rootfs-mark call.
 sudo chroot "$guest" /usr/bin/apt-mark showmanual hello | grep -Fxq hello
 
+# Checkpoint is taken before the guest is mutated further, and the
+# recovered copy must still contain this hello installation.
+sudo "$rpt" native-rootfs-snapshot-create \
+  --rootfs "$guest" --snapshot-rootfs "$work/wsl-checkpoint" \
+  --journal-dir "$journal" --id wsl-pre-remove \
+  >"$work/checkpoint-receipt.json"
+snapshot_receipt="$journal/native-rootfs-snapshots/wsl-pre-remove.json"
+sudo "$rpt" native-rootfs-snapshot-verify --receipt "$snapshot_receipt" \
+  >"$work/checkpoint-verified.json"
+python3 - "$work/checkpoint-verified.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert x['id']=='wsl-pre-remove'
+assert len(x['tree_sha256'])==64 and len(x['status_sha256'])==64
+PY
+
 # When the exact version is already installed, re-requesting the package
 # should mark it manual without any download or dpkg configure. No artifact
 # directory is provided: this is a pure APT-state transaction.
@@ -236,6 +252,16 @@ assert x["needs_operator_review"] and x["journal"]["requires_manual_recovery"]
 assert x["journal"]["records"][0]["phase"] == "running"
 PY
 grep -Fq '"phase":"running"' "$work/unfinished-journal/unfinished.json"
+
+# This restore creates a new guest and cannot silently erase the original
+# post-remove guest, its journal, or the snapshot.
+sudo "$rpt" native-rootfs-snapshot-restore \
+  --receipt "$snapshot_receipt" --new-rootfs "$work/wsl-restored" \
+  >"$work/restore-receipt.json"
+test "$(sudo dpkg-query --admindir="$work/wsl-restored/var/lib/dpkg" \
+  -W '-f=${Status}' hello)" = 'install ok installed'
+sudo test -z "$(sudo dpkg --root="$work/wsl-restored" --audit)"
+sudo test -f "$journal/wsl-remove.json"
 test "$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)" = "$host_before"
-echo "PASS WSL signed lifecycle, marks, conffile purge, read-only recovery inspection; live dpkg unchanged"
+echo "PASS WSL signed lifecycle, native snapshot/restore-new-rootfs, recovery inspect; live dpkg unchanged"
 echo "Inspect test artifacts: $work"
