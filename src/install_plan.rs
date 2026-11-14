@@ -2534,9 +2534,10 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             (PackageKey { name: "host-impl".into(), architecture: "amd64".into() }, native_provider),
             (PackageKey { name: "foreign-decoy".into(), architecture: "i386".into() }, foreign_decoy),
         ]);
-        let empty = BTreeMap::new();
-        let plan = solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).unwrap();
+        let empty_binary = BTreeMap::new();
+        let empty_status = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).unwrap();
         assert_eq!(plan.iter().map(|p| (p.package.as_str(), p.architecture.as_str()))
             .collect::<Vec<_>>(), [
                 ("host-impl", "amd64"), ("host-tool", "amd64"), ("foreign-app", "i386"),
@@ -2547,14 +2548,14 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             name: "host-impl".into(), architecture: "amd64".into(),
         };
         catalog.get_mut(&provider_key).unwrap().provides = "host-cap".into();
-        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
         catalog.get_mut(&provider_key).unwrap().provides = "host-cap (= 6)".into();
-        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
         catalog.remove(&provider_key);
-        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
     }
 
     #[test]
@@ -2616,9 +2617,10 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             (PackageKey { name: "host-provider-a".into(), architecture: "amd64".into() }, first),
             (PackageKey { name: "host-provider-b".into(), architecture: "amd64".into() }, second),
         ]);
-        let empty = BTreeMap::new();
-        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        let empty_binary = BTreeMap::new();
+        let empty_status = BTreeMap::new();
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
     }
 
     #[test]
