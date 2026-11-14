@@ -466,6 +466,25 @@ enum Command {
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
     },
+    /// Execute conservative planned remove/purge on a disposable native rootfs only.
+    NativeRootfsRemovePlanned {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(long, default_value_t = false)] purge: bool,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Execute verified orphan cleanup from guest dpkg and APT marks, not host.
+    NativeRootfsAutoremovePlanned {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+    },
     /// Apply a previously bound, authenticated install/upgrade only inside Docker.
     SandboxSessionApplyTransaction {
         #[arg(long)] session: String,
@@ -992,6 +1011,25 @@ async fn execute(cli: Cli) -> Result<()> {
                 journal: &journal_dir, timeout_seconds,
             }).await.context(ErrorCategory::System)?;
             println!("Native disposable-rootfs install/upgrade verified and applied. Live host dpkg untouched.");
+        }
+        Command::NativeRootfsRemovePlanned {
+            rootfs, id, journal_dir, architecture, cascade, purge, timeout_seconds, packages,
+        } => {
+            let result = rpt::native_rootfs::remove_planned(
+                &rootfs, &journal_dir, &id, &architecture, &packages,
+                cascade, purge, timeout_seconds,
+            ).await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("Native disposable-rootfs removal complete; live host dpkg untouched.");
+        }
+        Command::NativeRootfsAutoremovePlanned {
+            rootfs, id, journal_dir, architecture, timeout_seconds,
+        } => {
+            let result = rpt::native_rootfs::autoremove_planned(
+                &rootfs, &journal_dir, &id, &architecture, timeout_seconds,
+            ).await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("Native disposable-rootfs autoremove complete; live host dpkg untouched.");
         }
         Command::SandboxSessionApplyTransaction { session, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds } => {
             rpt::sandbox_session::apply_bound(rpt::sandbox_session::BoundApply {
