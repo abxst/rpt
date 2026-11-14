@@ -76,9 +76,13 @@ pub fn preview(
             held.push(qualify(&key.name, &key.architecture));
             continue;
         }
-        if !catalog.contains_key(&metadata_query::native_key_for(
-            &catalog, &key.name, architecture,
-        ).unwrap_or(key.clone())) {
+        let native = metadata_query::PackageKey {
+            name: key.name.clone(), architecture: architecture.to_owned(),
+        };
+        let common = metadata_query::PackageKey {
+            name: key.name.clone(), architecture: "all".into(),
+        };
+        if !catalog.contains_key(&native) && !catalog.contains_key(&common) {
             installed_only.push(qualify(&key.name, &key.architecture));
             continue;
         }
