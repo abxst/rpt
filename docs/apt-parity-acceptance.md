@@ -260,6 +260,43 @@ architectures, synchronized Multi-Arch: same upgrades, removals,
 configuration-script ordering parity, real package execution on the
 host, recovery guarantees, or full APT CLI/config compatibility.
 
+## Signed native virtual providers in foreign dependency graphs (M2.6.5)
+
+The experimental `plan-install-foreign-policy` now resolves a virtual
+`Depends` or `Pre-Depends` **owned by a newly selected native binary**
+using an exact architecture-scoped provider. A signed `amd64` provider
+can declare `Provides: capability (= X)`; the virtual constraint
+compares against **X**, not the provider's own binary Version. A
+same-named or newer `i386` provider cannot satisfy an `amd64` owner's
+virtual dependency.
+
+Already installed native binaries can also satisfy these virtual
+requirements when their installed dpkg status declares the exact
+`Provides` capability and version, even when that binary is no longer
+available in the signed repository. The read-only planner neither
+upgrades nor reconfigures the native installed provider. A newer
+repository `Provides` record is never treated as evidence of the
+installed version's capability.
+
+For new providers, all selected binary identities are still checked
+against the signed Release/Packages origin and APT candidate policy
+before returning a plan. Provider choice remains bounded to 32
+candidates per requirement. Multiple viable native providers require
+true APT ranking and are refused rather than arbitrarily selected.
+
+The authenticated APT differential covers an `i386` user ->
+`amd64` `Multi-Arch: foreign` tool -> versioned virtual dependency
+-> `amd64` provider. It includes an `i386` decoy provider,
+an installed-only native provider, and a stale installed capability
+version that must not satisfy the dependency.
+
+**Still unsupported:** virtual providers across the foreign/native
+boundary, foreign virtual `:any` provider selection, native-qualifier
+reinterpretation, general virtual provider ranking, cross-architecture
+removal/upgrade and live-host dpkg. Debian `:native` is primarily
+a build-dependency qualifier; binary install preview continues to
+refuse it rather than treating it as the foreign request architecture.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
