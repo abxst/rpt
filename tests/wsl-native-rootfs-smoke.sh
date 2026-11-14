@@ -126,15 +126,50 @@ sudo "$rpt" native-rootfs-apply-transaction \
   --journal-dir "$journal" --timeout-seconds 300
 sudo "$rpt" native-rootfs-remove-planned \
   --rootfs "$guest" --id wsl-purge --journal-dir "$journal" \
-  --architecture amd64 --purge hello
+  --architecture amd64 --purge hello | tee "$work/hello-purge.log"
+grep -Fq '"mode": "purge"' "$work/hello-purge.log"
+
+# hello has no conffile: also exercise a *local, known, script-free*
+# conffile fixture on the separate guest to prove remove != purge. Signed
+# archive validation is already covered by hello and CI signed fixtures.
+fixture="$work/conffile-fixture"
+mkdir -p "$fixture/DEBIAN" "$fixture/etc/rpt-wsl-fixture"
+cat > "$fixture/DEBIAN/control" <<'CONTROL'
+Package: rpt-wsl-conffile
+Version: 1.0
+Architecture: all
+Maintainer: RPT Test <rpt-test@example.invalid>
+Description: disposable WSL conffile removal regression fixture
+CONTROL
+printf '/etc/rpt-wsl-fixture/config.conf\n' > "$fixture/DEBIAN/conffiles"
+printf 'enabled=true\n' > "$fixture/etc/rpt-wsl-fixture/config.conf"
+fixture_deb="$work/rpt-wsl-conffile_1.0_all.deb"
+dpkg-deb --build --root-owner-group "$fixture" "$fixture_deb" >/dev/null
+sudo dpkg --root="$guest" --install "$fixture_deb"
+sudo "$rpt" native-rootfs-remove-planned \
+  --rootfs "$guest" --id wsl-conffile-remove --journal-dir "$journal" \
+  --architecture amd64 rpt-wsl-conffile
+sudo test -f "$guest/etc/rpt-wsl-fixture/config.conf"
+test "$(sudo dpkg-query --admindir="$guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-wsl-conffile)" = 'deinstall ok config-files'
+sudo dpkg --root="$guest" --install "$fixture_deb"
+sudo "$rpt" native-rootfs-remove-planned \
+  --rootfs "$guest" --id wsl-conffile-purge --journal-dir "$journal" \
+  --architecture amd64 --purge rpt-wsl-conffile | tee "$work/conffile-purge.log"
+grep -Fq '"mode": "purge"' "$work/conffile-purge.log"
+sudo test ! -e "$guest/etc/rpt-wsl-fixture/config.conf"
+purged_fixture="$(sudo dpkg-query --admindir="$guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-wsl-conffile 2>/dev/null || true)"
+test -z "$purged_fixture" || test "$purged_fixture" = 'unknown ok not-installed'
 
 test -z "$(sudo dpkg --root="$guest" --audit)"
 status_after="$(sudo dpkg-query --admindir="$guest/var/lib/dpkg" -W '-f=${Status}' hello 2>/dev/null || true)"
 test "$status_after" != 'install ok installed'
 test "$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)" = "$host_before"
 for transaction in wsl-install wsl-remove wsl-reinstall wsl-mark-manual \
-  wsl-mark-auto wsl-autoremove wsl-purge-install wsl-purge; do
+  wsl-mark-auto wsl-autoremove wsl-purge-install wsl-purge \
+  wsl-conffile-remove wsl-conffile-purge; do
   grep -Fq '"phase": "succeeded"' "$journal/$transaction.json"
 done
-echo "PASS signed native WSL rootfs install/remove/reinstall/mark/autoremove/purge; live dpkg unchanged"
+echo "PASS native WSL signed lifecycle and actual conffile remove/purge; live dpkg unchanged"
 echo "Inspect test artifacts: $work"

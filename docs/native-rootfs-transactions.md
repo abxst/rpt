@@ -54,8 +54,15 @@ host APT:
       --rootfs /tmp/my-guest --id mark-001 \
       --journal-dir ./rpt-native-journal auto demo-package
 
-For conffile cleanup, add `--purge`. For automatic orphans already marked
-in the **guest** `/var/lib/apt/extended_states`:
+For conffile cleanup, add `--purge`. Native purge runs `dpkg --purge`,
+reports `mode: purge`, and rejects a successful postflight that leaves
+residual `config-files` dpkg state. Unlike purge, normal remove keeps
+conffiles. The current conservative planner only targets **installed**
+packages; purging an already removed, config-files-only package remains
+an APT-parity gap.
+
+For automatic orphans already marked in the **guest**
+`/var/lib/apt/extended_states`:
 
     sudo rpt native-rootfs-autoremove-planned \
       --rootfs /tmp/my-guest --architecture amd64 --id auto-001 \
@@ -80,9 +87,11 @@ ordinary user (sudo is required for the separate guest filesystem):
 
 It uses `debootstrap` to create a separate Ubuntu rootfs, tests the signed
 `hello` installation, removal, reinstallation, guest `apt-mark` manual/auto,
-orphan autoremove and purge, and checks the **live WSL dpkg status SHA256** on
-both success and failure. Workspaces under `/tmp/rpt-native-wsl.*` are kept
-for inspection.
+orphan autoremove and purge. It also installs a script-free local
+conffile fixture **only into the disposable guest** and asserts that remove
+retains its config while purge deletes it, and checks the **live WSL dpkg
+status SHA256** on both success and failure. Workspaces under
+`/tmp/rpt-native-wsl.*` are kept for inspection.
 
 On environments where `/tmp` is mounted `nodev`, `debootstrap` can emit
 a `test-dev-null: Permission denied` diagnostic even if the rootfs creation
@@ -91,11 +100,13 @@ verifies the resulting rootfs; it does **not** remount the host or suppress
 the diagnostic. An unsuccessful bootstrap or failed guest checks still fail
 the test.
 
-The first real Ubuntu 26.04 `resolute` WSL2 run confirmed signature
-verification, downloaded archive integrity, native `hello` install/remove,
-and unchanged host dpkg status. The extended mark/autoremove/purge WSL
-sequence must pass independently; CI also tests it on Ubuntu and Debian
-guest roots.
+The real Ubuntu 26.04 `resolute` WSL2 v2 run confirmed signature
+verification, archive integrity, `hello` install/remove/reinstall,
+manual/auto marking, autoremove, and the successful `--purge` execution
+path with unchanged live WSL dpkg status. Because `hello` has no conffiles,
+the newly added conffile fixture must pass independently to demonstrate
+actual config-file deletion; CI also exercises a signed fixture with conffiles
+on Ubuntu and Debian guest roots.
 
 ## Scope and limitations
 
