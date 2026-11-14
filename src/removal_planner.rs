@@ -442,6 +442,43 @@ mod tests {
     }
 
     #[test]
+    fn purge_accepts_residual_config_without_changing_remove_semantics() {
+        let state = b"Package: configpkg\nArchitecture: all\nVersion: 1\nStatus: deinstall ok config-files\n\n\
+Package: installedpkg\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n";
+        assert!(remove_snapshot(state, "amd64", &["configpkg".into()], false).is_err());
+        let residual = purge_snapshot(state, "amd64", &["configpkg".into()], false).unwrap();
+        assert_eq!(residual.mode, "purge");
+        assert!(residual.removable);
+        assert!(!residual.executable);
+        assert_eq!(residual.remove, ["configpkg:all"]);
+
+        let combined = purge_snapshot(state, "amd64",
+            &["configpkg".into(), "installedpkg".into()], false).unwrap();
+        assert_eq!(combined.remove, ["configpkg:all", "installedpkg:amd64"]);
+        assert!(combined.removable);
+        assert!(purge_snapshot(state, "amd64", &["configpkg".into(), "configpkg:all".into()], false).is_err());
+        assert!(purge_snapshot(state, "amd64", &["missingpkg".into()], false).is_err());
+    }
+
+    #[test]
+    fn purge_rejects_ambiguous_and_dependency_breaking_requests() {
+        let ambiguous = b"Package: configpkg\nArchitecture: all\nVersion: 1\nStatus: deinstall ok config-files\n\n\
+Package: configpkg\nArchitecture: amd64\nVersion: 1\nStatus: deinstall ok config-files\n\n";
+        assert!(purge_snapshot(ambiguous, "amd64", &["configpkg".into()], false).is_err());
+        assert_eq!(purge_snapshot(ambiguous, "amd64",
+            &["configpkg:all".into()], false).unwrap().remove, ["configpkg:all"]);
+
+        let required = b"Package: apppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\n\
+Package: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: configpkg\nArchitecture: all\nVersion: 1\nStatus: deinstall ok config-files\n\n";
+        let plan = purge_snapshot(required, "amd64",
+            &["libpkg".into(), "configpkg".into()], false).unwrap();
+        assert!(!plan.removable);
+        assert!(plan.blockers.iter().any(|b| b.contains("apppkg")));
+        assert_eq!(plan.remove, ["configpkg:all", "libpkg:amd64"]);
+    }
+
+    #[test]
     fn alternatives_allow_removing_one_provider() {
         let status = fixture("alt", "Package: apppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: firstpkg | secondpkg\n\nPackage: firstpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\nPackage: secondpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n");
         let plan = remove(&status, "amd64", &["firstpkg".into()], false).unwrap();
