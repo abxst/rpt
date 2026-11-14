@@ -334,20 +334,28 @@ fn release_hashes(signed: &str) -> Result<BTreeMap<String, (u64, String)>> {
     Ok(hashes)
 }
 
-fn indexes(repo: &Repo, hashes: &BTreeMap<String, (u64, String)>, by_hash: bool) -> Result<Vec<Index>> {
+fn indexes(
+    repo: &Repo, hashes: &BTreeMap<String, (u64, String)>,
+    by_hash: bool, additional_architectures: &[String],
+) -> Result<Vec<Index>> {
     let mut result = Vec::new();
-    let arch = native_architecture()?;
+    let mut architectures = vec![native_architecture()?.to_owned()];
+    architectures.extend(additional_architectures.iter().cloned());
     for component in &repo.components {
-        let base = format!("{component}/binary-{arch}/Packages");
-        let choices = [format!("{base}.xz"), format!("{base}.gz"), base];
-        let selected = choices.iter().find_map(|p| hashes.get(p).map(|(size, digest)| Index {
-            path: p.clone(), size: *size, digest: digest.clone(), by_hash,
-        }));
-        let index = selected.ok_or_else(|| anyhow!("missing SHA256 for {component}/binary-{arch}/Packages"))?;
-        if index.size == 0 || index.size > 256 * 1024 * 1024 {
-            bail!("repository index size outside supported bounds");
+        for arch in &architectures {
+            let base = format!("{component}/binary-{arch}/Packages");
+            let choices = [format!("{base}.xz"), format!("{base}.gz"), base];
+            let selected = choices.iter().find_map(|p| hashes.get(p).map(|(size, digest)| Index {
+                path: p.clone(), size: *size, digest: digest.clone(), by_hash,
+            }));
+            let index = selected.ok_or_else(|| anyhow!(
+                "missing signed SHA256 for {component}/binary-{arch}/Packages"
+            ))?;
+            if index.size == 0 || index.size > 256 * 1024 * 1024 {
+                bail!("repository index size outside supported bounds");
+            }
+            result.push(index);
         }
-        result.push(index);
     }
     Ok(result)
 }
@@ -419,6 +427,7 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
 async fn update_repo(
     client: Client, repo: Repo, dest: PathBuf, budget: Arc<Semaphore>,
     opts: UpdateOptions, multi: MultiProgress, stats: Arc<Stats>,
+    additional_architectures: &[String],
 ) -> Result<(usize, u64)> {
     let name = scoped_name(&repo);
     let stage = dest.join(format!(".{name}-{}", std::process::id()));
@@ -438,7 +447,7 @@ async fn update_repo(
         let hashes = release_hashes(signed_text)
             .context(ErrorCode::DownloadIndex)?;
         let by_hash = by_hash_enabled(signed_text)?;
-        let entries = indexes(&repo, &hashes, by_hash)
+        let entries = indexes(&repo, &hashes, by_hash, additional_architectures)
             .context(ErrorCode::DownloadIndex)?;
         let provenance = crate::package_provenance::RepositoryProvenance {
             uri: repo.uri.clone(),
@@ -517,6 +526,27 @@ async fn update_repo(
 
 /// Update independently authenticated repositories concurrently into an isolated cache.
 pub async fn update(root: &Path, dest: &Path, opts: UpdateOptions) -> Result<()> {
+    update_with_architectures(root, dest, opts, &[]).await
+}
+
+/// Opt-in foreign metadata acquisition; never changes dpkg's configured
+/// architectures or permits foreign binary execution. Every additional index
+/// must be present in the signed Release SHA256 section.
+pub async fn update_with_architectures(
+    root: &Path, dest: &Path, opts: UpdateOptions, additional_architectures: &[String],
+) -> Result<()> {
+    if additional_architectures.len() > 4 {
+        bail!("at most four additional architectures may be requested");
+    }
+    let mut seen = BTreeSet::new();
+    seen.insert(native_architecture()?.to_owned());
+    for arch in additional_architectures {
+        if arch.is_empty() || arch == "all" || arch.len() > 32
+            || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || !seen.insert(arch.to_owned()) {
+            bail!("invalid, native, or duplicate additional architecture: {arch}");
+        }
+    }
     if !(1..=64).contains(&opts.workers) { bail!("workers must be 1..=64"); }
     if opts.retries > 10 { bail!("retries must be 0..=10"); }
     let repositories = parse_sources(root).context(ErrorCategory::System)?;
@@ -544,9 +574,12 @@ pub async fn update(root: &Path, dest: &Path, opts: UpdateOptions) -> Result<()>
         let budget = budget.clone();
         let stats = stats.clone();
         let multi = multi.clone();
+        let architectures = additional_architectures.to_vec();
         async move {
             let name = format!("{} {}", repo.uri, repo.suite);
-            (name, update_repo(client, repo, dest, budget, opts, multi, stats).await)
+            (name, update_repo(
+                client, repo, dest, budget, opts, multi, stats, &architectures,
+            ).await)
         }
     })).buffer_unordered(opts.workers).collect::<Vec<_>>().await;
     let mut good = 0;
@@ -602,8 +635,47 @@ mod tests {
         let text = format!("-----BEGIN PGP SIGNED MESSAGE-----\\nHash: SHA256\\n\\nOrigin: Ubuntu\\nSHA256:\\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-{}/Packages.xz\\n-----BEGIN PGP SIGNATURE-----", native_architecture().unwrap()).replace("\\n","\n");
         let hashes = release_hashes(&text).unwrap();
         let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into() };
-        assert_eq!(indexes(&repo, &hashes, false).unwrap().len(), 1);
+        assert_eq!(indexes(&repo, &hashes, false, &[]).unwrap().len(), 1);
     }
+    #[test]
+    fn selects_only_signed_additional_architecture_indexes() {
+        let native = native_architecture().unwrap();
+        let other = if native == "amd64" { "i386" } else { "amd64" };
+        let mut hashes = BTreeMap::new();
+        for arch in [native, other] {
+            hashes.insert(
+                format!("main/binary-{arch}/Packages"),
+                (100, "a".repeat(64)),
+            );
+        }
+        let repo = Repo {
+            uri: "https://example.org".into(), suite: "test".into(),
+            components: vec!["main".into()], keyring: "/tmp/none".into(),
+        };
+        let extra = [other.to_owned()];
+        let selected = indexes(&repo, &hashes, false, &extra).unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].path, format!("main/binary-{native}/Packages"));
+        assert_eq!(selected[1].path, format!("main/binary-{other}/Packages"));
+        hashes.remove(&format!("main/binary-{other}/Packages"));
+        assert!(indexes(&repo, &hashes, false, &extra).is_err());
+    }
+    #[tokio::test]
+    async fn extra_architectures_fail_before_any_source_or_network_access() {
+        let opts = UpdateOptions::default();
+        let root = Path::new("/nonexistent/rpt-apt");
+        let dest = Path::new("/nonexistent/rpt-cache");
+        for extra in [
+            vec!["all".to_owned()],
+            vec![native_architecture().unwrap().to_owned()],
+            vec!["../i386".to_owned()],
+            vec!["i386".to_owned(), "i386".to_owned()],
+            vec!["a".to_owned(); 5],
+        ] {
+            assert!(update_with_architectures(root, dest, opts, &extra).await.is_err());
+        }
+    }
+
     #[test]
     fn accepts_debian_single_digit_utc_hour() {
         let parsed = parse_release_time("Tue, 10 Nov 2026  3:55:52 UTC").unwrap();
