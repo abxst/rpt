@@ -1014,12 +1014,17 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::NativeRootfsApplyTransaction {
             rootfs, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds,
         } => {
-            rpt::native_rootfs::apply(rpt::native_rootfs::Apply {
+            let outcome = rpt::native_rootfs::apply(rpt::native_rootfs::Apply {
                 rootfs: &rootfs, id: &id, transaction: &transaction,
                 artifacts: &artifacts, cache: &cache, apt_root: &apt_root,
                 journal: &journal_dir, timeout_seconds,
             }).await.context(ErrorCategory::System)?;
-            println!("Native disposable-rootfs install/upgrade verified and applied. Live host dpkg untouched.");
+            match outcome {
+                rpt::native_rootfs::ApplyOutcome::Installed =>
+                    println!("Native disposable-rootfs install/upgrade verified and applied. Live host dpkg untouched."),
+                rpt::native_rootfs::ApplyOutcome::MarksOnly =>
+                    println!("Native disposable-rootfs mark-only transaction verified and applied; no dpkg package changes, live host untouched."),
+            }
         }
         Command::NativeRootfsRemovePlanned {
             rootfs, id, journal_dir, architecture, cascade, purge, timeout_seconds, packages,
