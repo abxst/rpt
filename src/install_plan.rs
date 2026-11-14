@@ -526,9 +526,10 @@ impl Solver<'_> {
             if !self.installed_relations.contains_key(key) {
                 continue; // Only in-process synthetic solver fixtures omit status metadata.
             }
-            if self.effective_installed_provides(key)?.iter()
-                .any(|cap| capability_satisfies(cap, required).unwrap_or(false)) {
-                return Ok(Some(key.clone()));
+            for cap in self.effective_installed_provides(key)? {
+                if capability_satisfies(&cap, required)? {
+                    return Ok(Some(key.clone()));
+                }
             }
         }
         Ok(None)
@@ -646,6 +647,12 @@ impl Solver<'_> {
                     return self.resolve_groups(groups, index + 1);
                 }
             }
+            if let Some(provider) = self.installed_virtual_provider(alternative)? {
+                // Proof follows the branch state; later explicit upgrades
+                // cannot silently invalidate the installed capability.
+                self.installed_provider_proofs.push((provider, alternative.clone()));
+                return self.resolve_groups(groups, index + 1);
+            }
         }
 
         // Preserve dependency expression order, not BTreeSet lexical order.
@@ -684,6 +691,7 @@ impl Solver<'_> {
                 self.visiting = branch.visiting;
                 self.done = branch.done;
                 self.plan = branch.plan;
+                self.installed_provider_proofs = branch.installed_provider_proofs;
                 return Ok(());
             }
         }
@@ -899,6 +907,7 @@ impl Solver<'_> {
                         self.visiting = trial.visiting;
                         self.done = trial.done;
                         self.plan = trial.plan;
+                        self.installed_provider_proofs = trial.installed_provider_proofs;
                     }
                 }
             }
@@ -1295,6 +1304,7 @@ fn solve_catalog_many_options(
         architecture: architecture.to_owned(),
         branch_budget: Rc::new(Cell::new(4096)), include_recommends,
         requested_roots: BTreeSet::new(),
+        installed_provider_proofs: Vec::new(),
     };
     for package in packages {
         if let Some(key) = solver.key_for(package)? {
@@ -1304,6 +1314,9 @@ fn solve_catalog_many_options(
     for package in packages {
         solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
     }
+    // Dependencies satisfied by installed virtual providers must still hold
+    // after ALL explicitly requested root upgrades and dependency changes.
+    solver.verify_installed_provider_proofs()?;
     // Validate the entire staged set before exposing a read-only plan.
     // This does not authorize foreign-architecture package installation.
     validate_multiarch_plan(catalog, &solver.plan)?;
@@ -1596,6 +1609,7 @@ mod tests {
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
             requested_roots: BTreeSet::new(),
+            installed_provider_proofs: Vec::new(),
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -2356,6 +2370,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
             requested_roots: BTreeSet::new(),
+            installed_provider_proofs: Vec::new(),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
