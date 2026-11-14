@@ -36,6 +36,71 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## One-journal combined full-upgrade guest execution (M7 production canary path)
+
+The new M7 native-rootfs combined workflow integrates authenticated M5
+explicit and M6 bounded-automatic removal scenarios with the signed exact
+artifact manifest and a **single** process-supervised journaled dpkg command.
+
+`native-rootfs-prepare-full-upgrade` only accepts an explicitly marked,
+disposable, off-host rootfs below `/tmp` or `/var/tmp`. It binds the
+original dpkg-status SHA256, apt-mark digest, exact removal identities and
+versions, chosen upgrade roots, exact signed planned archives and a hash of
+the global scenario. It refuses missing upgrades, unsupported foreign
+binaries, ambiguous installed names, mismatched policy, unsafe removal
+sets and stale status. The file remains `executable: false`.
+
+To apply in the **disposable guest only**, operators must pass the SHA256
+of the full intent file and a **new full-rootfs checkpoint destination**.
+The executor independently re-runs the original signed policy, removal
+selection, full installed-state audit and manifest creation, verifies the
+exact downloaded .deb bytes and the original state, creates/verifies a
+snapshot under the cooperative journal lease, then runs one shell process
+under the existing durable supervisor. The process first checks/removes
+the exact obsolete binaries, installs/upgrades the exact downloaded
+packages, configures pending triggers, applies APT auto/manual marks, and
+verifies the **entire installed package inventory**. It does not split
+removal and upgrade into two independent journal transactions.
+
+Example using a disposable VM guest copied under /tmp:
+
+```sh
+rpt native-rootfs-prepare-full-upgrade --rootfs /tmp/rpt-guest \\
+  --cache ./rpt-lists --apt-root ./apt-root \\
+  --architecture amd64 --automatic \\
+  --output /tmp/rpt-full-intent.json
+
+rpt fetch --manifest /tmp/rpt-full-intent.json \\
+  --output /tmp/rpt-full-artifacts
+sha256sum /tmp/rpt-full-intent.json
+
+sudo rpt native-rootfs-apply-full-upgrade --rootfs /tmp/rpt-guest \\
+  --id canary-full-001 --transaction /tmp/rpt-full-intent.json \\
+  --approve-intent-sha256 THE_FULL_64_HEX_HASH \\
+  --checkpoint-rootfs /tmp/rpt-guest-checkpoint \\
+  --artifacts /tmp/rpt-full-artifacts \\
+  --cache ./rpt-lists --apt-root ./apt-root \\
+  --journal-dir /tmp/rpt-canary-journal
+```
+
+**Production status: NOT READY for live-host dpkg execution.** The
+checkpoint is *not an atomic rollback*. Debian maintainer scripts running
+in a privileged chroot are not sandboxed against host resources; the
+canary MUST run inside a disposable VM or equally isolated security
+boundary, not on a production host. Interrupted or failed operations
+require operator inspection and restore to a **new rootfs**, never
+silently resume or replace a possibly corrupted original. Unsigned
+manifests, stale intents and missing checkpoint approval remain blocked.
+
+CI tests a signed v1→v2 upgrade that first removes an installed conflicting
+obsolete package, confirms an explicit SHA approval gate and mandatory
+checkpoint, verifies the journal, full dpkg inventory, stale replay
+refusal and a clean **separate** checkpoint restore. Existing native
+guest oracle and VM crash/recovery suites remain mandatory. This covers a
+narrow guest canary only; realistic distribution matrices, power-loss,
+filesystem/maintainer-script effects, permission boundaries and APT
+policy edge cases must pass before any host production enablement.
+
 ## Bounded automatic full-upgrade removal **proposal** (M6 major batch)
 
 The new read-only `rpt plan-auto-full-upgrade` tries the full signed
