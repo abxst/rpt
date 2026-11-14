@@ -2452,9 +2452,10 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
             (PackageKey { name: "host-setup".into(), architecture: "amd64".into() }, setup),
         ]);
-        let empty = BTreeMap::new();
-        let plan = solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).unwrap();
+        let empty_binary = BTreeMap::new();
+        let empty_status = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).unwrap();
         assert_eq!(plan.iter().map(|s| (s.package.as_str(), s.architecture.as_str()))
             .collect::<Vec<_>>(), [
             ("host-setup", "amd64"), ("host-tool", "amd64"), ("foreign-app", "i386"),
@@ -2464,8 +2465,8 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         catalog.get_mut(&PackageKey {
             name: "host-setup".into(), architecture: "amd64".into(),
         }).unwrap().depends = "host-tool".into();
-        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
     }
 
     #[test]
@@ -2513,9 +2514,10 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
             (PackageKey { name: "shared-data".into(), architecture: "all".into() }, data),
         ]);
-        let empty = BTreeMap::new();
-        let plan = solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).unwrap();
+        let empty_binary = BTreeMap::new();
+        let empty_status = BTreeMap::new();
+        let plan = solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).unwrap();
         assert_eq!(plan.iter().map(|s| (s.package.as_str(),s.architecture.as_str()))
             .collect::<Vec<_>>(), [
                 ("shared-data", "all"), ("host-tool", "amd64"), ("foreign-app", "i386"),
@@ -2523,8 +2525,8 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         catalog.get_mut(&PackageKey {
             name: "shared-data".into(), architecture: "all".into(),
         }).unwrap().multi_arch = "no".into();
-        assert!(solve_catalog_foreign(&catalog, &empty, &empty,
-            "foreign-app:i386", 20, ("i386", "amd64"), &empty).is_err());
+        assert!(solve_catalog_foreign(&catalog, &empty_binary, &BTreeMap::new(),
+            "foreign-app:i386", 20, ("i386", "amd64"), &empty_status).is_err());
     }
 
     #[test]
