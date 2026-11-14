@@ -223,16 +223,19 @@ pub struct Remove<'a> {
 pub async fn remove_planned(opts: Remove<'_>) -> Result<crate::removal_planner::RemovalPlan> {
     let root = rootfs(opts.rootfs)?;
     let before = status(&root)?;
-    let mut plan = crate::removal_planner::remove_snapshot(
-        &before, opts.architecture, opts.packages, opts.cascade)?;
+    let plan = if opts.purge {
+        crate::removal_planner::purge_snapshot(
+            &before, opts.architecture, opts.packages, opts.cascade)?
+    } else {
+        crate::removal_planner::remove_snapshot(
+            &before, opts.architecture, opts.packages, opts.cascade)?
+    };
     if !plan.removable { bail!("unsafe native removal: {}", plan.blockers.join("; ")); }
     execute_remove(&root, Run {
         journal: opts.journal, id: opts.id, timeout_seconds: opts.timeout_seconds,
     }, &before, None, &plan.remove, opts.purge).await?;
-    // Planning semantics are shared, but report the command actually executed.
-    // executable=false still describes the read-only planner intent, not
-    // whether the separate journaled executor has completed.
-    if opts.purge { plan.mode = "purge".into(); }
+    // The intent is a preview (executable=false); the separate executor
+    // has already journaled and audited the selected removal/purge operation.
     Ok(plan)
 }
 

@@ -420,10 +420,22 @@ grep -Fq '"phase": "succeeded"' "$root/native-journal/native-remove.json"
 test -f "$native_guest/etc/rpt-test/rpt-demo.conf"
 test "$(sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
   -W '-f=${Status}' rpt-sandbox-demo)" = 'deinstall ok config-files'
-if sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
-  -W '-f=${Status}' rpt-sandbox-demo 2>/dev/null | grep -Fxq 'install ok installed'; then
-  echo "Native rootfs removal left package installed" >&2; exit 1
+if sudo ./target/debug/rpt native-rootfs-remove-planned \
+  --rootfs "$native_guest" --id native-repeat-remove \
+  --journal-dir "$root/native-journal" --architecture "$arch" rpt-sandbox-demo \
+  >/dev/null 2>&1; then
+  echo "Native remove accepted a config-files-only package without --purge" >&2; exit 1
 fi
+sudo ./target/debug/rpt native-rootfs-remove-planned \
+  --rootfs "$native_guest" --id native-config-only-purge \
+  --journal-dir "$root/native-journal" --architecture "$arch" \
+  --purge rpt-sandbox-demo > "$root/native-config-only-purge.log"
+grep -Fq '"mode": "purge"' "$root/native-config-only-purge.log"
+grep -Fq '"phase": "succeeded"' "$root/native-journal/native-config-only-purge.json"
+test ! -e "$native_guest/etc/rpt-test/rpt-demo.conf"
+config_only_state="$(sudo dpkg-query --admindir="$native_guest/var/lib/dpkg" \
+  -W '-f=${Status}' rpt-sandbox-demo 2>/dev/null || true)"
+test -z "$config_only_state" || test "$config_only_state" = 'unknown ok not-installed'
 ./target/debug/rpt native-rootfs-prepare-transaction \
   --rootfs "$native_guest" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
   --architecture "$arch" --output "$root/native-reinstall.json" rpt-sandbox-demo

@@ -286,6 +286,63 @@ pub fn remove_snapshot(status: &[u8], native: &str, requested: &[String], cascad
     }
     Ok(result("remove", &removed, removal_blockers(&installed, &removed, native)?))
 }
+/// Purge may target both installed packages and packages whose only remaining
+/// dpkg state is "deinstall ok config-files". The latter cannot satisfy
+/// dependencies and must never be passed to the ordinary removal planner.
+/// Dependency and Essential/Protected checks still apply to installed roots.
+pub fn purge_snapshot(status: &[u8], native: &str, requested: &[String], cascade: bool) -> Result<RemovalPlan> {
+    checked_arch(native)?;
+    if requested.is_empty() || requested.len() > 128 { bail!("expected 1..=128 packages"); }
+    let installed = read_installed_bytes(status)?;
+    ensure_initial_dependencies(&installed, native)?;
+    let mut residual = BTreeSet::new();
+    for record in package_index::parse(std::str::from_utf8(status)?)? {
+        if record.field("Status") != Some("deinstall ok config-files") { continue; }
+        let name = record.field("Package").context("residual dpkg state without Package")?;
+        let arch = record.field("Architecture").context("residual dpkg state without Architecture")?;
+        checked_name(name)?;
+        checked_arch(arch)?;
+        let key = InstalledKey { name: name.into(), architecture: arch.into() };
+        if installed.contains_key(&key) || !residual.insert(key.clone()) {
+            bail!("duplicate residual dpkg identity: {}", key_label(&key));
+        }
+    }
+    let mut installed_roots = Vec::new();
+    let mut residual_roots = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for request in requested {
+        let req = parse_requirement(request)?;
+        if req.relation.is_some() || req.arch.as_deref() == Some("native") {
+            bail!("purge root must be a binary identity, optionally :architecture");
+        }
+        let matches = installed.keys().chain(residual.iter())
+            .filter(|key| key.name == req.name &&
+                match req.arch.as_deref() {
+                    Some(arch) => key.architecture == arch,
+                    None => key.architecture == native || key.architecture == "all",
+                })
+            .cloned().collect::<Vec<_>>();
+        if matches.len() != 1 { bail!("requested purge root missing or ambiguous: {request}"); }
+        let key = &matches[0];
+        if !seen.insert(key.clone()) { bail!("duplicate purge root: {request}"); }
+        if installed.contains_key(key) {
+            installed_roots.push(request.clone());
+        } else {
+            residual_roots.insert(key.clone());
+        }
+    }
+    let mut plan = if installed_roots.is_empty() {
+        result("purge", &BTreeSet::new(), BTreeSet::new())
+    } else {
+        remove_snapshot(status, native, &installed_roots, cascade)?
+    };
+    let mut targets = plan.remove.iter().cloned().collect::<BTreeSet<_>>();
+    targets.extend(residual_roots.iter().map(key_label));
+    plan.remove = targets.into_iter().collect();
+    plan.mode = "purge".into();
+    Ok(plan)
+}
+
 fn auto_marks_from_bytes(bytes: &[u8], installed: &BTreeMap<InstalledKey, InstalledPackage>, native: &str) -> Result<BTreeSet<InstalledKey>> {
     if bytes.len() > 64 * 1024 * 1024 { bail!("APT extended states exceed 64 MiB"); }
     let mut auto = BTreeSet::new();
@@ -382,6 +439,43 @@ mod tests {
         let autoremove = autoremove_snapshot(status, marked, "amd64").unwrap();
         assert!(autoremove.remove.is_empty());
         assert!(autoremove.removable);
+    }
+
+    #[test]
+    fn purge_accepts_residual_config_without_changing_remove_semantics() {
+        let state = b"Package: configpkg\nArchitecture: all\nVersion: 1\nStatus: deinstall ok config-files\n\n\
+Package: installedpkg\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\n\n";
+        assert!(remove_snapshot(state, "amd64", &["configpkg".into()], false).is_err());
+        let residual = purge_snapshot(state, "amd64", &["configpkg".into()], false).unwrap();
+        assert_eq!(residual.mode, "purge");
+        assert!(residual.removable);
+        assert!(!residual.executable);
+        assert_eq!(residual.remove, ["configpkg:all"]);
+
+        let combined = purge_snapshot(state, "amd64",
+            &["configpkg".into(), "installedpkg".into()], false).unwrap();
+        assert_eq!(combined.remove, ["configpkg:all", "installedpkg:amd64"]);
+        assert!(combined.removable);
+        assert!(purge_snapshot(state, "amd64", &["configpkg".into(), "configpkg:all".into()], false).is_err());
+        assert!(purge_snapshot(state, "amd64", &["missingpkg".into()], false).is_err());
+    }
+
+    #[test]
+    fn purge_rejects_ambiguous_and_dependency_breaking_requests() {
+        let ambiguous = b"Package: configpkg\nArchitecture: all\nVersion: 1\nStatus: deinstall ok config-files\n\n\
+Package: configpkg\nArchitecture: amd64\nVersion: 1\nStatus: deinstall ok config-files\n\n";
+        assert!(purge_snapshot(ambiguous, "amd64", &["configpkg".into()], false).is_err());
+        assert_eq!(purge_snapshot(ambiguous, "amd64",
+            &["configpkg:all".into()], false).unwrap().remove, ["configpkg:all"]);
+
+        let required = b"Package: apppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\n\
+Package: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: configpkg\nArchitecture: all\nVersion: 1\nStatus: deinstall ok config-files\n\n";
+        let plan = purge_snapshot(required, "amd64",
+            &["libpkg".into(), "configpkg".into()], false).unwrap();
+        assert!(!plan.removable);
+        assert!(plan.blockers.iter().any(|b| b.contains("apppkg")));
+        assert_eq!(plan.remove, ["configpkg:all", "libpkg:amd64"]);
     }
 
     #[test]
