@@ -27,7 +27,8 @@ for binary in cargo debootstrap gpgv dpkg-query dpkg dpkg-deb sha256sum python3;
 done
 keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
 test -f "$keyring"
-sudo -n true || sudo true
+# Authenticate once without a noisy, expected sudo -n failure in fresh WSL.
+sudo -v
 
 work="$(mktemp -d /tmp/rpt-native-wsl.XXXXXXXX)"
 guest="$work/guest"
@@ -152,7 +153,14 @@ sudo "$rpt" native-rootfs-remove-planned \
 sudo test -f "$guest/etc/rpt-wsl-fixture/config.conf"
 test "$(sudo dpkg-query --admindir="$guest/var/lib/dpkg" \
   -W '-f=${Status}' rpt-wsl-conffile)" = 'deinstall ok config-files'
-sudo dpkg --root="$guest" --install "$fixture_deb"
+# Plain removal must reject an already removed binary; only --purge may
+# select its residual config-files state and execute dpkg --purge.
+if sudo "$rpt" native-rootfs-remove-planned \
+  --rootfs "$guest" --id wsl-conffile-double-remove --journal-dir "$journal" \
+  --architecture amd64 rpt-wsl-conffile >"$work/double-remove.log" 2>&1; then
+  echo "FAIL: native remove unexpectedly accepted config-files-only binary" >&2
+  exit 1
+fi
 sudo "$rpt" native-rootfs-remove-planned \
   --rootfs "$guest" --id wsl-conffile-purge --journal-dir "$journal" \
   --architecture amd64 --purge rpt-wsl-conffile | tee "$work/conffile-purge.log"
@@ -171,5 +179,5 @@ for transaction in wsl-install wsl-remove wsl-reinstall wsl-mark-manual \
   wsl-conffile-remove wsl-conffile-purge; do
   grep -Fq '"phase": "succeeded"' "$journal/$transaction.json"
 done
-echo "PASS native WSL signed lifecycle and actual conffile remove/purge; live dpkg unchanged"
+echo "PASS native WSL signed lifecycle, remove then purge config-files-only and unchanged live dpkg"
 echo "Inspect test artifacts: $work"
