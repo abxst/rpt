@@ -23,6 +23,11 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   System-upgrade intents now revalidate all retained installed reverse dependencies,
   versioned virtual providers and Conflicts/Breaks at prepare and at apply time;
   this remains a conservative test-only subset, not production APT parity.
+- Joint **explicit-removal plus signed system-upgrade scenario** in a single
+  read-only JSON report (`plan-full-upgrade-scenario --remove NAME`): validates
+  the original full dpkg state, creates a private hypothetical removal
+  projection, resolves all eligible upgrades under signed candidate policy,
+  and checks the combined final state. NOT automatic dist-upgrade or dpkg execution.
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
