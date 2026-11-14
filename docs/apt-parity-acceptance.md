@@ -2,7 +2,7 @@
 
 **Priority: behavioral APT replacement first; Rust-specific performance features second.**
 
-RPT is currently an experimental, *read-only/download-only* implementation. The existence of a command or a green build does **not** mean compatibility.
+RPT is currently experimental: it can execute dpkg only inside a disposable or persistent isolated Docker sandbox; host package execution is disabled. The existence of a command or a green build does **not** mean compatibility.
 
 ## Release policy
 
@@ -36,6 +36,29 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Ordered alternative selection and joint-root differential
+
+RPT now considers dependency alternatives in Debian control-file order
+rather than sorting candidates alphabetically or refusing when multiple
+branches are viable. A candidate branch is accepted only after its complete
+dependent closure and negative relationships pass the existing bounded
+solver checks; failed branches are discarded. Already-installed satisfying
+alternatives still avoid unnecessary installation. Multiple ambiguous
+virtual providers remain fail-closed until provider-ranking semantics can
+be validated against APT.
+
+The signed APT/RPT fixture compares the exact selected binary/version set
+for a case in which the first alternative sorts *after* the second, and
+also verifies a two-root candidate-policy graph and a joint-root conflict.
+The test runs against the same signed repository, uses `apt-get -s`, and
+does not mutate the host dpkg database.
+
+This closes a **specific** Gate D gap. It does not complete Gate D:
+cross-root backtracking, broader Multi-Arch behavior, Recommends selection,
+autoremove parity, holds/pinning corner cases, conffiles and full APT solver
+heuristics still need differential evidence. Host dpkg execution remains
+disabled.
+
 ## Resolver and policy regression milestone
 
 The isolated `apt-cache policy` fixture exercises priority 999/1000/1001
@@ -53,4 +76,4 @@ dependency graph with negative cases.
 
 `sources`, `version-compare`, `inspect-index`, `index-versions`, `update`, `cache-versions`, `installed-version`, `policy-preview`, `show`, `search`, `list`, `depends`, `rdepends`, `plan-install`, `prepare-download`, `fetch`.
 
-`plan-install` is a deliberately incomplete read-only planner. `prepare-download` and `fetch` only acquire artifacts. RPT intentionally cannot execute real `install`/`remove`/`upgrade` transactions. **Never use RPT as the system APT executable on the current release.**
+`plan-install` is a deliberately incomplete read-only planner. `prepare-download` and `fetch` only acquire artifacts. RPT can exercise `install`/`remove`/`upgrade` only inside isolated Docker sandbox sessions; it must not be used as the host APT executable. **Never use RPT as the system APT executable on the current release.**

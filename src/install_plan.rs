@@ -539,14 +539,14 @@ impl Solver<'_> {
         }
     }
 
-    /// Explore a branch with a copy of the entire partial plan. Commit only
-    /// if exactly one fully successful continuation remains. A failing branch
-    /// must never leak its already-added dependencies into the winning branch.
+    /// Debian alternatives are ordered: prefer the first viable binary,
+    /// while retaining bounded backtracking for dependencies or conflicts
+    /// that make an earlier choice impossible. Never leak failed branches.
     fn resolve_groups(&mut self, groups: &[Vec<Requirement>], index: usize) -> Result<()> {
         if index == groups.len() { return Ok(()); }
         let group = &groups[index];
-        // Preserve the established behavior: an already installed direct
-        // alternative satisfies a dependency without changing package state.
+        // An already installed satisfier wins before scheduling a new binary,
+        // even when it is not the first textual alternative.
         for alternative in group {
             let selected_installed = if let Some(arch) = &alternative.requested_arch {
                 let exact = PackageKey { name: alternative.name.clone(), architecture: arch.clone() };
@@ -571,57 +571,47 @@ impl Solver<'_> {
                 }
             }
         }
-        let mut options = BTreeSet::new();
-        for alternative in group {
-            if let Some(concrete) = self.concrete(alternative)? {
-                options.insert(concrete);
+
+        // Preserve dependency expression order, not BTreeSet lexical order.
+        // Deduplicate concrete providers without changing the first matching
+        // requirement's version / architecture constraints.
+        let mut seen = BTreeSet::new();
+        let mut options = Vec::new();
+        for requirement in group {
+            if let Some(concrete) = self.concrete(requirement)? {
+                if seen.insert(concrete.clone()) {
+                    options.push((concrete, requirement));
+                }
             }
         }
         if options.is_empty() {
             bail!("no resolvable alternatives for dependency group");
         }
-        let mut winner: Option<Self> = None;
-        for option in options {
+        for (option, requirement) in options {
             let remaining = self.branch_budget.get();
             if remaining == 0 { bail!("dependency branch budget exhausted"); }
             self.branch_budget.set(remaining - 1);
             let mut branch = self.clone();
-            // Preserve the originating dependency constraint and qualifier.
-            // An alternative must not be silently weakened to an unversioned
-            // package request when exploring a backtracking branch.
-            let mut matching = None;
-            for req in group {
-                // Candidate lookup failures are policy/metadata errors, not
-                // evidence that an alternative is simply unavailable.
-                if branch.concrete(req)?.as_ref() == Some(&option) {
-                    matching = Some(req);
-                    break;
+            // When a virtual capability maps to a unique actual provider,
+            // keep the policy-verified provider identity; never weaken a
+            // direct binary's requested version constraint.
+            let actual = if requirement.name == option.name {
+                requirement.clone()
+            } else {
+                Requirement {
+                    name: option.name.clone(), constraint: None,
+                    any_arch: false, requested_arch: Some(option.architecture.clone()),
                 }
-            }
-            // Only branch-local resolution errors are candidates for retry.
-            if matching.is_some_and(|req| {
-                let actual = if req.name == option.name {
-                    req.clone()
-                } else {
-                    Requirement {
-                        name: option.name.clone(), constraint: None,
-                        any_arch: false, requested_arch: Some(option.architecture.clone()),
-                    }
-                };
-                branch.resolve_concrete(&option, &actual).is_ok()
-            })
+            };
+            if branch.resolve_concrete(&option, &actual).is_ok()
                 && branch.resolve_groups(groups, index + 1).is_ok() {
-                if winner.is_some() {
-                    bail!("multiple viable dependency alternatives; full APT solver required");
-                }
-                winner = Some(branch);
+                self.visiting = branch.visiting;
+                self.done = branch.done;
+                self.plan = branch.plan;
+                return Ok(());
             }
         }
-        let selected = winner.context("no viable dependency alternative after backtracking")?;
-        self.visiting = selected.visiting;
-        self.done = selected.done;
-        self.plan = selected.plan;
-        Ok(())
+        bail!("no viable dependency alternative after bounded ordered backtracking")
     }
 
     /// Validate the final effective set (installed packages overridden by
@@ -1775,7 +1765,41 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             ("lib".into(), item("lib", "2", "")),
             ("other".into(), item("other", "1", "")),
         ]);
-        assert!(solve(&ambiguous, &BTreeMap::new(), "app").is_err());
+        let chosen = solve(&ambiguous, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(chosen.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["lib", "app"]);
+    }
+    #[test]
+    fn alternative_selection_respects_debian_order_not_lexical_order() {
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "zed | alpha")),
+            ("alpha".into(), item("alpha", "1", "")),
+            ("zed".into(), item("zed", "1", "")),
+        ]);
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["zed", "app"]);
+        // A currently installed alternative wins without forcing zed.
+        let installed = BTreeMap::from([("alpha".into(), "1".into())]);
+        let plan = solve(&catalog, &installed, "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["app"]);
+    }
+
+    #[test]
+    fn multi_root_later_dependency_can_force_fallback_choice() {
+        let mut first = item("first", "1", "");
+        first.conflicts = "second".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "first | fallback")),
+            ("first".into(), first),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "")),
+        ]);
+        // Order roots with second first to make the preference conflict known.
+        let keyed = test_keyed(&catalog);
+        let plan = solve_catalog_many(&keyed, &BTreeMap::new(), &BTreeMap::new(),
+            &["second".into(), "app".into()], 20, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["second", "fallback", "app"]);
     }
     #[test]
     fn backtracks_failed_branch_and_restores_full_partial_plan() {
@@ -1789,14 +1813,16 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(), ["good", "app"]);
     }
     #[test]
-    fn rejects_two_fully_viable_branches_even_after_lookahead() {
+    fn ordered_alternatives_choose_first_fully_viable_branch() {
         let catalog = BTreeMap::from([
-            ("app".into(), item("app", "1", "a | b")),
-            ("a".into(), item("a", "1", "helper")),
+            ("app".into(), item("app", "1", "alpha | beta")),
+            ("alpha".into(), item("alpha", "1", "helper")),
             ("helper".into(), item("helper", "1", "")),
-            ("b".into(), item("b", "1", "")),
+            ("beta".into(), item("beta", "1", "")),
         ]);
-        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
+        let plan = solve(&catalog, &BTreeMap::new(), "app").unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["helper", "alpha", "app"]);
     }
     #[test]
     fn backtracking_considers_remaining_dependency_groups() {
