@@ -435,6 +435,28 @@ fn scoped_relations(
     Ok(scoped)
 }
 
+/// A replayable dependency alternative is identified by its owning binary
+/// and group ordinal, not by plan position (which changes while backtracking).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReplayKey {
+    owner: PackageKey,
+    group: usize,
+    soft: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ReplayChoice {
+    key: ReplayKey,
+    choice: usize,
+    count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReplayRule {
+    Exactly(usize),
+    AtLeast(usize),
+}
+
 #[derive(Clone)]
 struct Solver<'a> {
     catalog: &'a BTreeMap<PackageKey, PackageSummary>,
@@ -455,6 +477,11 @@ struct Solver<'a> {
     /// against the FINAL staged package set so later upgrades cannot silently
     /// remove its Provides capability.
     installed_provider_proofs: Vec<(PackageKey, Requirement)>,
+    /// Exact replay constraints for earlier decisions, with an increased
+    /// minimum for the last choice being reconsidered.
+    replay_rules: BTreeMap<ReplayKey, ReplayRule>,
+    /// Chronological decision history along ONLY the committed branch.
+    replay_trace: Vec<ReplayChoice>,
 }
 
 impl Solver<'_> {
