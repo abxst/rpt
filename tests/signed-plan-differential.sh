@@ -157,6 +157,28 @@ Filename: pool/rpt-alternative-breaks_1.0_all.deb
 Size: 1
 Description: must backtrack to nonbreaking alternative
 
+Package: rpt-order-app
+Version: 1.0
+Architecture: all
+Depends: rpt-zed (>= 1) | rpt-alpha (>= 1)
+Filename: pool/rpt-order-app_1.0_all.deb
+Size: 1
+Description: prefer first viable declared dependency, not alphabetically first
+
+Package: rpt-zed
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-zed_1.0_all.deb
+Size: 1
+Description: first declared dependency
+
+Package: rpt-alpha
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-alpha_1.0_all.deb
+Size: 1
+Description: second declared dependency but alphabetically first
+
 PACKAGES
 # Each synthetic pool artifact contains one byte; sign the real digest in Packages.
 payload_sha="$(printf 'x' | sha256sum | cut -d' ' -f1)"
@@ -441,7 +463,7 @@ reject_plan() {
     echo "RPT unexpectedly accepted $pkg" >&2; exit 1
   fi
 }
-for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app rpt-alternative-conflict rpt-alternative-breaks rpt-cycle-a; do
+for pkg in rpt-app rpt-pre-app rpt-alternative rpt-virtual-app rpt-alternative-conflict rpt-alternative-breaks rpt-cycle-a rpt-order-app; do
   compare_plan "$pkg"
 done
 for pkg in rpt-broken rpt-version-mismatch rpt-self-conflict rpt-self-breaks; do
@@ -451,9 +473,29 @@ done
 if apt-get "${opts[@]}" -s -y install rpt-app rpt-conflict >"$root/apt-conflict" 2>&1; then
   echo "APT accepted incompatible package pair" >&2; exit 1
 fi
-# RPT's public CLI currently accepts one root package, so do not pretend
-# that its single-root preview validates a multi-root conflict.
-echo "PASS signed APT/RPT versioned plan differential: Depends, Pre-Depends, alternatives, Provides, Conflicts, Breaks, missing/version constraints; APT multi-root Conflicts"
+# The exact selected alternative must match APT; alphabetical ordering
+# would incorrectly choose rpt-alpha over the first-listed rpt-zed.
+grep -Eq '^Inst rpt-zed[[:space:]]' "$root/apt-plan"
+if grep -Eq '^Inst rpt-alpha[[:space:]]' "$root/apt-plan"; then
+  echo "APT selected the second alternative unexpectedly" >&2; exit 1
+fi
+# Multi-root joint planning uses one dependency graph, with no duplicate
+# shared packages. Match APT's simulated installed package/version set.
+apt-get "${opts[@]}" -s -y install rpt-order-app rpt-app >"$root/apt-multi"
+./target/debug/rpt plan-install-batch-policy --cache "$root/rpt-cache" \
+  --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" rpt-order-app rpt-app >"$root/rpt-multi"
+sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-multi" | LC_ALL=C sort -u >"$root/apt-multi-versions"
+sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-multi" | LC_ALL=C sort -u >"$root/rpt-multi-versions"
+test -s "$root/apt-multi-versions"
+test -s "$root/rpt-multi-versions"
+diff -u "$root/apt-multi-versions" "$root/rpt-multi-versions"
+if ./target/debug/rpt plan-install-batch-policy --cache "$root/rpt-cache" \
+  --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" rpt-app rpt-conflict >"$root/rpt-multi-conflict" 2>&1; then
+  echo "RPT unexpectedly accepted jointly conflicting roots" >&2; exit 1
+fi
+echo "PASS signed APT/RPT differential: Debian ordered alternatives and joint multi-root candidate parity"
 
 # Upgrade milestone: add two real packages to signed repository after
 # all original APT/RPT differential fixtures have completed.
