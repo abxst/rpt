@@ -2401,6 +2401,76 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).is_err());
     }
     #[test]
+    fn foreign_preview_recurses_native_dependency_graph_by_owner_architecture() {
+        let mut app = item("cross-app", "1", "native-tool (>= 2)");
+        app.architecture = "i386".into();
+        let mut tool = item("native-tool", "2", "native-helper (>= 3)");
+        tool.multi_arch = "foreign".into();
+        let helper = item("native-helper", "3", "native-bottom (= 4)");
+        let bottom = item("native-bottom", "4", "");
+        let mut deceptive_foreign = item("native-helper", "99", "");
+        deceptive_foreign.architecture = "i386".into();
+        let catalog = BTreeMap::from([
+            (PackageKey {name: "cross-app".into(), architecture: "i386".into()}, app),
+            (PackageKey {name: "native-tool".into(), architecture: "amd64".into()}, tool.clone()),
+            (PackageKey {name: "native-helper".into(), architecture: "amd64".into()}, helper.clone()),
+            (PackageKey {name: "native-bottom".into(), architecture: "amd64".into()}, bottom),
+            (PackageKey {name: "native-helper".into(), architecture: "i386".into()}, deceptive_foreign),
+        ]);
+        let empty = BTreeMap::new();
+        let run = |entries: &BTreeMap<PackageKey, PackageSummary>,
+                   statuses: &BTreeMap<cache_query::InstalledKey, InstalledRelations>| {
+            solve_catalog_foreign(entries, &empty, &empty, "cross-app:i386",
+                20, ("i386", "amd64"), statuses)
+        };
+        let plan = run(&catalog, &empty).unwrap();
+        assert_eq!(plan.iter().map(|step|
+            (step.package.as_str(), step.architecture.as_str())
+        ).collect::<Vec<_>>(), [
+            ("native-bottom", "amd64"),
+            ("native-helper", "amd64"),
+            ("native-tool", "amd64"),
+            ("cross-app", "i386"),
+        ]);
+        assert!(reject_foreign_negative_relations_with_native(
+            &catalog, &empty, &plan, "i386", Some("amd64"),
+        ).is_ok());
+
+        // An existing native helper with Multi-Arch: no satisfies a native
+        // owner but is NOT a valid direct foreign-root substitute.
+        let installed_helper = BTreeMap::from([(
+            cache_query::InstalledKey {
+                name: "native-helper".into(), architecture: "amd64".into(),
+            },
+            InstalledRelations {version: "3".into(), multi_arch: "no".into(), ..Default::default()},
+        )]);
+        let reused = run(&catalog, &installed_helper).unwrap();
+        assert!(!reused.iter().any(|step| step.package == "native-helper"));
+        // A native dependency cannot silently upgrade an installed old
+        // helper from 2 to 3.
+        let mut old_status = installed_helper.clone();
+        old_status.values_mut().next().unwrap().version = "2".into();
+        assert!(run(&catalog, &old_status).is_err());
+
+        let mut no_native = catalog.clone();
+        no_native.remove(&PackageKey {
+            name: "native-helper".into(), architecture: "amd64".into(),
+        });
+        assert!(run(&no_native, &empty).is_err());
+        let mut bad = catalog.clone();
+        bad.get_mut(&PackageKey {
+            name: "native-tool".into(), architecture: "amd64".into(),
+        }).unwrap().pre_depends = "native-bottom".into();
+        assert!(run(&bad, &empty).is_err());
+        // A regular native helper needs no Multi-Arch: foreign/allowed flag,
+        // but a foreign i386 package cannot consume it across the boundary.
+        let mut direct = catalog.clone();
+        direct.get_mut(&PackageKey {
+            name: "cross-app".into(), architecture: "i386".into(),
+        }).unwrap().depends = "native-helper (>= 3)".into();
+        assert!(run(&direct, &empty).is_err());
+    }
+    #[test]
     fn foreign_preview_selects_new_native_signed_leaf_without_native_upgrades() {
         let mut app = item("foreign-user", "1", "native-tool (>= 2)");
         app.architecture = "i386".into();
