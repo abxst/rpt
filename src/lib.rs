@@ -16,6 +16,7 @@ pub mod package_provenance;
 pub mod artifact_store;
 pub mod sandbox_execution;
 pub mod sandbox_session;
+pub mod native_rootfs;
 pub mod package_index;
 pub mod index_catalog;
 pub mod version;
