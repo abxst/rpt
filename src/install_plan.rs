@@ -661,7 +661,10 @@ impl Solver<'_> {
     /// Debian alternatives are ordered: prefer the first viable binary,
     /// while retaining bounded backtracking for dependencies or conflicts
     /// that make an earlier choice impossible. Never leak failed branches.
-    fn resolve_groups(&mut self, groups: &[Vec<Requirement>], index: usize) -> Result<()> {
+    fn resolve_groups(
+        &mut self, owner: &PackageKey, groups: &[Vec<Requirement>], index: usize,
+        soft: bool,
+    ) -> Result<()> {
         if index == groups.len() { return Ok(()); }
         let group = &groups[index];
         // An already installed satisfier wins before scheduling a new binary,
@@ -686,48 +689,80 @@ impl Solver<'_> {
                     || self.key_for(&alternative.name)?.and_then(|key| self.catalog.get(&key))
                         .is_some_and(|item| item.multi_arch == "allowed" && item.version == *installed);
                 if allowed_installed && satisfies(installed, alternative)? {
-                    return self.resolve_groups(groups, index + 1);
+                    return self.resolve_groups(owner, groups, index + 1, soft);
                 }
             }
             if let Some(provider) = self.installed_virtual_provider(alternative)? {
                 // Proof follows the branch state; later explicit upgrades
                 // cannot silently invalidate the installed capability.
                 self.installed_provider_proofs.push((provider, alternative.clone()));
-                return self.resolve_groups(groups, index + 1);
+                return self.resolve_groups(owner, groups, index + 1, soft);
             }
         }
 
-        // Debian alternatives are ordered, but a single virtual capability
-        // may have several candidates. Try each provider on a cloned solver
-        // state, including its entire dependent closure and remaining groups.
-        // Only a UNIQUE viable provider is selected. If two providers are
-        // equally viable, fail closed rather than invent APT's ranking policy.
-        // The shared search budget counts attempts across failed branches.
+        // Replay is enabled only for discrete textual alternatives whose
+        // identity is unambiguous. A virtual requirement with two viable
+        // providers remains fail-closed: replay must not bypass APT ranking.
+        let mut seen_possible = BTreeSet::new();
+        let mut replayable = true;
+        for requirement in group {
+            let options = self.concrete_candidates(requirement)?;
+            if options.len() > 1 { replayable = false; }
+            seen_possible.extend(options);
+        }
+        replayable &= seen_possible.len() > 1;
+        let decision_key = ReplayKey {
+            owner: owner.clone(), group: index, soft,
+        };
+        let replay_rule = if replayable {
+            self.replay_rules.get(&decision_key).copied()
+        } else {
+            None
+        };
+        // Debian alternatives are ordered. Explore a copied solver branch
+        // before committing it. Branch budgets are SHARED across attempts.
         let mut seen = BTreeSet::new();
+        let mut ordinal = 0usize;
         for requirement in group {
             let candidates = self.concrete_candidates(requirement)?;
             let multiple_virtual = candidates.len() > 1;
             let mut chosen: Option<Self> = None;
             for option in candidates {
-                if !seen.insert(option.clone()) {
-                    continue;
-                }
+                if !seen.insert(option.clone()) { continue; }
+                let choice = ordinal;
+                ordinal += 1;
+                if replayable && match replay_rule {
+                    Some(ReplayRule::Exactly(target)) => choice != target,
+                    Some(ReplayRule::AtLeast(minimum)) => choice < minimum,
+                    None => false,
+                } { continue; }
                 let remaining = self.branch_budget.get();
                 if remaining == 0 { bail!("dependency branch budget exhausted"); }
                 self.branch_budget.set(remaining - 1);
                 let mut branch = self.clone();
-                // The version requirement was checked against Provides.
-                // Never apply a virtual capability version to the binary.
+                if replayable {
+                    // Log BEFORE walking the child closure, so retries can
+                    // backtrack from the deepest committed decision to the
+                    // earlier parent in deterministic depth-first order.
+                    branch.replay_trace.push(ReplayChoice {
+                        key: decision_key.clone(), choice,
+                        count: seen_possible.len(),
+                    });
+                }
+                // The virtual capability version was checked against
+                // Provides; it must not be applied to the provider's own
+                // binary version.
                 let actual = if requirement.name == option.name {
                     requirement.clone()
                 } else {
                     Requirement {
                         name: option.name.clone(), constraint: None,
-                        any_arch: false, requested_arch: Some(option.architecture.clone()),
+                        any_arch: false,
+                        requested_arch: Some(option.architecture.clone()),
                     }
                 };
                 if branch.resolve_concrete(&option, &actual).is_ok()
-                    && branch.resolve_groups(groups, index + 1).is_ok() {
+                    && branch.resolve_groups(owner, groups, index + 1, soft).is_ok() {
                     if multiple_virtual && chosen.is_some() {
                         bail!("ambiguous virtual package {}: multiple viable providers",
                             requirement.name);
@@ -741,6 +776,7 @@ impl Solver<'_> {
                 self.done = branch.done;
                 self.plan = branch.plan;
                 self.installed_provider_proofs = branch.installed_provider_proofs;
+                self.replay_trace = branch.replay_trace;
                 return Ok(());
             }
         }
@@ -915,7 +951,7 @@ impl Solver<'_> {
         }
         let groups = pre_groups.into_iter()
             .chain(parse_groups_for_arch(&current.depends, &dependency_arch)?).collect::<Vec<_>>();
-        self.resolve_groups(&groups, 0)?;
+        self.resolve_groups(key, &groups, 0, false)?;
         self.visiting.remove(key);
         self.done.insert(key.clone());
         let installed = self.installed.get(key).cloned();
@@ -952,11 +988,12 @@ impl Solver<'_> {
                 let groups = parse_groups_for_arch(&current.recommends, &dependency_arch)?;
                 for group in groups {
                     let mut trial = self.clone();
-                    if trial.resolve_groups(&[group], 0).is_ok() {
+                    if trial.resolve_groups(key, &[group], 0, true).is_ok() {
                         self.visiting = trial.visiting;
                         self.done = trial.done;
                         self.plan = trial.plan;
                         self.installed_provider_proofs = trial.installed_provider_proofs;
+                        self.replay_trace = trial.replay_trace;
                     }
                 }
             }
