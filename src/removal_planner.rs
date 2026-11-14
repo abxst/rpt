@@ -559,6 +559,103 @@ mod tests {
         fs::write(&path, contents).unwrap();
         path
     }
+    fn signed_candidate(name: &str, version: &str, provides: &str) -> PackageSummary {
+        PackageSummary {
+            name: name.into(), version: version.into(),
+            architecture: "amd64".into(), multi_arch: "no".into(),
+            description: String::new(), section: String::new(),
+            depends: String::new(), pre_depends: String::new(),
+            recommends: String::new(), suggests: String::new(),
+            provides: provides.into(), conflicts: String::new(),
+            breaks: String::new(), replaces: String::new(),
+        }
+    }
+
+    fn upgrade_step(name: &str, version: &str) -> PlanStep {
+        PlanStep {
+            package: name.into(), architecture: "amd64".into(),
+            version: version.into(), installed: Some("1".into()),
+        }
+    }
+
+    #[test]
+    fn whole_installed_graph_detects_lost_virtual_provides_version() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: virtual-api (<= 1)\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nProvides: virtual-api (= 1)\n\n";
+        let id = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let steps = [upgrade_step("service", "2")];
+        let mut candidates = BTreeMap::from([
+            (id.clone(), signed_candidate("service", "2", "virtual-api (= 2)")),
+        ]);
+        let broken = audit_upgrade_transition(status, "amd64", &steps, &candidates)
+            .unwrap_err().to_string();
+        assert!(broken.contains("consumer"), "{broken}");
+
+        candidates.get_mut(&id).unwrap().provides = "virtual-api (= 1)".into();
+        let safe = audit_upgrade_transition(status, "amd64", &steps, &candidates).unwrap();
+        assert_eq!(safe.installed_before, 2);
+        assert_eq!(safe.installed_after, 2);
+        assert_eq!(safe.retained_dependents_checked, 1);
+        assert!(!safe.executable);
+
+        candidates.get_mut(&id).unwrap().provides.clear();
+        assert!(audit_upgrade_transition(status, "amd64", &steps, &candidates).is_err());
+    }
+
+    #[test]
+    fn alternative_installed_virtual_satisfier_keeps_reverse_dependencies() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: service-cap (<= 1) | alternate-api (>= 2)\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nProvides: service-cap (= 1)\n\n\
+Package: alternate\nArchitecture: amd64\nVersion: 2\nStatus: install ok installed\nProvides: alternate-api (= 2)\n\n";
+        let id = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let signed = BTreeMap::from([(
+            id, signed_candidate("service", "2", "service-cap (= 2)"),
+        )]);
+        assert!(audit_upgrade_transition(status, "amd64",
+            &[upgrade_step("service", "2")], &signed).is_ok());
+    }
+
+    #[test]
+    fn staged_upgrade_negative_relation_and_hold_fail_closed() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nConflicts: service (>= 2)\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let key = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let steps = [upgrade_step("service", "2")];
+        let mut signed = BTreeMap::from([(
+            key.clone(), signed_candidate("service", "2", ""),
+        )]);
+        assert!(audit_upgrade_transition(status, "amd64", &steps, &signed)
+            .unwrap_err().to_string().contains("Conflicts/Breaks"));
+        // Signed provider metadata must match actual binary identity/version.
+        signed.get_mut(&key).unwrap().version = "3".into();
+        assert!(audit_upgrade_transition(status, "amd64", &steps, &signed).is_err());
+
+        let held = b"Package: service\nArchitecture: amd64\nVersion: 1\nStatus: hold ok installed\n\n";
+        signed.get_mut(&key).unwrap().version = "2".into();
+        assert!(audit_upgrade_transition(held, "amd64", &steps, &signed)
+            .unwrap_err().to_string().contains("held"));
+    }
+
+    #[test]
+    fn newly_staged_dependency_without_proof_is_rejected() {
+        let status = b"Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let id = InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        };
+        let mut candidate = signed_candidate("service", "2", "");
+        candidate.depends = "absent-helper (>= 1)".into();
+        let signed = BTreeMap::from([(id, candidate)]);
+        assert!(audit_upgrade_transition(status, "amd64",
+            &[upgrade_step("service", "2")], &signed)
+            .unwrap_err().to_string().contains("reverse dependency"));
+    }
+
     #[test]
     fn snapshots_and_file_plans_match() {
         let status = b"Package: rootpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\nPackage: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
