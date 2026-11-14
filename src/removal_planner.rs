@@ -241,6 +241,90 @@ fn result(mode: &str, removed: &BTreeSet<InstalledKey>, blockers: BTreeSet<Strin
     }
 }
 
+/// A strictly checked, read-only projection of dpkg status after removing
+/// an explicit set of complete installed binary identities. This is used
+/// only to ask the existing signed policy solver which new candidate versions
+/// can be considered after a *hypothetical* removal. It does not change dpkg.
+pub fn project_status_without(
+    status: &[u8], native: &str, requested: &[String],
+) -> Result<(Vec<u8>, Vec<InstalledKey>)> {
+    checked_arch(native)?;
+    if requested.is_empty() || requested.len() > 32 {
+        bail!("explicit full-upgrade removal scenario requires 1..=32 binaries");
+    }
+    let installed = read_installed_bytes(status)?;
+    ensure_initial_dependencies(&installed, native)?;
+    let mut removed = BTreeSet::new();
+    for request in requested {
+        let requirement = parse_requirement(request)?;
+        if requirement.relation.is_some()
+            || requirement.arch.as_deref() == Some("native") {
+            bail!("removal must name an exact installed binary, optionally :architecture");
+        }
+        let matches = installed.keys().filter(|key|
+            key.name == requirement.name && match requirement.arch.as_deref() {
+                Some(arch) => key.architecture == arch,
+                None => key.architecture == native || key.architecture == "all",
+            }).cloned().collect::<Vec<_>>();
+        if matches.len() != 1 {
+            bail!("ambiguous or missing removal target: {request}");
+        }
+        let key = matches[0].clone();
+        if installed[&key].protected {
+            bail!("cannot remove held, Essential or Protected {}", key_label(&key));
+        }
+        if !removed.insert(key) {
+            bail!("duplicate removal identity: {request}");
+        }
+    }
+    // Parse and reserialize the *complete* source control document. Using a
+    // line-filter here would silently corrupt multiline RFC822 fields.
+    let raw = std::str::from_utf8(status)?;
+    let stanzas = package_index::parse(raw)?;
+    let mut result = String::new();
+    let mut discarded = BTreeSet::new();
+    for stanza in stanzas {
+        let identity = match (stanza.field("Package"), stanza.field("Architecture")) {
+            (Some(name), Some(arch)) => Some(InstalledKey {
+                name: name.into(), architecture: arch.into(),
+            }),
+            _ => None,
+        };
+        if let Some(key) = identity {
+            if removed.contains(&key) && stanza.field("Status").is_some_and(cache_query::is_installed_status) {
+                if !discarded.insert(key.clone()) {
+                    bail!("duplicate installed status for {}", key_label(&key));
+                }
+                continue;
+            }
+        }
+        for (field, value) in stanza.fields {
+            let mut lines = value.split('\n');
+            result.push_str(&field);
+            result.push_str(": ");
+            result.push_str(lines.next().unwrap_or(""));
+            result.push('\n');
+            for continuation in lines {
+                result.push(' ');
+                result.push_str(continuation);
+                result.push('\n');
+            }
+        }
+        result.push('\n');
+    }
+    if discarded != removed {
+        bail!("cannot project all requested removals from installed dpkg state");
+    }
+    let projected = result.into_bytes();
+    let survivor = read_installed_bytes(&projected)?;
+    if survivor.len() + removed.len() != installed.len() {
+        bail!("hypothetical removal changed unrelated installed identities");
+    }
+    ensure_initial_dependencies(&survivor, native)
+        .context("hypothetical removals already break installed dependencies before upgrade; refuse this scenario")?;
+    Ok((projected, removed.into_iter().collect()))
+}
+
 /// One global simulated dpkg state after a signed no-removals upgrade.
 /// A pass is evidence of consistency only in this conservative dependency
 /// subset; it does NOT authorize executing any package on the live host.
@@ -249,6 +333,7 @@ pub struct UpgradeTransitionAudit {
     pub installed_before: usize,
     pub installed_after: usize,
     pub staged_binaries: usize,
+    pub removed_binaries: usize,
     pub retained_dependents_checked: usize,
     pub dependency_groups_checked: usize,
     pub negative_relations_checked: usize,
@@ -284,10 +369,33 @@ pub fn audit_upgrade_transition(
     status: &[u8], native: &str, steps: &[PlanStep],
     signed: &BTreeMap<InstalledKey, PackageSummary>,
 ) -> Result<UpgradeTransitionAudit> {
+    audit_transition_with_removals(status, native, steps, signed, &[])
+}
+
+/// Bound a combined installation/upgrade/removal plan to the *original*
+/// installed status (not merely the hypothetical no-removal solver input).
+/// This is intentionally a read-only global consistency oracle; no removal
+/// or upgrade is executable from its result.
+pub fn audit_transition_with_removals(
+    status: &[u8], native: &str, steps: &[PlanStep],
+    signed: &BTreeMap<InstalledKey, PackageSummary>, removals: &[InstalledKey],
+) -> Result<UpgradeTransitionAudit> {
     checked_arch(native)?;
     let original = read_installed_bytes(status)?;
     ensure_initial_dependencies(&original, native)?;
     let mut projected = original.clone();
+    let mut removed_keys = BTreeSet::new();
+    for key in removals {
+        if !removed_keys.insert(key.clone()) {
+            bail!("duplicate removal identity: {}", key_label(key));
+        }
+        let previous = original.get(key).with_context(||
+            format!("removal is not installed: {}", key_label(key)))?;
+        if previous.protected {
+            bail!("cannot remove held, Essential or Protected {}", key_label(key));
+        }
+        projected.remove(key);
+    }
     let mut staged_keys = BTreeSet::new();
     for step in steps {
         let key = InstalledKey {
@@ -297,6 +405,9 @@ pub fn audit_upgrade_transition(
         checked_arch(&key.architecture)?;
         if !staged_keys.insert(key.clone()) {
             bail!("duplicate staged package identity {}", key_label(&key));
+        }
+        if removed_keys.contains(&key) {
+            bail!("removal overlaps with staged installation {}", key_label(&key));
         }
         let exact = signed.get(&key).with_context(||
             format!("missing independently authenticated staged candidate {}", key_label(&key)))?;
@@ -358,6 +469,7 @@ pub fn audit_upgrade_transition(
         installed_before: original.len(),
         installed_after: projected.len(),
         staged_binaries: staged_keys.len(),
+        removed_binaries: removed_keys.len(),
         retained_dependents_checked,
         dependency_groups_checked,
         negative_relations_checked,
@@ -654,6 +766,81 @@ Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\
         assert!(audit_upgrade_transition(status, "amd64",
             &[upgrade_step("service", "2")], &signed)
             .unwrap_err().to_string().contains("reverse dependency"));
+    }
+
+    #[test]
+    fn removal_projection_preserves_multiline_records_and_unrelated_state() {
+        let status = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDescription: old package\n .\n second paragraph\n\n\
+Package: keeppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDescription: remaining package\n .\n retained paragraph\n\n\
+Package: oldconfig\nArchitecture: all\nVersion: 0\nStatus: deinstall ok config-files\nDescription: kept config file\n\n";
+        let (bytes, removed) = project_status_without(status, "amd64", &["oldpkg".into()]).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].name, "oldpkg");
+        let parsed = package_index::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].field("Package"), Some("keeppkg"));
+        assert_eq!(parsed[0].field("Description"),
+            Some("remaining package\n.\nretained paragraph"));
+        assert_eq!(parsed[1].field("Status"), Some("deinstall ok config-files"));
+        assert!(project_status_without(status, "amd64",
+            &["oldpkg".into(), "oldpkg:amd64".into()]).is_err());
+        assert!(project_status_without(status, "amd64", &["oldconfig".into()]).is_err());
+        assert!(project_status_without(status, "amd64", &["oldpkg:i386".into()]).is_err());
+    }
+
+    #[test]
+    fn hypothetical_removal_rejects_protected_and_preexisting_reverse_breakage() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: oldpkg\n\n\
+Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let error = project_status_without(status, "amd64", &["oldpkg".into()])
+            .unwrap_err().to_string();
+        assert!(error.contains("hypothetical removals"), "{error}");
+        let held = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: hold ok installed\n\n";
+        assert!(project_status_without(held, "amd64", &["oldpkg".into()]).is_err());
+        let essential = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nEssential: yes\n\n";
+        assert!(project_status_without(essential, "amd64", &["oldpkg".into()]).is_err());
+    }
+
+    #[test]
+    fn combined_transition_removes_old_conflict_and_checks_original_state() {
+        let status = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let mut new = signed_candidate("service", "2", "");
+        new.conflicts = "oldpkg".into();
+        let trusted = BTreeMap::from([(InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        }, new)]);
+        let steps = [upgrade_step("service", "2")];
+        let old = InstalledKey {
+            name: "oldpkg".into(), architecture: "amd64".into(),
+        };
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[]).is_err());
+        let ok = audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, std::slice::from_ref(&old)).unwrap();
+        assert_eq!(ok.removed_binaries, 1);
+        assert_eq!(ok.installed_before, 2);
+        assert_eq!(ok.installed_after, 1);
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[old.clone(), old.clone()]).is_err());
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[InstalledKey {
+                name: "missing".into(), architecture: "amd64".into(),
+            }]).is_err());
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[InstalledKey {
+                name: "service".into(), architecture: "amd64".into(),
+            }]).is_err());
+    }
+
+    #[test]
+    fn combined_transition_rejects_broken_retained_dependency_after_removal() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: oldpkg\n\n\
+Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let old = InstalledKey { name: "oldpkg".into(), architecture: "amd64".into() };
+        assert!(audit_transition_with_removals(status, "amd64", &[],
+            &BTreeMap::new(), &[old]).unwrap_err().to_string().contains("consumer"));
     }
 
     #[test]

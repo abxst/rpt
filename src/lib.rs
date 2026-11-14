@@ -6,6 +6,7 @@ pub mod metadata_query;
 pub mod install_plan;
 pub mod transaction_plan_audit;
 pub mod system_upgrade;
+pub mod system_full_upgrade;
 pub mod removal_impact;
 pub mod removal_planner;
 pub mod policy;

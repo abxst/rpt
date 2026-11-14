@@ -36,6 +36,7 @@ Version: 2.0
 Architecture: amd64
 Multi-Arch: foreign
 Provides: rpt-upgrade-virtual (= 2.0)
+Conflicts: rpt-conflicting-old
 Filename: pool/rpt-new-native-leaf_2.0_amd64.deb
 Size: 1
 Description: new native leaf for foreign unqualified dependency
@@ -599,6 +600,97 @@ if "$rpt" plan-system-upgrade-policy --cache "$root/cache" \
 fi
 grep -Fq 'Conflicts/Breaks' "$root/system-reverse-negative.log"
 echo 'PASS M4 signed global installed reverse dependency, virtual alternatives and negative relation preflight'
+# M5: an old, unneeded installed package blocks a new signed candidate.
+# The normal no-removal planner must reject this. The experimental joint
+# explicit-removal scenario must prove it safe across the ORIGINAL dpkg state.
+cp "$root/system-upgrade-status" "$root/system-with-retired"
+cat >>"$root/system-with-retired" <<'EOF'
+Package: rpt-conflicting-old
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Description: obsolete native binary blocks new signed leaf
+
+EOF
+if "$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --architecture amd64 >"$root/system-retired-no-removal.log" 2>&1; then
+  echo 'RPT no-removal planner ignored an installed conflict' >&2
+  exit 1
+fi
+"$rpt" plan-full-upgrade-scenario --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --architecture amd64 --remove rpt-conflicting-old \
+  --max-roots 128 --max-packages 200 >"$root/system-joint-scenario.json"
+python3 - "$root/system-joint-scenario.json" "$root/system-joint-inst" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r['schema_version']==1
+assert len(r['original_status_sha256'])==64
+assert len(r['projected_status_sha256'])==64
+assert r['original_status_sha256'] != r['projected_status_sha256']
+assert r['removals']==[{
+  'name':'rpt-conflicting-old','architecture':'amd64','installed_version':'1.0'}]
+assert r['upgrades']['requested_upgrades']==[
+  'rpt-new-allowed-leaf','rpt-new-native-leaf']
+assert r['final_state']['installed_before']==5
+assert r['final_state']['installed_after']==4
+assert r['final_state']['removed_binaries']==1
+assert r['final_state']['staged_binaries']==2
+assert not r['executable'] and not r['final_state']['executable']
+with open(sys.argv[2],'w') as f:
+  for item in r['upgrades']['transaction']['changes']:
+    f.write(item['package']+' '+item['to']+'\n')
+PY
+apt-get "${opts[@]}" -o "Dir::State::status=$root/system-with-retired" \
+  -o APT::Install-Recommends=false -s -y install \
+  rpt-new-native-leaf rpt-new-allowed-leaf rpt-conflicting-old- \
+  >"$root/apt-joint-scenario"
+sed -nE 's/^Inst ([^ ]+) (\[[^]]+\] )?\(([^ )]+).*/\1 \3/p' \
+  "$root/apt-joint-scenario" | LC_ALL=C sort -u >"$root/apt-joint-inst"
+LC_ALL=C sort -u "$root/system-joint-inst" -o "$root/system-joint-inst"
+diff -u "$root/apt-joint-inst" "$root/system-joint-inst"
+grep -Eq '^Remv rpt-conflicting-old( |$)' "$root/apt-joint-scenario"
+# APT can independently decide whether a dist-upgrade removes this
+# irrelevant blocker; this is recorded as evidence, not imposed as an
+# ordering guarantee for arbitrary APT versions.
+apt-get "${opts[@]}" -o "Dir::State::status=$root/system-with-retired" \
+  -o APT::Install-Recommends=false -s -y dist-upgrade \
+  >"$root/apt-joint-dist-upgrade"
+grep -Eq '^Remv rpt-conflicting-old( |$)' "$root/apt-joint-dist-upgrade"
+grep -Eq '^Inst rpt-new-native-leaf( |$)' "$root/apt-joint-dist-upgrade"
+
+# No partial/misleading plan may be returned for an unsafe scenario:
+# held/Essential, duplicate removal, broken reverse dependency and root
+# discovery budget must each fail before any mutation.
+sed 's/Status: install ok installed/Status: hold ok installed/' \
+  "$root/system-with-retired" >"$root/system-all-held"
+if "$rpt" plan-full-upgrade-scenario --cache "$root/cache" \
+  --status "$root/system-all-held" --apt-root "$root/rpt-apt" \
+  --remove rpt-conflicting-old >"$root/full-held.log" 2>&1; then
+  echo 'RPT allowed held removed binary' >&2; exit 1
+fi
+if "$rpt" plan-full-upgrade-scenario --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --remove rpt-conflicting-old --remove rpt-conflicting-old:amd64 \
+  >"$root/full-dup.log" 2>&1; then
+  echo 'RPT accepted duplicate explicit removal' >&2; exit 1
+fi
+sed 's/Description: configured binary without any repository origin/Depends: rpt-conflicting-old\nDescription: configured binary without any repository origin/' \
+  "$root/system-with-retired" >"$root/full-dependency-blocked"
+if "$rpt" plan-full-upgrade-scenario --cache "$root/cache" \
+  --status "$root/full-dependency-blocked" --apt-root "$root/rpt-apt" \
+  --remove rpt-conflicting-old >"$root/full-dependency-blocked.log" 2>&1; then
+  echo 'RPT removal silently broke retained installed reverse dependency' >&2
+  exit 1
+fi
+if "$rpt" plan-full-upgrade-scenario --cache "$root/cache" \
+  --status "$root/system-with-retired" --apt-root "$root/rpt-apt" \
+  --max-roots 1 --remove rpt-conflicting-old >"$root/full-roots.log" 2>&1; then
+  echo 'RPT silently truncated joint upgrade root set' >&2; exit 1
+fi
+echo 'PASS M5 signed explicit removal plus global joint upgrades, APT oracle and safety blockers'
+
 echo 'PASS bounded signed no-removal system upgrade audit vs APT held/installed-only differential'
 compare_plan cross-virtual "$root/empty-status" rpt-cross-virtual-user:i386
 grep -Fxq 'rpt-cross-virtual-user:i386 1.0' "$root/rpt-cross-virtual-selected"
