@@ -93,9 +93,10 @@ Native host mutation continues to be disabled in RPT.
 The read-only foreign candidate-policy planner now retains exact
 `PackageKey { name, architecture }` identities through its mandatory
 dependency closure. When an i386 package requires an unqualified binary
-that exists only as `Architecture: all`, the planner treats it as an
-`all` binary, verifies the candidate against authenticated repository
-origins and APT pinning, and reports the real architecture. It must never
+that exists only as `Architecture: all`, the planner accepts the
+`all` binary **only if it declares `Multi-Arch: foreign`**. It
+verifies the candidate against authenticated repository origins and
+APT pinning, and reports the real architecture. It must never
 fabricate `:i386` metadata for an architecture-independent package.
 
 Signed APT/RPT differential tests include a foreign i386 application that
