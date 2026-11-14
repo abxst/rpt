@@ -35,6 +35,7 @@ Package: rpt-new-native-leaf
 Version: 2.0
 Architecture: amd64
 Multi-Arch: foreign
+Provides: rpt-upgrade-virtual (= 2.0)
 Filename: pool/rpt-new-native-leaf_2.0_amd64.deb
 Size: 1
 Description: new native leaf for foreign unqualified dependency
@@ -528,6 +529,76 @@ assert r['requested_upgrades']==[]
 assert r['transaction']['changes']==[]
 assert not r['executable']
 PY
+# M4: reverse dependencies of packages NOT requested by the resolver
+# must remain satisfiable after the signed upgrade. This consumer exists only
+# in installed dpkg status, outside the new root candidate set.
+python3 - "$root/system-upgrade-status" "$root/system-reverse-broken" <<'PY'
+import sys
+data=open(sys.argv[1]).read()
+data=data.replace('Description: old native leaf',
+                  'Provides: rpt-upgrade-virtual (= 1.0)\nDescription: old native leaf')
+data=data.replace('Description: configured binary without any repository origin',
+                  'Depends: rpt-upgrade-virtual (<= 1.0)\nDescription: configured binary without any repository origin')
+open(sys.argv[2],'w').write(data)
+PY
+if "$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/system-reverse-broken" --apt-root "$root/rpt-apt" \
+  --architecture amd64 >"$root/system-reverse-broken.log" 2>&1; then
+  echo 'RPT upgraded a virtual provider and broke an unselected installed dependent' >&2
+  exit 1
+fi
+grep -Fq 'reverse dependency of rpt-installed-only:amd64' "$root/system-reverse-broken.log"
+apt-get "${opts[@]}" -o "Dir::State::status=$root/system-reverse-broken" \
+  -o APT::Install-Recommends=false -s -y upgrade >"$root/apt-reverse-broken"
+if grep -Eq '^Inst rpt-new-native-leaf ' "$root/apt-reverse-broken"; then
+  echo 'APT unexpectedly upgraded a provider needed by a retained old virtual dependent' >&2
+  exit 1
+fi
+
+# A separate still-configured provider for the old virtual version makes the
+# transition safe. This validates OR semantics across existing binary Provides.
+cp "$root/system-reverse-broken" "$root/system-reverse-alternative"
+cat >>"$root/system-reverse-alternative" <<'EOF'
+Package: rpt-old-capability-provider
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Provides: rpt-upgrade-virtual (= 1.0)
+Description: second installed-only satisfying virtual provider
+
+EOF
+"$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/system-reverse-alternative" --apt-root "$root/rpt-apt" \
+  --architecture amd64 >"$root/system-reverse-alternative.json"
+python3 - "$root/system-reverse-alternative.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r['scanned_installed']==5
+assert r['post_state']['installed_before']==5
+assert r['post_state']['installed_after']==5
+assert r['post_state']['retained_dependents_checked']==3
+assert r['post_state']['staged_binaries']==2
+assert not r['post_state']['executable'] and not r['executable']
+assert r['requested_upgrades']==['rpt-new-allowed-leaf','rpt-new-native-leaf']
+PY
+
+# A negative installed relationship with a staged v2 must be checked even if
+# the installed owner was not in any new dependency closure.
+python3 - "$root/system-upgrade-status" "$root/system-reverse-negative" <<'PY'
+import sys
+data=open(sys.argv[1]).read().replace(
+  'Description: configured binary without any repository origin',
+  'Conflicts: rpt-new-native-leaf (>= 2.0)\nDescription: configured binary without any repository origin')
+open(sys.argv[2],'w').write(data)
+PY
+if "$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/system-reverse-negative" --apt-root "$root/rpt-apt" \
+  --architecture amd64 >"$root/system-reverse-negative.log" 2>&1; then
+  echo 'RPT ignored reverse Conflicts against a staged upgrade' >&2
+  exit 1
+fi
+grep -Fq 'Conflicts/Breaks' "$root/system-reverse-negative.log"
+echo 'PASS M4 signed global installed reverse dependency, virtual alternatives and negative relation preflight'
 echo 'PASS bounded signed no-removal system upgrade audit vs APT held/installed-only differential'
 compare_plan cross-virtual "$root/empty-status" rpt-cross-virtual-user:i386
 grep -Fxq 'rpt-cross-virtual-user:i386 1.0' "$root/rpt-cross-virtual-selected"
