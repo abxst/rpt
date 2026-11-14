@@ -769,6 +769,81 @@ Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\
     }
 
     #[test]
+    fn removal_projection_preserves_multiline_records_and_unrelated_state() {
+        let status = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDescription: old package\n .\n second paragraph\n\n\
+Package: keeppkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDescription: remaining package\n .\n retained paragraph\n\n\
+Package: oldconfig\nArchitecture: all\nVersion: 0\nStatus: deinstall ok config-files\nDescription: kept config file\n\n";
+        let (bytes, removed) = project_status_without(status, "amd64", &["oldpkg".into()]).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].name, "oldpkg");
+        let parsed = package_index::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].field("Package"), Some("keeppkg"));
+        assert_eq!(parsed[0].field("Description"),
+            Some("remaining package\n.\nretained paragraph"));
+        assert_eq!(parsed[1].field("Status"), Some("deinstall ok config-files"));
+        assert!(project_status_without(status, "amd64",
+            &["oldpkg".into(), "oldpkg:amd64".into()]).is_err());
+        assert!(project_status_without(status, "amd64", &["oldconfig".into()]).is_err());
+        assert!(project_status_without(status, "amd64", &["oldpkg:i386".into()]).is_err());
+    }
+
+    #[test]
+    fn hypothetical_removal_rejects_protected_and_preexisting_reverse_breakage() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: oldpkg\n\n\
+Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let error = project_status_without(status, "amd64", &["oldpkg".into()])
+            .unwrap_err().to_string();
+        assert!(error.contains("hypothetical removals"), "{error}");
+        let held = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: hold ok installed\n\n";
+        assert!(project_status_without(held, "amd64", &["oldpkg".into()]).is_err());
+        let essential = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nEssential: yes\n\n";
+        assert!(project_status_without(essential, "amd64", &["oldpkg".into()]).is_err());
+    }
+
+    #[test]
+    fn combined_transition_removes_old_conflict_and_checks_original_state() {
+        let status = b"Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let mut new = signed_candidate("service", "2", "");
+        new.conflicts = "oldpkg".into();
+        let trusted = BTreeMap::from([(InstalledKey {
+            name: "service".into(), architecture: "amd64".into(),
+        }, new)]);
+        let steps = [upgrade_step("service", "2")];
+        let old = InstalledKey {
+            name: "oldpkg".into(), architecture: "amd64".into(),
+        };
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[]).is_err());
+        let ok = audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[old.clone()]).unwrap();
+        assert_eq!(ok.removed_binaries, 1);
+        assert_eq!(ok.installed_before, 2);
+        assert_eq!(ok.installed_after, 1);
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[old.clone(), old.clone()]).is_err());
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[InstalledKey {
+                name: "missing".into(), architecture: "amd64".into(),
+            }]).is_err());
+        assert!(audit_transition_with_removals(status, "amd64",
+            &steps, &trusted, &[InstalledKey {
+                name: "service".into(), architecture: "amd64".into(),
+            }]).is_err());
+    }
+
+    #[test]
+    fn combined_transition_rejects_broken_retained_dependency_after_removal() {
+        let status = b"Package: consumer\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: oldpkg\n\n\
+Package: oldpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n\
+Package: service\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
+        let old = InstalledKey { name: "oldpkg".into(), architecture: "amd64".into() };
+        assert!(audit_transition_with_removals(status, "amd64", &[],
+            &BTreeMap::new(), &[old]).unwrap_err().to_string().contains("consumer"));
+    }
+
+    #[test]
     fn snapshots_and_file_plans_match() {
         let status = b"Package: rootpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\nDepends: libpkg\n\nPackage: libpkg\nArchitecture: amd64\nVersion: 1\nStatus: install ok installed\n\n";
         let marked = b"Package: libpkg\nArchitecture: amd64\nAuto-Installed: 1\n\n";
