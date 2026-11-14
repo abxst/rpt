@@ -465,6 +465,17 @@ enum Command {
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Discover every eligible signed upgrade and prepare a bound, non-executable
+    /// intent for a marked disposable rootfs. Never touches the live host.
+    NativeRootfsPrepareSystemUpgrade {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long)] output: PathBuf,
+    },
     /// Apply signed install/upgrade to a marked disposable native rootfs, NEVER live /.
     NativeRootfsApplyTransaction {
         #[arg(long)] rootfs: PathBuf,
@@ -1057,6 +1068,17 @@ async fn execute(cli: Cli) -> Result<()> {
             tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
                 .context("writing native rootfs signed transaction intent")?;
             println!("Native disposable-rootfs transaction planned: {count} authenticated archives; no dpkg changes");
+        }
+        Command::NativeRootfsPrepareSystemUpgrade {
+            rootfs, cache, apt_root, architecture, max_roots, max_packages, output,
+        } => {
+            let intent = rpt::native_rootfs::prepare_system_upgrade(
+                &rootfs, &cache, &apt_root, &architecture, max_roots, max_packages,
+            ).context(ErrorCategory::System)?;
+            let count = intent.manifest.packages.len();
+            tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
+                .context("writing native rootfs system upgrade intent")?;
+            println!("Disposable rootfs signed system-upgrade intent: {count} archives; NO dpkg changes");
         }
         Command::NativeRootfsApplyTransaction {
             rootfs, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds,
