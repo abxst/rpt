@@ -865,6 +865,7 @@ impl Solver<'_> {
         // before committing it. Branch budgets are SHARED across attempts.
         let mut seen = BTreeSet::new();
         let mut ordinal = 0usize;
+        let mut last_failure = None;
         for requirement in group {
             let candidates = self.candidates_for_owner(owner, requirement)?;
             let multiple_virtual = candidates.len() > 1;
@@ -906,10 +907,15 @@ impl Solver<'_> {
                 let strict = branch.pre_depends_groups.get(owner)
                     .is_some_and(|count| index < *count);
                 if strict { branch.strict_pre_depends_depth += 1; }
-                let resolved = branch.resolve_concrete(&option, &actual).is_ok();
+                let resolved = branch.resolve_concrete(&option, &actual);
                 if strict { branch.strict_pre_depends_depth -= 1; }
-                if resolved
-                    && branch.resolve_groups(owner, groups, index + 1, soft).is_ok() {
+                let resolved = resolved.and_then(|()|
+                    branch.resolve_groups(owner, groups, index + 1, soft));
+                if let Err(error) = resolved {
+                    last_failure = Some(error);
+                    continue;
+                }
+                {
                     if multiple_virtual && chosen.is_some() {
                         bail!("ambiguous virtual package {}: multiple viable providers",
                             requirement.name);
@@ -926,6 +932,9 @@ impl Solver<'_> {
                 self.replay_trace = branch.replay_trace;
                 return Ok(());
             }
+        }
+        if let Some(error) = last_failure {
+            bail!("no viable dependency alternative after bounded ordered backtracking: {error:#}");
         }
         bail!("no viable dependency alternative after bounded ordered backtracking")
     }
