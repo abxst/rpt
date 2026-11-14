@@ -58,11 +58,31 @@ is bound to a signed candidate. This milestone deliberately does **not**
 implement implicit package removals, full-upgrade, host mutation or complete
 reverse dependency graph validation.
 
+The companion `rpt native-rootfs-prepare-system-upgrade` command runs this
+same signed upgrade discovery against the dpkg status of an **explicitly
+marked, disposable, off-host native rootfs**. It refuses `/`, an unmarked
+rootfs, a no-op upgrade set, and a changed dpkg status between discovery
+and the ordinary transaction intent. It reuses the existing
+`native-rootfs-prepare-transaction` format: exact signed archives, rootfs
+identity, original dpkg status SHA256, all selected steps, and the
+bound dependency closure. The existing `native-rootfs-apply-transaction`
+then rechecks those proofs and may execute dpkg only inside that guest.
+No automatic rollback or execution on the host is enabled.
+
 `tests/signed-multiarch-differential.sh` now contains a signed APT/RPT
 `apt-get -s upgrade` differential for two concurrent native upgrades, a
 held package whose repository candidate is newer, an installed-only
 package and a strict max-roots failure. A zero-installed-state no-op also
-must produce a non-executable empty report. A successful narrow fixture
+must produce a non-executable empty report.
+
+A second integrated CI fixture seeds a disposable native guest with
+version 1, publishes a signed version 2 with an added Pre-Depends, prepares
+the automatic upgrade intent, fetches both exact archives, applies them via
+real `dpkg --root`, and checks postflight package versions and journal.
+Re-running discovery after the upgrade must refuse an empty execution
+intent; attempting to target live `/` must be rejected. The test runner's
+host dpkg database is separately audited for changes.
+ A successful narrow fixture
 provides evidence only for parts of Gates C/D/H; the matrix above remains
 unchanged until full Ubuntu/Debian behavioral parity is demonstrated.
 
