@@ -917,6 +917,22 @@ pub fn preview_explicit_architecture(
     Ok(plan)
 }
 
+/// Resolve a foreign dependency to its real dpkg binary identity. A
+/// universal Architecture: all package is valid only when the foreign binary
+/// of the same name is absent; ambiguity remains fail-closed.
+fn foreign_dependency_identity(
+    catalog: &BTreeMap<PackageKey, PackageSummary>, name: &str, foreign: &str,
+) -> Result<Option<PackageKey>> {
+    let foreign_key = PackageKey { name: name.into(), architecture: foreign.into() };
+    let all_key = PackageKey { name: name.into(), architecture: "all".into() };
+    match (catalog.contains_key(&foreign_key), catalog.contains_key(&all_key)) {
+        (true, true) => bail!("ambiguous foreign/all dependency identity for {name}"),
+        (true, false) => Ok(Some(foreign_key)),
+        (false, true) => Ok(Some(all_key)),
+        (false, false) => Ok(None),
+    }
+}
+
 /// Policy-checked diagnostic for an explicit foreign-architecture request.
 /// Unlike the exploratory preview, this requires every staged version to be
 /// the APT-policy candidate from verified metadata for that exact architecture.
@@ -1513,6 +1529,27 @@ mod tests {
                 item("lib", "1", "")),
         ]);
         assert!(solve_catalog(&root, &installed, &BTreeMap::new(), "app", 20, "amd64").is_err());
+    }
+
+    #[test]
+    fn foreign_dependency_retains_all_identity_and_rejects_same_name_ambiguity() {
+        let mut all = item("toolkit", "1.0", "");
+        all.architecture = "all".into();
+        let mut entries = BTreeMap::from([(
+            PackageKey { name: "toolkit".into(), architecture: "all".into() }, all,
+        )]);
+        let key = foreign_dependency_identity(&entries, "toolkit", "i386").unwrap().unwrap();
+        assert_eq!(key.architecture, "all");
+        assert!(foreign_dependency_identity(&entries, "missing", "i386").unwrap().is_none());
+        let foreign = item("toolkit", "1.0", "");
+        entries.insert(
+            PackageKey {name: "toolkit".into(), architecture: "amd64".into()}, foreign.clone(),
+        );
+        assert_eq!(foreign_dependency_identity(&entries, "toolkit", "i386").unwrap().unwrap().architecture, "all");
+        let mut foreign = foreign;
+        foreign.architecture = "i386".into();
+        entries.insert(PackageKey { name: "toolkit".into(), architecture: "i386".into() }, foreign);
+        assert!(foreign_dependency_identity(&entries, "toolkit", "i386").is_err());
     }
 
     #[test]
