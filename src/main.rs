@@ -764,17 +764,17 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::PlanTransactionAudit { cache, status, apt_root, architecture, max_packages, packages } => {
-            let steps = rpt::install_plan::preview_many_with_policy_options(
-                &cache, &status, &apt_root, &packages, &architecture, max_packages,
-                include_recommends,
+            let steps = rpt::install_plan::preview_many_with_policy(
+                &cache, &status, &apt_root, &packages, &architecture, max_packages
             ).context(ErrorCategory::System)?;
             let report = rpt::transaction_plan_audit::classify(&steps)
                 .context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, include_recommends, packages } => {
-            let steps = rpt::install_plan::preview_many_with_policy(
-                &cache, &status, &apt_root, &packages, &architecture, max_packages
+            let steps = rpt::install_plan::preview_many_with_policy_options(
+                &cache, &status, &apt_root, &packages, &architecture, max_packages,
+                include_recommends,
             ).context(ErrorCategory::System)?;
             println!("RPT POLICY-VERIFIED JOINT READ-ONLY PLAN (NOT FULL APT PARITY)");
             for step in &steps {
