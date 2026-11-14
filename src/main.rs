@@ -466,6 +466,12 @@ enum Command {
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
     },
+    /// Read-only recovery diagnostics for a disposable rootfs and its journal.
+    /// Does not repair dpkg or authorize retry after interruption.
+    NativeRootfsRecoveryInspect {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] journal_dir: PathBuf,
+    },
     /// Execute conservative planned remove/purge on a disposable native rootfs only.
     NativeRootfsRemovePlanned {
         #[arg(long)] rootfs: PathBuf,
@@ -1025,6 +1031,11 @@ async fn execute(cli: Cli) -> Result<()> {
                 rpt::native_rootfs::ApplyOutcome::MarksOnly =>
                     println!("Native disposable-rootfs mark-only transaction verified and applied; no dpkg package changes, live host untouched."),
             }
+        }
+        Command::NativeRootfsRecoveryInspect { rootfs, journal_dir } => {
+            let report = rpt::native_rootfs::inspect_recovery(&rootfs, &journal_dir)
+                .await.context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::NativeRootfsRemovePlanned {
             rootfs, id, journal_dir, architecture, cascade, purge, timeout_seconds, packages,
