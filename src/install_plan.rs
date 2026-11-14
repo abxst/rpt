@@ -451,7 +451,7 @@ struct ReplayChoice {
     count: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ReplayRule {
     Exactly(usize),
     AtLeast(usize),
@@ -1387,8 +1387,11 @@ fn solve_catalog_many_options(
     // All retries share the same bounded search fuel, so revisiting earlier
     // choices never turns the 4,096-branch cap into an unbounded retry loop.
     let search_budget = Rc::new(Cell::new(4096));
-    let mut replay_rules = BTreeMap::<ReplayKey, ReplayRule>::new();
-    loop {
+    let mut pending = vec![BTreeMap::<ReplayKey, ReplayRule>::new()];
+    let mut examined = BTreeSet::new();
+    let mut first_error = None;
+    while let Some(replay_rules) = pending.pop() {
+    if !examined.insert(replay_rules.clone()) { continue; }
     if search_budget.get() == 0 {
         bail!("global dependency branch budget exhausted");
     }
@@ -1452,11 +1455,14 @@ fn solve_catalog_many_options(
     match attempt {
         Ok(()) => return Ok(solver.plan),
         Err(error) => {
-            // Retry the last committed alternative with another candidate.
-            // Pin earlier choices exactly, discard all later decisions and
-            // re-evaluate their entire dependent closure.
-            let mut retry = None;
-            for (index, decision) in solver.replay_trace.iter().enumerate().rev() {
+            if first_error.is_none() { first_error = Some(error); }
+            // Preserve ALL unexplored prefixes. A forced descendant may
+            // fail before committing any new trace; an earlier sibling
+            // must remain on the DFS frontier instead of being lost.
+            //
+            // Enqueue earlier decisions first, then deeper ones, so LIFO
+            // explores the deepest alternative before older siblings.
+            for (index, decision) in solver.replay_trace.iter().enumerate() {
                 if decision.choice + 1 >= decision.count { continue; }
                 let mut rules = BTreeMap::new();
                 for earlier in &solver.replay_trace[..index] {
@@ -1468,17 +1474,16 @@ fn solve_catalog_many_options(
                     decision.key.clone(),
                     ReplayRule::AtLeast(decision.choice + 1),
                 );
-                retry = Some(rules);
-                break;
-            }
-            if let Some(next) = retry {
-                replay_rules = next;
-            } else {
-                return Err(error);
+                if !examined.contains(&rules) {
+                    pending.push(rules);
+                }
             }
         }
     }
     }
+    Err(first_error.unwrap_or_else(|| anyhow::anyhow!(
+        "no viable bounded dependency assignment"
+    )))
 }
 
 /// Build a candidate-specific read-only catalog for the current dependency
