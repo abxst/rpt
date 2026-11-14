@@ -2614,6 +2614,101 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).is_err());
     }
     #[test]
+    fn foreign_virtual_provider_requires_signed_multiarch_contract() {
+        let mut app = item("cross-virtual-app", "1", "foreign-cap (>= 7)");
+        app.architecture = "i386".into();
+        let mut impl_native = item("host-virtual-impl", "1", "host-leaf");
+        impl_native.multi_arch = "foreign".into();
+        impl_native.provides = "foreign-cap (= 7)".into();
+        let leaf = item("host-leaf", "2", "");
+        let mut decoy = item("i386-decoy", "99", "");
+        decoy.architecture = "i386".into();
+        decoy.provides = "foreign-cap (= 6)".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "cross-virtual-app".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-virtual-impl".into(), architecture: "amd64".into() }, impl_native),
+            (PackageKey { name: "host-leaf".into(), architecture: "amd64".into() }, leaf),
+            (PackageKey { name: "i386-decoy".into(), architecture: "i386".into() }, decoy),
+        ]);
+        let run = |entries: &BTreeMap<PackageKey, PackageSummary>| {
+            solve_catalog_foreign(entries, &BTreeMap::new(), &BTreeMap::new(),
+                "cross-virtual-app:i386", 20, ("i386", "amd64"), &BTreeMap::new())
+        };
+        let planned = run(&catalog).unwrap();
+        assert_eq!(planned.iter().map(|step| (step.package.as_str(), step.architecture.as_str()))
+            .collect::<Vec<_>>(), [
+                ("host-leaf", "amd64"), ("host-virtual-impl", "amd64"),
+                ("cross-virtual-app", "i386"),
+            ]);
+        let provider = PackageKey { name: "host-virtual-impl".into(), architecture: "amd64".into() };
+        catalog.get_mut(&provider).unwrap().multi_arch = "no".into();
+        assert!(run(&catalog).is_err());
+        catalog.get_mut(&provider).unwrap().multi_arch = "allowed".into();
+        assert!(run(&catalog).is_err());
+        catalog.get_mut(&provider).unwrap().multi_arch = "foreign".into();
+        catalog.get_mut(&provider).unwrap().provides = "foreign-cap (= 6)".into();
+        assert!(run(&catalog).is_err());
+    }
+
+    #[test]
+    fn foreign_any_virtual_provider_requires_multiarch_allowed() {
+        let mut app = item("cross-any-app", "1", "interpreter-cap:any (>= 7)");
+        app.architecture = "i386".into();
+        let mut impl_native = item("host-interpreter-impl", "1", "");
+        impl_native.multi_arch = "allowed".into();
+        impl_native.provides = "interpreter-cap (= 7)".into();
+        let provider = PackageKey {
+            name: "host-interpreter-impl".into(), architecture: "amd64".into(),
+        };
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "cross-any-app".into(), architecture: "i386".into() }, app),
+            (provider.clone(), impl_native),
+        ]);
+        let run = |entries: &BTreeMap<PackageKey, PackageSummary>| {
+            solve_catalog_foreign(entries, &BTreeMap::new(), &BTreeMap::new(),
+                "cross-any-app:i386", 20, ("i386", "amd64"), &BTreeMap::new())
+        };
+        let plan = run(&catalog).unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["host-interpreter-impl", "cross-any-app"]);
+        catalog.get_mut(&provider).unwrap().multi_arch = "foreign".into();
+        assert!(run(&catalog).is_err());
+        catalog.get_mut(&provider).unwrap().multi_arch = "no".into();
+        assert!(run(&catalog).is_err());
+    }
+
+    #[test]
+    fn foreign_installed_virtual_uses_exact_native_provides_and_multiarch() {
+        let mut app = item("foreign-status-app", "1", "host-virtual-cap (>= 7)");
+        app.architecture = "i386".into();
+        let catalog = BTreeMap::from([(
+            PackageKey { name: "foreign-status-app".into(), architecture: "i386".into() }, app,
+        )]);
+        let id = cache_query::InstalledKey {
+            name: "status-provider".into(), architecture: "amd64".into(),
+        };
+        let mut installed = BTreeMap::from([(
+            id.clone(), InstalledRelations {
+                version: "1".into(), provides: "host-virtual-cap (= 7)".into(),
+                multi_arch: "foreign".into(), ..Default::default()
+            },
+        )]);
+        let run = |status: &BTreeMap<cache_query::InstalledKey, InstalledRelations>| {
+            solve_catalog_foreign(&catalog, &BTreeMap::new(), &BTreeMap::new(),
+                "foreign-status-app:i386", 20, ("i386", "amd64"), status)
+        };
+        assert_eq!(run(&installed).unwrap().iter().map(|p| p.package.as_str())
+            .collect::<Vec<_>>(), ["foreign-status-app"]);
+        installed.get_mut(&id).unwrap().multi_arch = "no".into();
+        assert!(run(&installed).is_err());
+        installed.get_mut(&id).unwrap().multi_arch = "allowed".into();
+        assert!(run(&installed).is_err());
+        installed.get_mut(&id).unwrap().multi_arch = "foreign".into();
+        installed.get_mut(&id).unwrap().provides = "host-virtual-cap (= 6)".into();
+        assert!(run(&installed).is_err());
+    }
+
+    #[test]
     fn foreign_native_virtual_provider_uses_native_capability_version() {
         let mut app = item("foreign-app", "1", "host-tool");
         app.architecture = "i386".into();
