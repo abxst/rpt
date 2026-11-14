@@ -979,7 +979,8 @@ pub fn preview_explicit_architecture_with_policy(
     }
     let root_origins = crate::package_provenance::verified_version_origins(
         cache, &parsed.name, foreign_architecture,
-    )?;
+    )?.into_iter().filter(|origin| origin.architecture == foreign_architecture)
+        .collect::<Vec<_>>();
     let root_candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
         &parsed.name, &root_origins, &preferences,
         installed.get(&root_key).map(String::as_str), target_release.as_deref(), None,
@@ -998,38 +999,37 @@ pub fn preview_explicit_architecture_with_policy(
     // gets replaced with the verified policy candidate, then re-solved.
     // A bounded fixed point prevents cycles or endlessly changing closures.
     let mut validated = BTreeSet::new();
-    validated.insert(parsed.name.clone());
+    validated.insert(root_key.clone());
     let mut roots = BTreeSet::new();
-    roots.insert(parsed.name.clone());
+    roots.insert(root_key);
     for _ in 0..16 {
         let mut changed = false;
-        for name in &roots {
-            if validated.contains(name) { continue; }
-            let key = PackageKey {
-                name: name.clone(), architecture: foreign_architecture.to_owned(),
-            };
-            if !catalog.contains_key(&key) {
-                bail!("foreign dependency {}:{} has no exact-architecture metadata",
-                    name, foreign_architecture);
+        for key in &roots {
+            if validated.contains(key) { continue; }
+            if !catalog.contains_key(key) {
+                bail!("foreign dependency {}:{} has no architecture-qualified metadata",
+                    key.name, key.architecture);
             }
             let origins = crate::package_provenance::verified_version_origins(
-                cache, name, foreign_architecture,
-            )?;
+                cache, &key.name, foreign_architecture,
+            )?.into_iter().filter(|origin| origin.architecture == key.architecture)
+                .collect::<Vec<_>>();
             let candidate = crate::apt_pin_eval::preview_candidate_with_phasing(
-                name, &origins, &preferences,
-                installed.get(&key).map(String::as_str), target_release.as_deref(), None,
+                &key.name, &origins, &preferences,
+                installed.get(key).map(String::as_str), target_release.as_deref(), None,
             )?.candidate.with_context(|| format!(
-                "APT policy has no candidate for foreign dependency {}:{}", name, foreign_architecture,
+                "APT policy has no candidate for foreign dependency {}:{}",
+                key.name, key.architecture,
             ))?;
             let summary = metadata_query::verified_exact_version(
-                cache, foreign_architecture, name, &candidate, &origins,
+                cache, &key.architecture, &key.name, &candidate, &origins,
             )?;
-            if summary.architecture != foreign_architecture {
-                bail!("foreign dependency candidate has incorrect architecture");
+            if summary.architecture != key.architecture {
+                bail!("foreign dependency candidate has incorrect binary architecture");
             }
-            if catalog.get(&key) != Some(&summary) { changed = true; }
-            catalog.insert(key, summary);
-            validated.insert(name.clone());
+            if catalog.get(key) != Some(&summary) { changed = true; }
+            catalog.insert(key.clone(), summary);
+            validated.insert(key.clone());
         }
         // Discover mandatory concrete dependencies of the policy-selected
         // packages before solving; otherwise a newer, unpinned dependency
