@@ -28,6 +28,11 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   the original full dpkg state, creates a private hypothetical removal
   projection, resolves all eligible upgrades under signed candidate policy,
   and checks the combined final state. NOT automatic dist-upgrade or dpkg execution.
+- Bounded **automatic full-upgrade removal proposals** using signed candidate
+  Conflicts/Breaks and installed reverse Conflicts/Breaks
+  (`plan-auto-full-upgrade`): finds the unique minimum-cardinality valid
+  removal set, or refuses an ambiguous/unsafe result. No host or guest dpkg
+  execution; not complete APT dist-upgrade ranking parity.
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
