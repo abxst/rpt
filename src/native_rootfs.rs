@@ -35,7 +35,7 @@ pub(crate) fn rootfs(path: &Path) -> Result<PathBuf> {
     }
     Ok(root)
 }
-fn root_identity(root: &Path) -> String { format!("native-rootfs:{}", root.display()) }
+pub(crate) fn root_identity(root: &Path) -> String { format!("native-rootfs:{}", root.display()) }
 pub(crate) fn status(root: &Path) -> Result<Vec<u8>> {
     let path = root.join("var/lib/dpkg/status");
     if !fs::symlink_metadata(&path)?.file_type().is_file() { bail!("dpkg status must be a regular file"); }
@@ -105,7 +105,7 @@ pub async fn inspect_recovery(root: &Path, journal: &Path) -> Result<NativeRecov
 /// Installed user roots must become manual, and only newly installed
 /// dependency archives become automatic. Never relabel an existing dependency:
 /// it may have been explicitly installed by an operator before this transaction.
-fn install_mark_targets(requested: &[String], steps: &[install_plan::PlanStep])
+pub(crate) fn install_mark_targets(requested: &[String], steps: &[install_plan::PlanStep])
     -> (Vec<String>, Vec<String>) {
     let roots = requested.iter().cloned().collect::<BTreeSet<_>>();
     let automatic = steps.iter().filter(|step|
@@ -129,7 +129,7 @@ pub(crate) fn mark_state_digest(root: &Path) -> Result<String> {
 /// Explicit pre-transaction checkpoint. It is deliberately opt-in and never
 /// performs automatic rollback. If guest state differs from the plan that was
 /// already checked, refuse to start dpkg and retain the checkpoint as evidence.
-fn checkpoint_before(root: &Path, journal: &Path, id: &str,
+pub(crate) fn checkpoint_before(root: &Path, journal: &Path, id: &str,
     destination: Option<&Path>, status_before: &[u8], marks_before: Option<&str>)
     -> Result<()> {
     let Some(destination) = destination else { return Ok(()); };
@@ -145,7 +145,7 @@ fn checkpoint_before(root: &Path, journal: &Path, id: &str,
     Ok(())
 }
 
-fn write_mark_targets(path: &Path, targets: &[String]) -> Result<()> {
+pub(crate) fn write_mark_targets(path: &Path, targets: &[String]) -> Result<()> {
     let mut contents = String::new();
     for package in targets {
         // apt-mark arguments come from the verified solver, but the staged
@@ -213,7 +213,7 @@ pub fn prepare_system_upgrade(
     Ok(bound)
 }
 
-const INSTALL_SCRIPT: &str = r#"set -eu
+pub(crate) const INSTALL_SCRIPT: &str = r#"set -eu
 root="$1"; expected="$2"; stage="$3"; expected_marks="$4"; shift 4
 test -f "$root/.rpt-disposable-rootfs"
 test "$(cat "$root/.rpt-disposable-rootfs")" = "rpt-disposable-rootfs-v1"
@@ -242,6 +242,41 @@ while IFS="$tab" read -r file package version arch; do
         echo "archive control mismatches signed plan" >&2; exit 1
     fi
 done < "$stage/expected.tsv"
+# A combined native-rootfs transaction provides a locked, strictly validated
+# removal TSV. A subshell protects the original signed archive argv, so all
+# operations run under ONE durable journal and process-supervised command.
+# No ordinary install/upgrader supplies this file.
+if [ -f "$stage/removals.tsv" ]; then
+    (
+        set --
+        while IFS="$tab" read -r package version arch; do
+            actual="$(dpkg-query --admindir="$root/var/lib/dpkg" -W \
+                '-f=${Status}|${Version}|${Architecture}' "$package")"
+            if [ "$actual" != "install ok installed|$version|$arch" ]; then
+                echo "combined removal package changed since signed plan: $package" >&2
+                exit 1
+            fi
+            set -- "$@" "$package"
+        done < "$stage/removals.tsv"
+        if [ "$#" -eq 0 ] || [ "$#" -gt 32 ]; then
+            echo "invalid combined removal closure" >&2; exit 1
+        fi
+        dpkg --root="$root" --remove -- "$@"
+        for package in "$@"; do
+            state="$(dpkg-query --admindir="$root/var/lib/dpkg" \
+                -W '-f=${Status}' "$package" 2>/dev/null)" || state=""
+            if [ "$state" = 'install ok installed' ] || \
+               [ "$state" = 'hold ok installed' ]; then
+                echo "combined removal was not completed: $package" >&2
+                exit 1
+            fi
+        done
+        if [ -n "$(dpkg --root="$root" --audit)" ]; then
+            echo "combined removal left dpkg in an incomplete state" >&2
+            exit 1
+        fi
+    )
+fi
 # If the verified plan has no .deb archives, this is an APT mark-only
 # transaction: never trigger dpkg configure/pending or any maintainer script.
 if [ "$#" -gt 0 ]; then
@@ -260,6 +295,24 @@ while IFS="$tab" read -r file package version arch; do
         echo "rootfs postflight version mismatch: $package" >&2; exit 1
     fi
 done < "$stage/expected.tsv"
+# Full installed-state postflight: a signed combined transaction may not
+# silently delete or change an unrelated installed binary. The expected
+# inventory was constructed from the bound original dpkg status plus all
+# selected removals and signed installed/upgrade identities.
+if [ -f "$stage/expected-installed.tsv" ]; then
+    dpkg-query --admindir="$root/var/lib/dpkg" \
+        -W '-f=${Package}\t${Architecture}\t${Version}\t${Status}\n' |
+        awk -F "$(printf '\t')" '
+            $4 == "install ok installed" || $4 == "hold ok installed" {
+                print $1 "\t" $2 "\t" $3
+            }' | LC_ALL=C sort > "$stage/actual-installed.tsv"
+    LC_ALL=C sort "$stage/expected-installed.tsv" > "$stage/expected-sorted.tsv"
+    if ! cmp -s "$stage/expected-sorted.tsv" "$stage/actual-installed.tsv"; then
+        echo "combined postflight installed package inventory differs from plan" >&2
+        diff -u "$stage/expected-sorted.tsv" "$stage/actual-installed.tsv" >&2 || :
+        exit 1
+    fi
+fi
 
 # Mark only newly installed dependency archives as automatic. Existing
 # dependencies keep their previous marks, including manual state. Explicit
