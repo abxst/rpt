@@ -192,8 +192,6 @@ Filename: pool/rpt-alpha_1.0_all.deb
 Size: 1
 Description: second declared dependency but alphabetically first
 
-# Joint-root lookahead: a preferred dependency conflicts with the second
-# explicitly requested root, but the second alternative is installable.
 Package: rpt-joint-app
 Version: 1.0
 Architecture: all
