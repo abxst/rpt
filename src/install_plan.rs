@@ -2392,6 +2392,68 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
     }
 
     #[test]
+    fn global_replay_backtracks_across_later_roots_transitive_dependencies() {
+        let mut preferred = item("preferred", "1", "");
+        preferred.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "preferred | fallback")),
+            ("preferred".into(), preferred),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        // The first root does not conflict directly with second. Only after
+        // second's transitive blocker is selected is the earlier decision bad.
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["fallback", "first", "blocker", "second"]);
+        let reverse = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["second".into(), "first".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(reverse.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["blocker", "second", "fallback", "first"]);
+    }
+
+    #[test]
+    fn global_replay_backtracks_inside_nested_dependency_closure() {
+        let mut preferred = item("preferred", "1", "");
+        preferred.breaks = "blocker (>= 2)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "intermediate")),
+            ("intermediate".into(), item("intermediate", "1", "preferred | fallback")),
+            ("preferred".into(), preferred),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "2", "")),
+        ]));
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["fallback", "intermediate", "first", "blocker", "second"]);
+    }
+
+    #[test]
+    fn global_replay_never_skips_required_root_or_unsafe_replaces() {
+        let mut preferred = item("preferred", "1", "");
+        preferred.replaces = "blocker".into();
+        let mut fallback = item("fallback", "1", "");
+        fallback.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "preferred | fallback")),
+            ("preferred".into(), preferred),
+            ("fallback".into(), fallback),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        assert!(solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()],
+            25, "amd64").is_err());
+    }
+
+    #[test]
     fn backtracks_failed_branch_and_restores_full_partial_plan() {
         let catalog = BTreeMap::from([
             ("app".into(), item("app", "1", "bad | good")),
