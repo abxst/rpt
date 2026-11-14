@@ -482,6 +482,56 @@ fn installed_native_satisfies_native(
         && satisfies(&status.version, required)?)
 }
 
+/// Only a *native* installed binary may satisfy the virtual Depends of
+/// a newly staged native binary in the foreign-policy preview. Installed
+/// status is the evidence: a repository's current Provides must not be
+/// substituted for the capability of an older configured version.
+fn installed_native_virtual_satisfies(
+    installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    required: &Requirement, native_arch: &str,
+) -> Result<bool> {
+    if required.any_arch || required.requested_arch.is_some() {
+        return Ok(false);
+    }
+    for (key, status) in installed {
+        if key.architecture != native_arch { continue; }
+        for capability in provides_fields(&key.name, &status.provides)? {
+            if capability_satisfies(&capability, required)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// A native package's virtual Depends may select a native provider from a
+/// signed Packages index. Never substitute an i386 provider just because its
+/// Provides version happens to be higher. Each chosen provider must be
+/// validated again by policy and signed provenance in the outer fixed point.
+fn native_virtual_candidates(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    required: &Requirement, native_arch: &str,
+) -> Result<Vec<PackageKey>> {
+    if required.any_arch || required.requested_arch.is_some() {
+        return Ok(Vec::new());
+    }
+    let mut providers = Vec::new();
+    for (key, item) in catalog {
+        if key.architecture != native_arch { continue; }
+        for capability in provides(item)? {
+            if capability_satisfies(&capability, required)? {
+                providers.push(key.clone());
+                break;
+            }
+        }
+        if providers.len() > 32 {
+            bail!("native virtual package {} exceeds bounded provider search (32)",
+                required.name);
+        }
+    }
+    Ok(providers)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ReplayKey {
     owner: PackageKey,
@@ -707,8 +757,8 @@ impl Solver<'_> {
 
     /// A native package selected by a foreign binary owns its next dependency
     /// group. Resolve that group only in native scope; a same-named i386
-    /// binary cannot satisfy an amd64 package's Depends. Virtual and all
-    /// substitutions across that nested boundary remain fail-closed.
+    /// binary cannot satisfy an amd64 package's Depends. Native virtual
+    /// Provides are allowed, but foreign virtual substitutions are not.
     fn candidates_for_owner(
         &self, owner: &PackageKey, required: &Requirement,
     ) -> Result<Vec<PackageKey>> {
@@ -739,14 +789,18 @@ impl Solver<'_> {
                 let universal = PackageKey {
                     name: required.name.clone(), architecture: "all".into(),
                 };
-                return Ok(match self.catalog.get(&universal) {
-                    Some(item) if item.multi_arch == "foreign"
+                if let Some(item) = self.catalog.get(&universal) {
+                    return Ok(if item.multi_arch == "foreign"
                         && !required.any_arch
                         && item.depends.trim().is_empty()
                         && item.pre_depends.trim().is_empty()
-                        && satisfies(&item.version, required)? => vec![universal],
-                    _ => Vec::new(),
-                });
+                        && satisfies(&item.version, required)? {
+                            vec![universal]
+                        } else {
+                            Vec::new()
+                        });
+                }
+                return native_virtual_candidates(self.catalog, required, native_arch);
             }
         }
         self.concrete_candidates(required)
@@ -796,11 +850,13 @@ impl Solver<'_> {
                 if owner.architecture == native_arch {
                     if installed_native_satisfies_native(
                         native_relations, alternative, native_arch,
+                    )? || installed_native_virtual_satisfies(
+                        native_relations, alternative, native_arch,
                     )? {
                         return self.resolve_groups(owner, groups, index + 1, soft);
                     }
-                    // Never use a foreign/all installed package or a virtual
-                    // provider as an implicit native dependency satisfier.
+                    // Foreign/Architecture: all providers are not implied
+                    // by a native dependency of a foreign-package plan.
                     continue;
                 }
             }
@@ -1501,6 +1557,8 @@ pub fn preview_explicit_architecture_with_policy(
                     if owner_arch == native_architecture {
                         if installed_native_satisfies_native(
                             &relations, dep, native_architecture,
+                        )? || installed_native_virtual_satisfies(
+                            &relations, dep, native_architecture,
                         )? {
                             continue;
                         }
@@ -1519,6 +1577,15 @@ pub fn preview_explicit_architecture_with_policy(
                                 && item.pre_depends.trim().is_empty()
                                 && !dep.any_arch) {
                                 mandatory.insert(universal);
+                            } else if !catalog.contains_key(&universal) {
+                                // Concrete native virtual providers need
+                                // their OWN signed candidate policy applied
+                                // before the solver may return a plan.
+                                for provider in native_virtual_candidates(
+                                    &catalog, dep, native_architecture,
+                                )? {
+                                    mandatory.insert(provider);
+                                }
                             }
                         }
                         continue;
