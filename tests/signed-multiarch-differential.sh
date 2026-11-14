@@ -31,6 +31,22 @@ Filename: pool/rpt-common-data_1.0_all.deb
 Size: 1
 Description: architecture independent dependency of i386 binary
 
+Package: rpt-new-native-leaf
+Version: 2.0
+Architecture: amd64
+Multi-Arch: foreign
+Filename: pool/rpt-new-native-leaf_2.0_amd64.deb
+Size: 1
+Description: new native leaf for foreign unqualified dependency
+
+Package: rpt-new-allowed-leaf
+Version: 2.0
+Architecture: amd64
+Multi-Arch: allowed
+Filename: pool/rpt-new-allowed-leaf_2.0_amd64.deb
+Size: 1
+Description: new native leaf for foreign any dependency
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
@@ -63,6 +79,22 @@ Depends: rpt-host-interpreter:any (>= 2.0)
 Filename: pool/rpt-host-interpreter-user_1.0_i386.deb
 Size: 1
 Description: foreign app satisfied by installed native allowed interpreter
+
+Package: rpt-new-native-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-new-native-leaf (>= 2.0)
+Filename: pool/rpt-new-native-user_1.0_i386.deb
+Size: 1
+Description: foreign user of a new native leaf
+
+Package: rpt-new-allowed-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-new-allowed-leaf:any (>= 2.0)
+Filename: pool/rpt-new-allowed-user_1.0_i386.deb
+Size: 1
+Description: foreign user of a new native allowed leaf
 
 Package: rpt-pair
 Version: 1.0
@@ -166,11 +198,35 @@ compare_plan() {
   sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-$label" | LC_ALL=C sort -u \
     >"$root/apt-$label-selected"
   sed -nE 's/^  ([^ ]+) ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-$label" |
-    sed -E 's/:all ([^ ]+)$/ \1/' | LC_ALL=C sort -u \
+    sed -E 's/:(all|amd64) ([^ ]+)$/ \2/' | LC_ALL=C sort -u \
     >"$root/rpt-$label-selected"
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
 }
+compare_plan new-native "$root/empty-status" rpt-new-native-user:i386
+compare_plan new-allowed "$root/empty-status" rpt-new-allowed-user:i386
+grep -Fxq 'rpt-new-native-leaf 2.0' "$root/rpt-new-native-selected"
+grep -Fxq 'rpt-new-allowed-leaf 2.0' "$root/rpt-new-allowed-selected"
+grep -Fq 'rpt-new-native-leaf:amd64 2.0' "$root/rpt-new-native"
+grep -Fq 'rpt-new-allowed-leaf:amd64 2.0' "$root/rpt-new-allowed"
+test "$(wc -l <"$root/rpt-new-native-selected")" -eq 2
+test "$(wc -l <"$root/rpt-new-allowed-selected")" -eq 2
+# An installed native version mismatch requires an unsupported native upgrade.
+cat >"$root/native-leaf-outdated" <<'EOF'
+Package: rpt-new-native-leaf
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Multi-Arch: foreign
+Description: installed native old version
+
+EOF
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/native-leaf-outdated" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-new-native-user:i386 >"$root/native-leaf-outdated.log" 2>&1; then
+  echo 'RPT incorrectly allowed an implicit native dependency upgrade' >&2; exit 1
+fi
 compare_plan foreign "$root/empty-status" rpt-foreign-app:i386
 grep -Fxq 'rpt-foreign-app:i386 1.0' "$root/rpt-foreign-selected"
 grep -Fxq 'rpt-foreign-lib:i386 1.0' "$root/rpt-foreign-selected"
@@ -231,4 +287,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS authenticated APT/RPT Multi-Arch dependencies, installed native foreign/allowed, coinstall and tamper refusal'
+echo 'PASS authenticated APT/RPT Multi-Arch new native leaves, installed providers, coinstall and tamper refusal'
