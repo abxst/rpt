@@ -761,12 +761,13 @@ impl Solver<'_> {
         }
         if let Some(key) = self.key_for(&required.name)? {
             let real = &self.catalog[&key];
-            if required.any_arch && real.multi_arch != "allowed" {
-                return Ok(Vec::new());
+            if (!required.any_arch || real.multi_arch == "allowed")
+                && satisfies(&real.version, required)? {
+                return Ok(vec![key]);
             }
-            return Ok(if satisfies(&real.version, required)? {
-                vec![key]
-            } else { Vec::new() });
+            // Debian Policy 7.5 permits a different real binary to provide
+            // this same virtual name. A mismatched concrete candidate is not
+            // evidence that all valid virtual providers are impossible.
         }
         // Exact signed native leaf candidates can resolve foreign Depends.
         // Native-only planning is unchanged; upgrading an already-installed
@@ -841,14 +842,16 @@ impl Solver<'_> {
                 let status_key = cache_query::InstalledKey {
                     name: key.name.clone(), architecture: key.architecture.clone(),
                 };
-                // A pre-existing but inadequate native binary must NOT be
-                // replaced by a foreign-root-driven implicit upgrade.
-                if installed.contains_key(&status_key) {
-                    return Ok(Vec::new());
-                }
-                if let Some(item) = self.catalog.get(&key) {
-                    return Ok(if (!required.any_arch || item.multi_arch == "allowed")
-                        && satisfies(&item.version, required)? { vec![key] } else { Vec::new() });
+                // A pre-existing native binary must NOT be upgraded by a
+                // foreign-root-driven plan. However an unrelated, eligible
+                // virtual provider may still satisfy the requested name.
+                if !installed.contains_key(&status_key) {
+                    if let Some(item) = self.catalog.get(&key) {
+                        if (!required.any_arch || item.multi_arch == "allowed")
+                            && satisfies(&item.version, required)? {
+                            return Ok(vec![key]);
+                        }
+                    }
                 }
                 // A signed Architecture: all leaf is also a valid dependency
                 // identity for a native owner. Require Multi-Arch: foreign
@@ -857,15 +860,13 @@ impl Solver<'_> {
                     name: required.name.clone(), architecture: "all".into(),
                 };
                 if let Some(item) = self.catalog.get(&universal) {
-                    return Ok(if item.multi_arch == "foreign"
+                    if item.multi_arch == "foreign"
                         && !required.any_arch
                         && item.depends.trim().is_empty()
                         && item.pre_depends.trim().is_empty()
                         && satisfies(&item.version, required)? {
-                            vec![universal]
-                        } else {
-                            Vec::new()
-                        });
+                        return Ok(vec![universal]);
+                    }
                 }
                 return native_virtual_candidates(self.catalog, required, native_arch);
             }
@@ -1333,6 +1334,51 @@ fn reject_foreign_negative_relations_with_native(
     architecture: &str,
     native_architecture: Option<&str>,
 ) -> Result<()> {
+    // Validate all newly staged binary pairs, even when neither was present
+    // in installed dpkg state. This is the final invariant after bounded
+    // alternative selection; do not rely only on solver-local checks.
+    let mut staged_identities = BTreeSet::new();
+    for (index, left) in plan.iter().enumerate() {
+        let left_key = PackageKey {
+            name: left.package.clone(), architecture: left.architecture.clone(),
+        };
+        if !staged_identities.insert(left_key.clone()) {
+            bail!("duplicate staged binary identity {}:{}", left.package, left.architecture);
+        }
+        let left_pkg = catalog.get(&left_key)
+            .context("left staged binary has no authenticated catalog metadata")?;
+        if left_pkg.version != left.version {
+            bail!("staged package/version mismatch for {}:{}", left.package, left.architecture);
+        }
+        for right in plan.iter().skip(index + 1) {
+            let right_key = PackageKey {
+                name: right.package.clone(), architecture: right.architecture.clone(),
+            };
+            let right_pkg = catalog.get(&right_key)
+                .context("right staged binary has no authenticated catalog metadata")?;
+            if right_pkg.version != right.version {
+                bail!("staged package/version mismatch for {}:{}", right.package, right.architecture);
+            }
+            if left_key == right_key {
+                bail!("duplicate staged binary identity {}:{}", left.package, left.architecture);
+            }
+            if left_key.name == right_key.name {
+                validate_multiarch_same_pair(left_pkg, right_pkg)?;
+            }
+            if relations_hit(&left_pkg.conflicts, &right.package, &right.version, &right_pkg.provides)?
+                || relations_hit(&left_pkg.breaks, &right.package, &right.version, &right_pkg.provides)?
+                || relations_hit(&right_pkg.conflicts, &left.package, &left.version, &left_pkg.provides)?
+                || relations_hit(&right_pkg.breaks, &left.package, &left.version, &left_pkg.provides)? {
+                bail!("Conflicts/Breaks between staged {}:{} and {}:{}",
+                    left.package, left.architecture, right.package, right.architecture);
+            }
+            if replaces_hit(&left_pkg.replaces, &right.package, &right.version)?
+                || replaces_hit(&right_pkg.replaces, &left.package, &left.version)? {
+                bail!("Replaces between staged {}:{} and {}:{} requires file ownership verification",
+                    left.package, left.architecture, right.package, right.architecture);
+            }
+        }
+    }
     for step in plan {
         let native_step = native_architecture == Some(step.architecture.as_str());
         if step.architecture != architecture && step.architecture != "all" && !native_step {
@@ -2706,6 +2752,67 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         installed.get_mut(&id).unwrap().multi_arch = "foreign".into();
         installed.get_mut(&id).unwrap().provides = "host-virtual-cap (= 6)".into();
         assert!(run(&installed).is_err());
+    }
+
+    #[test]
+    fn native_concrete_version_mismatch_falls_back_to_versioned_virtual_provides() {
+        let mut app = item("provider-consumer", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "1", "capability (>= 7)");
+        tool.multi_arch = "foreign".into();
+        let old = item("capability", "1", "");
+        let mut replacement = item("new-capability", "3", "");
+        replacement.provides = "capability (= 7)".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "provider-consumer".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "capability".into(), architecture: "amd64".into() }, old),
+            (PackageKey { name: "new-capability".into(), architecture: "amd64".into() }, replacement),
+        ]);
+        let run = |catalog: &BTreeMap<PackageKey, PackageSummary>| {
+            solve_catalog_foreign(catalog, &BTreeMap::new(), &BTreeMap::new(),
+                "provider-consumer:i386", 20, ("i386", "amd64"), &BTreeMap::new())
+        };
+        let plan = run(&catalog).unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["new-capability", "host-tool", "provider-consumer"]);
+        catalog.get_mut(&PackageKey {
+            name: "new-capability".into(), architecture: "amd64".into(),
+        }).unwrap().provides = "capability (= 6)".into();
+        assert!(run(&catalog).is_err());
+    }
+
+    #[test]
+    fn foreign_final_guard_rejects_cross_arch_staged_conflicts_and_replaces() {
+        let mut foreign = item("foreign-pkg", "1", "");
+        foreign.architecture = "i386".into();
+        let mut native = item("native-pkg", "1", "");
+        native.conflicts = "foreign-pkg".into();
+        let foreign_key = PackageKey {
+            name: "foreign-pkg".into(), architecture: "i386".into(),
+        };
+        let native_key = PackageKey {
+            name: "native-pkg".into(), architecture: "amd64".into(),
+        };
+        let mut catalog = BTreeMap::from([
+            (foreign_key, foreign), (native_key.clone(), native),
+        ]);
+        let plan = vec![
+            PlanStep { package: "foreign-pkg".into(), version: "1".into(),
+                architecture: "i386".into(), installed: None },
+            PlanStep { package: "native-pkg".into(), version: "1".into(),
+                architecture: "amd64".into(), installed: None },
+        ];
+        let validate = |catalog: &BTreeMap<PackageKey, PackageSummary>| {
+            reject_foreign_negative_relations_with_native(catalog, &BTreeMap::new(),
+                &plan, "i386", Some("amd64"))
+        };
+        assert!(validate(&catalog).is_err());
+        catalog.get_mut(&native_key).unwrap().conflicts.clear();
+        catalog.get_mut(&native_key).unwrap().replaces = "foreign-pkg".into();
+        assert!(validate(&catalog).is_err());
+        catalog.get_mut(&native_key).unwrap().replaces.clear();
+        assert!(validate(&catalog).is_ok());
     }
 
     #[test]

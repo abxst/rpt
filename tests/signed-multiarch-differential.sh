@@ -164,6 +164,30 @@ Filename: pool/rpt-cross-any-provider_1.0_amd64.deb
 Size: 1
 Description: signed allowed native provider for foreign any virtual dependency
 
+Package: rpt-fallback-cap
+Version: 1.0
+Architecture: amd64
+Filename: pool/rpt-fallback-cap_1.0_amd64.deb
+Size: 1
+Description: mismatched real package is not an eligible dependency
+
+Package: rpt-fallback-provider
+Version: 3.0
+Architecture: amd64
+Provides: rpt-fallback-cap (= 7.0)
+Filename: pool/rpt-fallback-provider_3.0_amd64.deb
+Size: 1
+Description: signed native versioned virtual capability
+
+Package: rpt-fallback-tool
+Version: 1.0
+Architecture: amd64
+Multi-Arch: foreign
+Depends: rpt-fallback-cap (>= 7.0)
+Filename: pool/rpt-fallback-tool_1.0_amd64.deb
+Size: 1
+Description: foreign-compatible tool with versioned virtual Depends
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
@@ -308,6 +332,14 @@ Filename: pool/rpt-cross-virtual-decoy_99.0_i386.deb
 Size: 1
 Description: version insufficient i386 virtual provider must not match
 
+Package: rpt-fallback-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-fallback-tool
+Filename: pool/rpt-fallback-user_1.0_i386.deb
+Size: 1
+Description: foreign app selecting native versioned virtual provider despite real-name mismatch
+
 Package: rpt-pair
 Version: 1.0
 Architecture: i386
@@ -415,6 +447,12 @@ compare_plan() {
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
 }
+compare_plan real-virtual-fallback "$root/empty-status" rpt-fallback-user:i386
+grep -Fxq 'rpt-fallback-user:i386 1.0' "$root/rpt-real-virtual-fallback-selected"
+grep -Fxq 'rpt-fallback-tool 1.0' "$root/rpt-real-virtual-fallback-selected"
+grep -Fxq 'rpt-fallback-provider 3.0' "$root/rpt-real-virtual-fallback-selected"
+! grep -Fxq 'rpt-fallback-cap 1.0' "$root/rpt-real-virtual-fallback-selected"
+test "$(wc -l < "$root/rpt-real-virtual-fallback-selected")" -eq 3
 compare_plan cross-virtual "$root/empty-status" rpt-cross-virtual-user:i386
 grep -Fxq 'rpt-cross-virtual-user:i386 1.0' "$root/rpt-cross-virtual-selected"
 grep -Fxq 'rpt-cross-virtual-provider 1.0' "$root/rpt-cross-virtual-selected"
@@ -632,4 +670,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS signed Multi-Arch cross-architecture virtual Provides, :any and installed-status safety'
+echo 'PASS signed Multi-Arch real-name mismatch virtual fallback, cross-architecture Provides and installed-status safety'

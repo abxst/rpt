@@ -297,6 +297,35 @@ removal/upgrade and live-host dpkg. Debian `:native` is primarily
 a build-dependency qualifier; binary install preview continues to
 refuse it rather than treating it as the foreign request architecture.
 
+## One-shot resolver hardening: virtual fallback and staged-pair safety
+
+In Debian relationships, the existence of a concrete binary with the same
+name does not make its *inadequate version* the only possible satisfier.
+The experimental RPT resolver now continues to consider a differently
+named package with matching **versioned Provides** when the concrete name
+does not satisfy the requested version, including a native-owned dependency
+in a foreign-architecture plan. An already installed native concrete
+package is never upgraded implicitly by this fallback; a *different*
+signed candidate may satisfy the virtual capability.
+
+Before returning a foreign policy plan, RPT validates **every pair of newly
+staged binaries**, including pairs across i386/amd64 boundaries. Duplicate
+identities and staged Conflicts/Breaks are rejected; Replaces that could
+transfer ownership between staged binaries remains unsupported and
+fail-closed. Same-name, different-architecture additions must satisfy
+Multi-Arch: same co-installation and exact version requirements.
+
+The signed APT/RPT differential includes a native tool depending on
+`capability (>= 7)`, while the real native `capability` package is
+version 1 and another package advertises `Provides: capability (= 7)`.
+The verification requires both solvers to select the eligible provider,
+not the wrong-version real binary. The Rust regression tests independently
+check version mismatch and all-staged cross-architecture negative relations.
+
+This is **resolver hardening only**, not completion of APT compatibility.
+Global virtual-provider ranking, arbitrary removal/upgrade and live-host
+dpkg transactions remain outside this accepted scope.
+
 ## Cross-architecture virtual Provides, read-only foreign policy (M2.6.6)
 
 The explicit `plan-install-foreign-policy` can now resolve a *virtual*
