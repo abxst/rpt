@@ -1038,6 +1038,39 @@ for ordering in app-first blocker-first; do
 done
 echo "PASS signed APT/RPT mandatory-root dependency backtracking, both orders"
 
+# When several versioned virtual providers exist, a separate explicitly
+# requested package may make all but one infeasible. Compare the exact signed
+# candidate/version set with APT for both input orders. Ambiguous viable
+# providers outside this forced-unique case remain a separate parity gap.
+for ordering in app-first blocker-first; do
+  if [[ "$ordering" == app-first ]]; then
+    roots=(rpt-multi-virtual-app rpt-multi-virtual-blocker)
+  else
+    roots=(rpt-multi-virtual-blocker rpt-multi-virtual-app)
+  fi
+  apt-get "${opts[@]}" -s -y install "${roots[@]}" \
+    >"$root/apt-multi-provider"
+  ./target/debug/rpt plan-install-batch-policy \
+    --cache "$root/rpt-cache" --status "$root/apt/status" \
+    --apt-root "$root/rpt-apt" --architecture "$arch" \
+    "${roots[@]}" >"$root/rpt-multi-provider"
+  sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-multi-provider" \
+    | LC_ALL=C sort -u >"$root/apt-multi-provider-versions"
+  sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-multi-provider" \
+    | LC_ALL=C sort -u >"$root/rpt-multi-provider-versions"
+  test -s "$root/apt-multi-provider-versions"
+  diff -u "$root/apt-multi-provider-versions" "$root/rpt-multi-provider-versions"
+  for pkg in rpt-multi-virtual-app rpt-multi-virtual-blocker rpt-multi-virtual-b; do
+    grep -Fxq "$pkg 1.0" "$root/apt-multi-provider-versions"
+  done
+  if grep -Fq "rpt-multi-virtual-a " "$root/apt-multi-provider-versions"; then
+    echo "APT chose a provider incompatible with the requested blocker" >&2
+    exit 1
+  fi
+done
+echo "PASS signed APT/RPT forced-unique virtual provider with joint roots (both orders)"
+
+
 # The installed dpkg provider is intentionally ABSENT from the signed index.
 # Its actual dpkg Status/Provides satisfies a versioned virtual dependency:
 # RPT must neither require a repo candidate for that already installed
