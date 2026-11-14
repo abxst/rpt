@@ -993,7 +993,7 @@ pub fn preview_explicit_architecture_with_policy(
     if root_summary.architecture != foreign_architecture {
         bail!("foreign root policy candidate has incorrect binary architecture");
     }
-    catalog.insert(root_key, root_summary);
+    catalog.insert(root_key.clone(), root_summary);
     // Candidate-select the dependency closure before returning a plan.
     // Repository latest is only a discovery seed: every discovered package
     // gets replaced with the verified policy candidate, then re-solved.
