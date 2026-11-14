@@ -457,6 +457,19 @@ single eligible-provider and all-providers-pinned-out cases.
 This does not implement full APT preferences or arbitrary provider
 ranking, and it never changes the host package database.
 
+### Cross-root global dependency backtracking (read-only)
+
+The joint install planner records committed dependency alternative
+decisions and can revisit an earlier root's choice when a later root
+pulls a transitive conflicting dependency. It replays the whole plan
+with previously selected choices fixed, then tries the next alternative,
+sharing a strict 4,096-branch budget across retries. Signed APT/RPT
+simulation checks an indirect conflict with both root orders.
+
+This supports concrete textual alternatives only, not general SAT
+resolution, unrestricted virtual-provider ranking, package removals or
+host dpkg execution.
+
 ### Native disposable-rootfs install/upgrade (development only)
 
 The `native-rootfs-prepare-transaction` and
