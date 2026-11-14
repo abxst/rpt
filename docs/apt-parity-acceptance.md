@@ -36,6 +36,48 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Joint explicit removals + signed system upgrades (M5 large batch)
+
+The experimental `plan-full-upgrade-scenario` reads an original dpkg
+status snapshot, validates up to **32 explicit removal identities**, then
+constructs a private, RFC822-preserving hypothetical status without those
+installed binaries. It rejects removing an Essential, Protected or held
+package, duplicates, missing/ambiguous identities, and any removal that
+already breaks survivors' dependencies in the interim state.
+
+RPT then runs its existing signed APT candidate policy, joint bounded
+upgrade solver and global post-state validation on that projected state,
+and *independently* verifies the combined removals and upgraded signed
+binaries against the **original** dpkg status. The resulting JSON includes
+the original and projected status SHA256 values, exact removed identities
+and installed versions, the complete upstream upgrade audit, and the final
+projected installed counts, dependency and conflict checks. All returned
+`executable` fields remain `false`.
+
+Example, with a signed metadata cache and a deliberate disposable dpkg
+status fixture:
+
+```sh
+rpt plan-full-upgrade-scenario --cache ./rpt-lists \\
+  --status ./status-fixture --apt-root ./apt-root --architecture amd64 \\
+  --remove obsolete-binary --max-roots 128 --max-packages 200
+```
+
+This is a read-only **what-if transaction**, NOT automatic
+`apt-get dist-upgrade` parity. It does not automatically choose removals,
+does not solve arbitrary remove-and-replace dependency transitions in which
+intermediate status is inconsistent, does not execute removals/upgrade,
+does not authorize a native-rootfs bound intent, and never mutates dpkg
+or any live host filesystem. Removal ranking and atomic execution remain
+missing P0 items, not implied by a passing signed fixture.
+
+The signed differential includes an installed old package that conflicts
+with a new signed upgrade. APT simulates an explicit removal plus upgrade,
+and separately runs `dist-upgrade` for this narrow fixture. RPT must
+report precisely the selected upgrade candidates, the requested removal,
+the original/final installed status counts, and failure for held/protected,
+duplicate, dependency-breaking or truncated plans.
+
 ## Global installed transition safety and apply-time replay (M4 large batch)
 
 A successful dependency solve for the requested upgrade roots does **not**
