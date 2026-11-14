@@ -14,6 +14,9 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   size/SHA-256 verification, progress reporting, and FIFO scheduling.
 - Debian version ordering, installed-state inspection, restricted APT
   preferences/pinning and phased candidate diagnostics.
+- Whole-installed-set **read-only no-removals upgrade audit** from signed
+  policy candidates, with strict held/installed-only handling and a bounded
+  joint transaction preview (`plan-system-upgrade-policy`, never executes dpkg).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
