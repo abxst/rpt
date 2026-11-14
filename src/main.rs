@@ -292,6 +292,16 @@ enum Command {
         #[arg(long, default_value_t = 200)] max_packages: usize,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Read-only system-wide no-removals upgrade audit, bounded to at most 128
+    /// jointly solved upgrade roots. Never calls dpkg or changes the host.
+    PlanSystemUpgradePolicy {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+    },
     /// Read-only conservative reverse-dependency and protected-package removal audit.
     RemovalImpact {
         #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
@@ -454,6 +464,17 @@ enum Command {
         #[arg(long, default_value_t = false)] include_recommends: bool,
         #[arg(long)] output: PathBuf,
         #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Discover every eligible signed upgrade and prepare a bound, non-executable
+    /// intent for a marked disposable rootfs. Never touches the live host.
+    NativeRootfsPrepareSystemUpgrade {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long)] output: PathBuf,
     },
     /// Apply signed install/upgrade to a marked disposable native rootfs, NEVER live /.
     NativeRootfsApplyTransaction {
@@ -875,6 +896,12 @@ async fn execute(cli: Cli) -> Result<()> {
                 .context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Command::PlanSystemUpgradePolicy { cache, status, apt_root, architecture, max_roots, max_packages } => {
+            let report = rpt::system_upgrade::preview(
+                &cache, &status, &apt_root, &architecture, max_roots, max_packages,
+            ).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::PlanTransactionAudit { cache, status, apt_root, architecture, max_packages, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy(
                 &cache, &status, &apt_root, &packages, &architecture, max_packages
@@ -1041,6 +1068,17 @@ async fn execute(cli: Cli) -> Result<()> {
             tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
                 .context("writing native rootfs signed transaction intent")?;
             println!("Native disposable-rootfs transaction planned: {count} authenticated archives; no dpkg changes");
+        }
+        Command::NativeRootfsPrepareSystemUpgrade {
+            rootfs, cache, apt_root, architecture, max_roots, max_packages, output,
+        } => {
+            let intent = rpt::native_rootfs::prepare_system_upgrade(
+                &rootfs, &cache, &apt_root, &architecture, max_roots, max_packages,
+            ).context(ErrorCategory::System)?;
+            let count = intent.manifest.packages.len();
+            tokio::fs::write(&output, serde_json::to_vec_pretty(&intent)?).await
+                .context("writing native rootfs system upgrade intent")?;
+            println!("Disposable rootfs signed system-upgrade intent: {count} archives; NO dpkg changes");
         }
         Command::NativeRootfsApplyTransaction {
             rootfs, id, transaction, artifacts, cache, apt_root, journal_dir, timeout_seconds,

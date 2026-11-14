@@ -177,6 +177,40 @@ pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
     })
 }
 
+/// Discover every eligible upgrade of a marked disposable rootfs, then
+/// create the normal exact-version, dpkg-status-bound native intent. This
+/// path NEVER authorizes execution: the existing apply() independently
+/// replays the signed resolver and validates the original status hash.
+pub fn prepare_system_upgrade(
+    root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
+    max_roots: usize, max_packages: usize,
+) -> Result<BoundTransaction> {
+    let root = rootfs(root)?;
+    let before = hex::encode(Sha256::digest(status(&root)?));
+    let audit = crate::system_upgrade::preview(
+        cache, &root.join("var/lib/dpkg/status"), apt_root,
+        architecture, max_roots, max_packages,
+    )?;
+    if audit.requested_upgrades.is_empty() {
+        bail!("no eligible signed upgrades in disposable rootfs; no transaction intent created");
+    }
+    let bound = prepare(
+        &root, cache, apt_root, architecture, max_packages,
+        &audit.requested_upgrades, false,
+    )?;
+    if bound.status_sha256 != before {
+        bail!("disposable rootfs dpkg status changed during upgrade discovery");
+    }
+    let changes = crate::transaction_plan_audit::classify(&bound.steps)?;
+    if changes.changes != audit.transaction.changes {
+        bail!("system upgrade transaction intent differs from audited joint plan");
+    }
+    if changes.downgrades != 0 || changes.reinstalls != 0 {
+        bail!("system upgrade intent contains a downgrade or reinstall");
+    }
+    Ok(bound)
+}
+
 const INSTALL_SCRIPT: &str = r#"set -eu
 root="$1"; expected="$2"; stage="$3"; expected_marks="$4"; shift 4
 test -f "$root/.rpt-disposable-rootfs"

@@ -453,6 +453,82 @@ grep -Fxq 'rpt-fallback-tool 1.0' "$root/rpt-real-virtual-fallback-selected"
 grep -Fxq 'rpt-fallback-provider 3.0' "$root/rpt-real-virtual-fallback-selected"
 ! grep -Fxq 'rpt-fallback-cap 1.0' "$root/rpt-real-virtual-fallback-selected"
 test "$(wc -l < "$root/rpt-real-virtual-fallback-selected")" -eq 3
+# M3 integrated system-upgrade audit: scan all installed native/Architecture:
+# all identities, resolve all eligible upgrades jointly, and refuse holds,
+# installed-only and partial plans. No host dpkg writes.
+cat >"$root/system-upgrade-status" <<'EOF'
+Package: rpt-new-native-leaf
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Multi-Arch: foreign
+Description: old native leaf
+
+Package: rpt-new-allowed-leaf
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Multi-Arch: allowed
+Description: old allowed leaf
+
+Package: rpt-pre-native-setup
+Status: hold ok installed
+Architecture: amd64
+Version: 0.5
+Description: held older setup
+
+Package: rpt-installed-only
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Description: configured binary without any repository origin
+
+EOF
+"$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/system-upgrade-status" --apt-root "$root/rpt-apt" \
+  --architecture amd64 --max-roots 128 --max-packages 200 \
+  >"$root/rpt-system-upgrade.json"
+python3 - "$root/rpt-system-upgrade.json" "$root/rpt-system-upgrade-selected" <<'PY'
+import json,sys
+report=json.load(open(sys.argv[1]))
+assert report['scanned_installed']==4
+assert report['requested_upgrades']==['rpt-new-allowed-leaf','rpt-new-native-leaf']
+assert report['held']==['rpt-pre-native-setup:amd64']
+assert report['installed_only']==['rpt-installed-only:amd64']
+assert report['transaction']['upgrades']==2 and report['transaction']['installs']==0
+assert report['transaction']['downgrades']==0
+assert not report['transaction']['executable'] and not report['executable']
+with open(sys.argv[2],'w') as f:
+  for c in sorted(report['transaction']['changes'], key=lambda c:c['package']):
+    assert c['action']=='upgrade' and c['architecture']=='amd64'
+    f.write(c['package']+' '+c['to']+'\n')
+PY
+apt-get "${opts[@]}" -o "Dir::State::status=$root/system-upgrade-status" \
+  -o APT::Install-Recommends=false -s -y upgrade >"$root/apt-system-upgrade"
+# apt-get -s prints upgrades as "Inst name [old] (new ...)" and fresh
+# installs as "Inst name (new ...)"; retain both as candidate-version evidence.
+sed -nE 's/^Inst ([^ ]+) (\[[^]]+\] )?\(([^ )]+).*/\1 \3/p' "$root/apt-system-upgrade" | \
+  LC_ALL=C sort -u >"$root/apt-system-upgrade-selected"
+diff -u "$root/apt-system-upgrade-selected" "$root/rpt-system-upgrade-selected"
+# The budget must fail closed; a partial upgrade of only the first binary
+# would falsely imply that all installed candidates were considered.
+if "$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/system-upgrade-status" --apt-root "$root/rpt-apt" \
+  --architecture amd64 --max-roots 1 >"$root/system-budget.log" 2>&1; then
+  echo 'RPT silently previewed a partial system upgrade' >&2; exit 1
+fi
+"$rpt" plan-system-upgrade-policy --cache "$root/cache" \
+  --status "$root/empty-status" --apt-root "$root/rpt-apt" \
+  --architecture amd64 >"$root/system-empty.json"
+python3 - "$root/system-empty.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r['scanned_installed']==0
+assert r['requested_upgrades']==[]
+assert r['transaction']['changes']==[]
+assert not r['executable']
+PY
+echo 'PASS bounded signed no-removal system upgrade audit vs APT held/installed-only differential'
 compare_plan cross-virtual "$root/empty-status" rpt-cross-virtual-user:i386
 grep -Fxq 'rpt-cross-virtual-user:i386 1.0' "$root/rpt-cross-virtual-selected"
 grep -Fxq 'rpt-cross-virtual-provider 1.0' "$root/rpt-cross-virtual-selected"

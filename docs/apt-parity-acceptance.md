@@ -36,6 +36,56 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Integrated no-removal system upgrade audit (M3 major batch)
+
+The new read-only command `rpt plan-system-upgrade-policy` discovers all
+configured native and `Architecture: all` binaries from dpkg status, compares
+each with the independently authenticated APT-policy candidate from RPT's
+signed cache, respects dpkg holds, and records installed-only packages
+separately. It then resolves **all eligible upgraded roots together** using
+the existing candidate-verified dependency solver. The JSON report includes
+the complete scanned count, unchanged/policy-kept count, held identities,
+installed-only identities, upgrade roots and final transaction audit. The
+output is explicitly non-executable.
+
+The solver currently supports at most 128 explicit roots; if the required
+upgrade set exceeds that limit, the whole operation **fails**, rather than
+silently returning a partial system upgrade. The candidate and eventual
+planned transaction must not downgrade, reinstall or upgrade held packages.
+If any requested upgraded root disappears from the final plan, the preview
+fails. New dependencies may be included in the transaction and every step
+is bound to a signed candidate. This milestone deliberately does **not**
+implement implicit package removals, full-upgrade, host mutation or complete
+reverse dependency graph validation.
+
+The companion `rpt native-rootfs-prepare-system-upgrade` command runs this
+same signed upgrade discovery against the dpkg status of an **explicitly
+marked, disposable, off-host native rootfs**. It refuses `/`, an unmarked
+rootfs, a no-op upgrade set, and a changed dpkg status between discovery
+and the ordinary transaction intent. It reuses the existing
+`native-rootfs-prepare-transaction` format: exact signed archives, rootfs
+identity, original dpkg status SHA256, all selected steps, and the
+bound dependency closure. The existing `native-rootfs-apply-transaction`
+then rechecks those proofs and may execute dpkg only inside that guest.
+No automatic rollback or execution on the host is enabled.
+
+`tests/signed-multiarch-differential.sh` now contains a signed APT/RPT
+`apt-get -s upgrade` differential for two concurrent native upgrades, a
+held package whose repository candidate is newer, an installed-only
+package and a strict max-roots failure. A zero-installed-state no-op also
+must produce a non-executable empty report.
+
+A second integrated CI fixture seeds a disposable native guest with
+version 1, publishes a signed version 2 with an added Pre-Depends, prepares
+the automatic upgrade intent, fetches both exact archives, applies them via
+real `dpkg --root`, and checks postflight package versions and journal.
+Re-running discovery after the upgrade must refuse an empty execution
+intent; attempting to target live `/` must be rejected. The test runner's
+host dpkg database is separately audited for changes.
+ A successful narrow fixture
+provides evidence only for parts of Gates C/D/H; the matrix above remains
+unchanged until full Ubuntu/Debian behavioral parity is demonstrated.
+
 ## Native off-host rootfs execution milestone (test-only)
 
 RPT now offers `native-rootfs-prepare-transaction` and

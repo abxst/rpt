@@ -23,7 +23,8 @@ cleanup() {
     sudo rm -rf -- "$root/native-guest" "$root/native-journal" \
       "$root/native-mark-guest" "$root/native-mark-journal" \
       "$root/native-checkpoint" "$root/native-restored" \
-      "$root/native-auto-remove" "$root/native-auto-mark"
+      "$root/native-auto-remove" "$root/native-auto-mark" \
+      "$root/native-upgrade-guest" "$root/native-auto-journal"
   fi
   rm -rf "$root"
 }
@@ -1407,6 +1408,70 @@ gpg --homedir "$root/gnupg" --batch --yes --pinentry-mode loopback --passphrase 
   --clearsign --digest-algo SHA256 --output "$root/www/dists/fixture/InRelease" "$release"
 ./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache-v2" \
   --no-progress >"$root/rpt-v2-update.log"
+
+# Major integrated M3 acceptance: from the *installed* v1 guest,
+# auto-discover a signed v2 candidate, resolve its new Pre-Depends, construct
+# a status-bound intent, download artifacts, and invoke the real native guest
+# dpkg executor. Never mount or execute on the CI runner's host rootfs.
+auto_upgrade_guest="$root/native-upgrade-guest"
+sudo mkdir -p "$auto_upgrade_guest"
+auto_upgrade_container="rpt-native-auto-export-$(basename "$root")"
+docker create --name "$auto_upgrade_container" --network=none \
+  --entrypoint /bin/sh "$sandbox_image" -c true >/dev/null
+docker export "$auto_upgrade_container" | sudo tar -xpf - -C "$auto_upgrade_guest"
+docker rm "$auto_upgrade_container" >/dev/null
+printf 'rpt-disposable-rootfs-v1\n' \
+  | sudo tee "$auto_upgrade_guest/.rpt-disposable-rootfs" >/dev/null
+sudo dpkg --root="$auto_upgrade_guest" --install \
+  "$root/www/pool/rpt-sandbox-demo_1.0_all.deb"
+if ./target/debug/rpt native-rootfs-prepare-system-upgrade --rootfs / \
+    --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+    --output "$root/native-unsafe-system-upgrade.json" >/dev/null 2>&1; then
+  echo 'Native system-upgrade intent unexpectedly accepted live /' >&2; exit 1
+fi
+./target/debug/rpt native-rootfs-prepare-system-upgrade \
+  --rootfs "$auto_upgrade_guest" --cache "$root/rpt-cache-v2" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  --max-roots 128 --max-packages 200 \
+  --output "$root/native-auto-upgrade-intent.json"
+python3 - "$root/native-auto-upgrade-intent.json" "$auto_upgrade_guest" <<'PY'
+import json,sys
+intent=json.load(open(sys.argv[1]))
+assert intent['session']=='native-rootfs:'+sys.argv[2]
+assert intent['requested']==['rpt-sandbox-demo']
+assert not intent['executable']
+assert [(s['package'],s['version'],s['installed']) for s in intent['steps']]==[
+    ('rpt-sandbox-helper','1.0',None),
+    ('rpt-sandbox-demo','2.0','1.0')]
+assert [(p['name'],p['version']) for p in intent['packages']]==[
+    ('rpt-sandbox-helper','1.0'),('rpt-sandbox-demo','2.0')]
+PY
+./target/debug/rpt fetch --manifest "$root/native-auto-upgrade-intent.json" \
+  --output "$root/native-auto-artifacts" --workers 2 --segments 1 \
+  >"$root/native-auto-fetch.log"
+sudo ./target/debug/rpt native-rootfs-apply-transaction \
+  --rootfs "$auto_upgrade_guest" --id native-auto-upgrade \
+  --transaction "$root/native-auto-upgrade-intent.json" \
+  --artifacts "$root/native-auto-artifacts" \
+  --cache "$root/rpt-cache-v2" --apt-root "$root/rpt-apt" \
+  --journal-dir "$root/native-auto-journal" --timeout-seconds 180 \
+  >"$root/native-auto-upgrade.log"
+grep -Fq '"phase": "succeeded"' \
+  "$root/native-auto-journal/native-auto-upgrade.json"
+test "$(sudo dpkg-query --admindir="$auto_upgrade_guest/var/lib/dpkg" \
+  -W '-f=${Status}|${Version}' rpt-sandbox-demo)" = 'install ok installed|2.0'
+test "$(sudo dpkg-query --admindir="$auto_upgrade_guest/var/lib/dpkg" \
+  -W '-f=${Status}|${Version}' rpt-sandbox-helper)" = 'install ok installed|1.0'
+test -z "$(sudo dpkg --root="$auto_upgrade_guest" --audit)"
+# An already upgraded guest has no eligible newer candidates: refuse to
+# create a misleading empty auto-upgrade transaction for dpkg to execute.
+if ./target/debug/rpt native-rootfs-prepare-system-upgrade \
+    --rootfs "$auto_upgrade_guest" --cache "$root/rpt-cache-v2" \
+    --apt-root "$root/rpt-apt" --architecture "$arch" \
+    --output "$root/native-auto-noop.json" >"$root/native-auto-noop.log" 2>&1; then
+  echo 'Native auto-upgrade created a no-op execution intent' >&2; exit 1
+fi
+echo 'PASS signed native-rootfs auto-upgrade discovery, dependency closure, real dpkg, replay and live-root refusal'
 
 # Seed v1 in a new persistent sandbox; reject an intent created before seeding.
 ./target/debug/rpt sandbox-session-create --session "$session" --image "$sandbox_image"
