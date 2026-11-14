@@ -222,6 +222,8 @@ jobs:
           bash tests/transaction-json-events.sh ./target/debug/rpt-transaction-dry-run
       - name: Removal planner CLI end-to-end (unprivileged)
         run: bash tests/removal-planner-e2e.sh ./target/debug/rpt
+      - name: APT/RPT remove and autoremove simulator differential (unprivileged)
+        run: bash tests/apt-removal-autoremove-differential.sh ./target/debug/rpt
       - name: Release build
         run: cargo build --release --locked
   arm64-native:
