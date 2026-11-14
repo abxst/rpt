@@ -477,6 +477,15 @@ enum Command {
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
         #[arg(required = true)] packages: Vec<String>,
     },
+    /// Mark auto/manual using APT inside a marked disposable native rootfs.
+    NativeRootfsMark {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] id: String,
+        #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
+        #[arg(long, default_value_t = 600)] timeout_seconds: u64,
+        #[arg(value_parser = ["auto", "manual"])] mode: String,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Execute verified orphan cleanup from guest dpkg and APT marks, not host.
     NativeRootfsAutoremovePlanned {
         #[arg(long)] rootfs: PathBuf,
@@ -1022,6 +1031,11 @@ async fn execute(cli: Cli) -> Result<()> {
             }).await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             println!("Native disposable-rootfs removal complete; live host dpkg untouched.");
+        }
+        Command::NativeRootfsMark { rootfs, id, journal_dir, timeout_seconds, mode, packages } => {
+            rpt::native_rootfs::mark(&rootfs, &journal_dir, &id, &mode,
+                &packages, timeout_seconds).await.context(ErrorCategory::System)?;
+            println!("Native rootfs APT {mode} marks applied and verified; live host unchanged.");
         }
         Command::NativeRootfsAutoremovePlanned {
             rootfs, id, journal_dir, architecture, timeout_seconds,
