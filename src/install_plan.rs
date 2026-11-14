@@ -2755,6 +2755,67 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
     }
 
     #[test]
+    fn native_concrete_version_mismatch_falls_back_to_versioned_virtual_provides() {
+        let mut app = item("provider-consumer", "1", "host-tool");
+        app.architecture = "i386".into();
+        let mut tool = item("host-tool", "1", "capability (>= 7)");
+        tool.multi_arch = "foreign".into();
+        let old = item("capability", "1", "");
+        let mut replacement = item("new-capability", "3", "");
+        replacement.provides = "capability (= 7)".into();
+        let mut catalog = BTreeMap::from([
+            (PackageKey { name: "provider-consumer".into(), architecture: "i386".into() }, app),
+            (PackageKey { name: "host-tool".into(), architecture: "amd64".into() }, tool),
+            (PackageKey { name: "capability".into(), architecture: "amd64".into() }, old),
+            (PackageKey { name: "new-capability".into(), architecture: "amd64".into() }, replacement),
+        ]);
+        let run = |catalog: &BTreeMap<PackageKey, PackageSummary>| {
+            solve_catalog_foreign(catalog, &BTreeMap::new(), &BTreeMap::new(),
+                "provider-consumer:i386", 20, ("i386", "amd64"), &BTreeMap::new())
+        };
+        let plan = run(&catalog).unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["new-capability", "host-tool", "provider-consumer"]);
+        catalog.get_mut(&PackageKey {
+            name: "new-capability".into(), architecture: "amd64".into(),
+        }).unwrap().provides = "capability (= 6)".into();
+        assert!(run(&catalog).is_err());
+    }
+
+    #[test]
+    fn foreign_final_guard_rejects_cross_arch_staged_conflicts_and_replaces() {
+        let mut foreign = item("foreign-pkg", "1", "");
+        foreign.architecture = "i386".into();
+        let mut native = item("native-pkg", "1", "");
+        native.conflicts = "foreign-pkg".into();
+        let foreign_key = PackageKey {
+            name: "foreign-pkg".into(), architecture: "i386".into(),
+        };
+        let native_key = PackageKey {
+            name: "native-pkg".into(), architecture: "amd64".into(),
+        };
+        let mut catalog = BTreeMap::from([
+            (foreign_key, foreign), (native_key.clone(), native),
+        ]);
+        let plan = vec![
+            PlanStep { package: "foreign-pkg".into(), version: "1".into(),
+                architecture: "i386".into(), installed: None },
+            PlanStep { package: "native-pkg".into(), version: "1".into(),
+                architecture: "amd64".into(), installed: None },
+        ];
+        let validate = |catalog: &BTreeMap<PackageKey, PackageSummary>| {
+            reject_foreign_negative_relations_with_native(catalog, &BTreeMap::new(),
+                &plan, "i386", Some("amd64"))
+        };
+        assert!(validate(&catalog).is_err());
+        catalog.get_mut(&native_key).unwrap().conflicts.clear();
+        catalog.get_mut(&native_key).unwrap().replaces = "foreign-pkg".into();
+        assert!(validate(&catalog).is_err());
+        catalog.get_mut(&native_key).unwrap().replaces.clear();
+        assert!(validate(&catalog).is_ok());
+    }
+
+    #[test]
     fn foreign_native_virtual_provider_uses_native_capability_version() {
         let mut app = item("foreign-app", "1", "host-tool");
         app.architecture = "i386".into();
