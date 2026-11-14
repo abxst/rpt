@@ -341,12 +341,14 @@ grep -Fxq 'rpt-all-native-data 1.0' "$root/rpt-native-all-selected"
 test "$(wc -l <"$root/rpt-native-all-selected")" -eq 3
 cat >"$root/native-conflicting-installed" <<'EOF'
 Package: rpt-alt-installed
-Status: install ok installed
+Status: hold ok installed
 Architecture: amd64
 Version: 1.0
-Description: installed native binary blocks first ordered alternative
+Description: held installed native binary blocks first ordered alternative
 
 EOF
+# APT may REMOVE a non-held conflicting package instead of selecting
+# the second alternative. Hold makes removal forbidden in both planners.
 compare_plan native-alts "$root/native-conflicting-installed" rpt-alt-native-user:i386
 grep -Fxq 'rpt-alt-native-good 1.0' "$root/rpt-native-alts-selected"
 ! grep -Fq 'rpt-alt-native-bad' "$root/rpt-native-alts"
