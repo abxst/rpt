@@ -96,6 +96,31 @@ sudo dpkg-query --admindir="$guest/var/lib/dpkg" -W \
 # A directly requested package is automatically marked manual in the same
 # native install journal, without a separate native-rootfs-mark call.
 sudo chroot "$guest" /usr/bin/apt-mark showmanual hello | grep -Fxq hello
+
+# When the exact version is already installed, re-requesting the package
+# should mark it manual without any download or dpkg configure. No artifact
+# directory is provided: this is a pure APT-state transaction.
+sudo "$rpt" native-rootfs-mark \
+  --rootfs "$guest" --id wsl-mark-only-seed --journal-dir "$journal" auto hello
+sudo chroot "$guest" /usr/bin/apt-mark showauto hello | grep -Fxq hello
+"$rpt" native-rootfs-prepare-transaction \
+  --rootfs "$guest" --cache "$work/lists" --apt-root "$work/apt" \
+  --architecture amd64 --output "$work/mark-only.json" hello
+python3 - "$work/mark-only.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
+assert x['packages'] == [] and x['steps'] == []
+assert x['requested'] == ['hello'] and not x['executable']
+PY
+mark_only_status_before="$(sudo sha256sum "$guest/var/lib/dpkg/status" | cut -d' ' -f1)"
+sudo "$rpt" native-rootfs-apply-transaction \
+  --rootfs "$guest" --id wsl-mark-only --transaction "$work/mark-only.json" \
+  --artifacts "$work/no-artifacts-necessary" \
+  --cache "$work/lists" --apt-root "$work/apt" \
+  --journal-dir "$journal" --timeout-seconds 300
+sudo chroot "$guest" /usr/bin/apt-mark showmanual hello | grep -Fxq hello
+test "$(sudo sha256sum "$guest/var/lib/dpkg/status" | cut -d' ' -f1)" = "$mark_only_status_before"
+
 sudo "$rpt" native-rootfs-remove-planned \
   --rootfs "$guest" --id wsl-remove --journal-dir "$journal" \
   --architecture amd64 hello
@@ -178,10 +203,11 @@ test -z "$(sudo dpkg --root="$guest" --audit)"
 status_after="$(sudo dpkg-query --admindir="$guest/var/lib/dpkg" -W '-f=${Status}' hello 2>/dev/null || true)"
 test "$status_after" != 'install ok installed'
 test "$(sha256sum /var/lib/dpkg/status | cut -d' ' -f1)" = "$host_before"
-for transaction in wsl-install wsl-remove wsl-reinstall wsl-mark-manual \
+for transaction in wsl-install wsl-mark-only-seed wsl-mark-only wsl-remove \
+  wsl-reinstall wsl-mark-manual \
   wsl-mark-auto wsl-autoremove wsl-purge-install wsl-purge \
   wsl-conffile-remove wsl-conffile-purge; do
   grep -Fq '"phase": "succeeded"' "$journal/$transaction.json"
 done
-echo "PASS native WSL signed lifecycle, automatic manual root mark, config-only purge and unchanged live dpkg"
+echo "PASS WSL signed lifecycle, journaled mark-only/no-dpkg, auto/manual, config-only purge, live dpkg unchanged"
 echo "Inspect test artifacts: $work"
