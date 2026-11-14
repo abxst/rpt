@@ -160,6 +160,30 @@ whose dependencies are fulfilled solely by installed native amd64 binaries
 (`foreign` and `allowed`, respectively), then rejects wrong installed
 declarations. No host dpkg state is modified.
 
+## Signed native leaf candidates in foreign read-only plans (M2.6.2)
+
+The explicit foreign-policy preview now has an additional narrowly bounded
+**new native dependency** path. An i386 root may plan a **new amd64 leaf**
+when its singular unqualified Depends names a native binary declaring
+`Multi-Arch: foreign`, or when a `:any` dependency names an amd64 binary
+declaring `Multi-Arch: allowed`. The foreign/all candidate identity is
+considered first; native is a fallback only when neither exists. Exact
+architecture, package name, version, signed Release metadata, and APT
+candidate policy are rechecked on the native candidate itself before the
+plan can be returned. Plans show `helper:amd64`, never a fictitious
+`helper:i386`. Every native leaf is checked against installed dpkg
+Conflicts/Breaks/Replaces in both directions.
+
+This is a **read-only leaf-only** subset: no native
+`Depends`/`Pre-Depends` graph, native package upgrade/replacement,
+virtual provider, ambiguous architecture preference, `:native` rewrite,
+cross-architecture removal or actual installation is enabled.
+`Multi-Arch: no` and `same` do not authorize this fallback.
+Existing installed native satisfiers remain handled by the earlier
+M2.6.1 status-only path. The signed APT differential checks both
+`foreign` and `allowed` new native leaves against `apt-get -s` and
+adds explicit refusal for an old installed native version.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
@@ -186,8 +210,8 @@ modified signed-cache bytes.
 
 This remains a limited **read-only** parity milestone. Source entries
 currently must be usable by the native-architecture updater; foreign-only
-Deb822 `Architectures:` source selection, unqualified cross-architecture
-providers, Multi-Arch: foreign/allowed, synchronized upgrades, and full
+Deb822 `Architectures:` source selection, generic cross-architecture
+providers and dependency graphs, synchronized upgrades, and full
 APT removal/replacement semantics are not implemented. Foreign package
 installation on the host or in a sandbox is still prohibited.
 
