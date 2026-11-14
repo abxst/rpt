@@ -1,7 +1,7 @@
 //! Fail-closed dependency planning preview. NEVER executes dpkg or mutates packages.
 //! This is not APT's full dependency resolver: only uniquely resolvable
 //! alternatives and virtual Provides, plus bounded alternative backtracking;
-//! no architecture qualifiers, pinning, package holds, triggers or removals.
+//! foreign planning remains a read-only, partial Multi-Arch subset.
 use crate::{cache_query, metadata_query::{self, PackageKey, PackageSummary}, version};
 use anyhow::{bail, Context, Result};
 use std::{cell::Cell, cmp::Ordering, collections::{BTreeMap, BTreeSet}, path::Path, rc::Rc};
@@ -437,6 +437,24 @@ fn scoped_relations(
 
 /// A replayable dependency alternative is identified by its owning binary
 /// and group ordinal, not by plan position (which changes while backtracking).
+/// Read-only proof that an installed native binary can satisfy a foreign
+/// dependency without staging another architecture. This uses the installed
+/// dpkg status (not a repository candidate) and never matches virtual Provides.
+fn installed_native_satisfies_foreign(
+    native_installed: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+    required: &Requirement, native_arch: &str, foreign_arch: &str,
+) -> Result<bool> {
+    if native_arch == foreign_arch || required.requested_arch.is_some() {
+        return Ok(false);
+    }
+    let key = cache_query::InstalledKey {
+        name: required.name.clone(), architecture: native_arch.to_owned(),
+    };
+    let Some(installed) = native_installed.get(&key) else { return Ok(false) };
+    let expected = if required.any_arch { "allowed" } else { "foreign" };
+    Ok(installed.multi_arch == expected && satisfies(&installed.version, required)?)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ReplayKey {
     owner: PackageKey,
@@ -462,6 +480,8 @@ struct Solver<'a> {
     catalog: &'a BTreeMap<PackageKey, PackageSummary>,
     installed: &'a BTreeMap<PackageKey, String>,
     installed_relations: &'a BTreeMap<PackageKey, InstalledRelations>,
+    /// Installed native dpkg evidence, only for foreign read-only previews.
+    external_native: Option<(&'a str, &'a BTreeMap<cache_query::InstalledKey, InstalledRelations>)>,
     visiting: BTreeSet<PackageKey>,
     done: BTreeSet<PackageKey>,
     plan: Vec<PlanStep>,
@@ -697,6 +717,13 @@ impl Solver<'_> {
                 // cannot silently invalidate the installed capability.
                 self.installed_provider_proofs.push((provider, alternative.clone()));
                 return self.resolve_groups(owner, groups, index + 1, soft);
+            }
+            if let Some((native_arch, native_relations)) = self.external_native {
+                if installed_native_satisfies_foreign(
+                    native_relations, alternative, native_arch, &self.architecture,
+                )? {
+                    return self.resolve_groups(owner, groups, index + 1, soft);
+                }
             }
         }
 
@@ -1113,8 +1140,9 @@ pub fn preview_explicit_architecture(
     validate_installed_metadata(&complete, &relations)?;
     let installed = scoped_installed(&complete, foreign_architecture)?;
     let scoped = scoped_relations(&relations, foreign_architecture)?;
-    let plan = solve_catalog(
-        &catalog, &installed, &scoped, requested, max_packages, foreign_architecture,
+    let plan = solve_catalog_foreign(
+        &catalog, &installed, &scoped, requested, max_packages,
+        (foreign_architecture, native_architecture), &relations,
     )?;
     // Validate against every installed identity outside the target architecture,
     // including the native host. No removals or version synchronization inferred.
@@ -1264,6 +1292,11 @@ pub fn preview_explicit_architecture_with_policy(
                             bail!("explicit cross-architecture dependency needs full Multi-Arch resolver");
                         }
                     }
+                    if installed_native_satisfies_foreign(
+                        &relations, dep, native_architecture, foreign_architecture,
+                    )? {
+                        continue;
+                    }
                     if let Some(identity) = foreign_dependency_identity(
                         &catalog, &dep.name, foreign_architecture,
                     )? {
@@ -1276,8 +1309,9 @@ pub fn preview_explicit_architecture_with_policy(
             if roots.insert(identity) { discovered = true; }
         }
         if discovered { continue; }
-        let plan = solve_catalog(
-            &catalog, &installed, &scoped, requested, max_packages, foreign_architecture,
+        let plan = solve_catalog_foreign(
+            &catalog, &installed, &scoped, requested, max_packages,
+            (foreign_architecture, native_architecture), &relations,
         )?;
         for step in &plan {
             if roots.insert(PackageKey {
@@ -1377,6 +1411,20 @@ fn solve_catalog_many(
         max_packages, architecture, false)
 }
 
+fn solve_catalog_foreign(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    installed: &BTreeMap<PackageKey, String>,
+    installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
+    package: &str, max_packages: usize, architectures: (&str, &str),
+    full_relations: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
+) -> Result<Vec<PlanStep>> {
+    let (foreign_architecture, native_architecture) = architectures;
+    solve_catalog_many_options_with_external(
+        catalog, installed, installed_relations, &[package.to_owned()],
+        max_packages, (foreign_architecture, false), Some((native_architecture, full_relations)),
+    )
+}
+
 fn solve_catalog_many_options(
     catalog: &BTreeMap<PackageKey, PackageSummary>,
     installed: &BTreeMap<PackageKey, String>,
@@ -1384,6 +1432,20 @@ fn solve_catalog_many_options(
     packages: &[String], max_packages: usize, architecture: &str,
     include_recommends: bool,
 ) -> Result<Vec<PlanStep>> {
+    solve_catalog_many_options_with_external(
+        catalog, installed, installed_relations, packages, max_packages,
+        (architecture, include_recommends), None,
+    )
+}
+
+fn solve_catalog_many_options_with_external<'a>(
+    catalog: &'a BTreeMap<PackageKey, PackageSummary>,
+    installed: &'a BTreeMap<PackageKey, String>,
+    installed_relations: &'a BTreeMap<PackageKey, InstalledRelations>,
+    packages: &[String], max_packages: usize, options: (&str, bool),
+    external_native: Option<(&'a str, &'a BTreeMap<cache_query::InstalledKey, InstalledRelations>)>,
+) -> Result<Vec<PlanStep>> {
+    let (architecture, include_recommends) = options;
     // All retries share the same bounded search fuel, so revisiting earlier
     // choices never turns the 4,096-branch cap into an unbounded retry loop.
     let search_budget = Rc::new(Cell::new(4096));
@@ -1396,7 +1458,7 @@ fn solve_catalog_many_options(
         bail!("global dependency branch budget exhausted");
     }
     let mut solver = Solver {
-        catalog, installed, installed_relations, visiting: BTreeSet::new(),
+        catalog, installed, installed_relations, external_native, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         architecture: architecture.to_owned(),
         branch_budget: Rc::clone(&search_budget), include_recommends,
@@ -1808,6 +1870,7 @@ mod tests {
         let keyed_installed = test_keyed_versions(&keyed, installed, "amd64");
         let mut s = Solver {
             catalog: &keyed, installed: &keyed_installed, installed_relations: &BTreeMap::new(),
+            external_native: None,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
             requested_roots: BTreeSet::new(),
@@ -2144,6 +2207,50 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
                 name, &origins, &pins, installed, None, None,
             )?.candidate)
         }).is_err());
+    }
+    #[test]
+    fn foreign_depends_reuses_only_qualified_native_installed_satisfiers() {
+        let mut app = item("rpt-foreign-app", "1",
+            "rpt-host-tool (>= 2), rpt-host-interpreter:any (>= 2)");
+        app.architecture = "i386".into();
+        let catalog = test_keyed(&BTreeMap::from([("rpt-foreign-app".into(), app.clone())]));
+        let native = BTreeMap::from([
+            (cache_query::InstalledKey { name: "rpt-host-tool".into(), architecture: "amd64".into() },
+                InstalledRelations { version: "2".into(), multi_arch: "foreign".into(), ..Default::default() }),
+            (cache_query::InstalledKey { name: "rpt-host-interpreter".into(), architecture: "amd64".into() },
+                InstalledRelations { version: "2".into(), multi_arch: "allowed".into(), ..Default::default() }),
+        ]);
+        let plan = solve_catalog_many_options_with_external(
+            &catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &native)),
+        ).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].architecture, "i386");
+        for (name, wrong_flag) in [("rpt-host-tool", "allowed"),
+                                   ("rpt-host-interpreter", "foreign")] {
+            let mut denied = native.clone();
+            denied.get_mut(&cache_query::InstalledKey {
+                name: name.into(), architecture: "amd64".into(),
+            }).unwrap().multi_arch = wrong_flag.into();
+            assert!(solve_catalog_many_options_with_external(
+                &catalog, &BTreeMap::new(), &BTreeMap::new(),
+                &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &denied)),
+            ).is_err());
+        }
+        let mut outdated = native.clone();
+        outdated.get_mut(&cache_query::InstalledKey {
+            name: "rpt-host-tool".into(), architecture: "amd64".into(),
+        }).unwrap().version = "1".into();
+        assert!(solve_catalog_many_options_with_external(
+            &catalog, &BTreeMap::new(), &BTreeMap::new(),
+            &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &outdated)),
+        ).is_err());
+        app.depends = "rpt-host-tool:i386 (>= 2)".into();
+        let explicit = test_keyed(&BTreeMap::from([("rpt-foreign-app".into(), app)]));
+        assert!(solve_catalog_many_options_with_external(
+            &explicit, &BTreeMap::new(), &BTreeMap::new(),
+            &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &native)),
+        ).is_err());
     }
     #[test]
     fn any_suffix_requires_multiarch_allowed_on_selected_native_package() {
@@ -2838,6 +2945,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         let binary_relations = test_keyed_relations(&keyed, &installed_relations, "amd64");
         let mut solver = Solver {
             catalog: &keyed, installed: &binary_installed, installed_relations: &binary_relations,
+            external_native: None,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
             requested_roots: BTreeSet::new(),
