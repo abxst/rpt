@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Read-only, same-repository APT/RPT dependency-plan differential.
 set -euo pipefail
+# Dedicated VM acceptance matrix can replace the disposable guest distro;
+# ordinary CI remains pinned to the known-good Debian Bookworm baseline.
+sandbox_image="${RPT_SANDBOX_IMAGE:-debian:bookworm-slim}"
+case "$sandbox_image" in
+  debian:bookworm-slim|ubuntu:22.04|ubuntu:24.04) ;;
+  *) echo "unsupported CI sandbox guest image: $sandbox_image" >&2; exit 1 ;;
+esac
 root="$(mktemp -d)"
 server_pid=""
 upgrade_pid=""
@@ -316,7 +323,7 @@ PY
 
 # Run a real dpkg transaction in a disposable isolated container.
 command -v docker >/dev/null
-docker pull debian:bookworm-slim >/dev/null
+docker pull "$sandbox_image" >/dev/null
 ./target/debug/rpt prepare-download-plan \
   --cache "$root/rpt-cache" --status "$root/apt/status" --apt-root "$root/rpt-apt" \
   --architecture "$arch" --output "$root/sandbox-manifest.json" rpt-sandbox-demo
@@ -324,7 +331,7 @@ docker pull debian:bookworm-slim >/dev/null
   --output "$root/sandbox-artifacts" --workers 1 --segments 1 >"$root/sandbox-fetch.log"
 ./target/debug/rpt sandbox-install \
   --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
-  --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
+  --cache "$root/rpt-cache" --architecture "$arch" --image "$sandbox_image" \
   --journal-dir "$root/sandbox-journal" --id sandbox-ci --timeout-seconds 180
 grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-ci.json"
 # Install/remove and install/purge exercise actual dpkg operations in the
@@ -332,7 +339,7 @@ grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-ci.json"
 for action in install-remove install-purge; do
   ./target/debug/rpt sandbox-install \
     --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
-    --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
+    --cache "$root/rpt-cache" --architecture "$arch" --image "$sandbox_image" \
     --journal-dir "$root/sandbox-journal" --id "sandbox-$action" \
     --timeout-seconds 180 --lifecycle "$action"
   grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-$action.json"
@@ -342,7 +349,7 @@ done
   --architecture "$arch" --output "$root/mismatch-manifest.json" rpt-lie
 if ./target/debug/rpt sandbox-install \
   --manifest "$root/mismatch-manifest.json" --artifacts "$root/sandbox-artifacts" \
-  --cache "$root/rpt-cache" --architecture "$arch" --image debian:bookworm-slim \
+  --cache "$root/rpt-cache" --architecture "$arch" --image "$sandbox_image" \
   --journal-dir "$root/mismatch-journal" --id sandbox-mismatch \
   --timeout-seconds 180 >"$root/mismatch-stdout.log" 2>"$root/mismatch-stderr.log"; then
   echo "Sandbox unexpectedly accepted signed metadata disagreeing with .deb control" >&2
@@ -353,7 +360,7 @@ grep -Fq 'Signed manifest disagrees with Debian control fields' "$root/mismatch-
 # A persistent, isolated container keeps its own dpkg database across RPT
 # install/remove/purge commands. None of this state is reflected on the host.
 ./target/debug/rpt sandbox-session-create \
-  --session "$session" --image debian:bookworm-slim
+  --session "$session" --image "$sandbox_image"
 # Candidate selection must use installed dpkg status from THIS container.
 ./target/debug/rpt sandbox-session-prepare-download-plan \
   --session "$session" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
@@ -667,7 +674,7 @@ gpg --homedir "$root/gnupg" --batch --yes --pinentry-mode loopback --passphrase 
   --no-progress >"$root/rpt-v2-update.log"
 
 # Seed v1 in a new persistent sandbox; reject an intent created before seeding.
-./target/debug/rpt sandbox-session-create --session "$session" --image debian:bookworm-slim
+./target/debug/rpt sandbox-session-create --session "$session" --image "$sandbox_image"
 ./target/debug/rpt sandbox-session-prepare-transaction \
   --session "$session" --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
   --architecture "$arch" --output "$root/bound-v1.json" rpt-sandbox-demo
@@ -742,7 +749,7 @@ echo "PASS authenticated bound install+upgrade 1.0 to 2.0 and stale/replay refus
 # the unfinished journal must remain Running and the original container
 # must be preserved for forensic inspection.
 ./target/debug/rpt sandbox-session-create \
-  --session crash-ci --image debian:bookworm-slim
+  --session crash-ci --image "$sandbox_image"
 ./target/debug/rpt sandbox-session-install \
   --session crash-ci --id crash-seed-v1 \
   --manifest "$root/sandbox-manifest.json" --artifacts "$root/sandbox-artifacts" \
