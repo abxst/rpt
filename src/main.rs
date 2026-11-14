@@ -302,6 +302,18 @@ enum Command {
         #[arg(long, default_value_t = 128)] max_roots: usize,
         #[arg(long, default_value_t = 200)] max_packages: usize,
     },
+    /// Hypothetical joint explicit-removal + signed system-upgrade planning.
+    /// Fail-closed, read-only, NOT automatic apt-get dist-upgrade.
+    PlanFullUpgradeScenario {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long = "remove", required = true)]
+        remove: Vec<String>,
+    },
     /// Read-only conservative reverse-dependency and protected-package removal audit.
     RemovalImpact {
         #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
@@ -894,6 +906,15 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::RemovalImpact { status, architecture, packages } => {
             let report = rpt::removal_impact::inspect(&status, &architecture, &packages)
                 .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::PlanFullUpgradeScenario {
+            cache, status, apt_root, architecture, max_roots, max_packages, remove,
+        } => {
+            let report = rpt::system_full_upgrade::preview(
+                &cache, &status, &apt_root, &architecture, &remove,
+                max_roots, max_packages,
+            ).context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::PlanSystemUpgradePolicy { cache, status, apt_root, architecture, max_roots, max_packages } => {
