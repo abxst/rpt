@@ -47,6 +47,30 @@ Filename: pool/rpt-new-allowed-leaf_2.0_amd64.deb
 Size: 1
 Description: new native leaf for foreign any dependency
 
+Package: rpt-native-recursive-tool
+Version: 2.0
+Architecture: amd64
+Multi-Arch: foreign
+Depends: rpt-native-recursive-helper (>= 3.0)
+Filename: pool/rpt-native-recursive-tool_2.0_amd64.deb
+Size: 1
+Description: native tool depended on by i386 app
+
+Package: rpt-native-recursive-helper
+Version: 3.0
+Architecture: amd64
+Depends: rpt-native-recursive-bottom (= 4.0)
+Filename: pool/rpt-native-recursive-helper_3.0_amd64.deb
+Size: 1
+Description: native-only intermediate helper
+
+Package: rpt-native-recursive-bottom
+Version: 4.0
+Architecture: amd64
+Filename: pool/rpt-native-recursive-bottom_4.0_amd64.deb
+Size: 1
+Description: native-only bottom dependency
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
@@ -95,6 +119,21 @@ Depends: rpt-new-allowed-leaf:any (>= 2.0)
 Filename: pool/rpt-new-allowed-user_1.0_i386.deb
 Size: 1
 Description: foreign user of a new native allowed leaf
+
+Package: rpt-native-recursive-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-native-recursive-tool (>= 2.0)
+Filename: pool/rpt-native-recursive-user_1.0_i386.deb
+Size: 1
+Description: foreign i386 app with nested native dependency chain
+
+Package: rpt-native-recursive-helper
+Version: 99.0
+Architecture: i386
+Filename: pool/rpt-native-recursive-helper_99.0_i386.deb
+Size: 1
+Description: foreign decoy must not resolve amd64 owner's Depends
 
 Package: rpt-pair
 Version: 1.0
@@ -203,6 +242,35 @@ compare_plan() {
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
 }
+compare_plan recursive "$root/empty-status" rpt-native-recursive-user:i386
+grep -Fxq 'rpt-native-recursive-user:i386 1.0' "$root/rpt-recursive-selected"
+grep -Fxq 'rpt-native-recursive-tool 2.0' "$root/rpt-recursive-selected"
+grep -Fxq 'rpt-native-recursive-helper 3.0' "$root/rpt-recursive-selected"
+grep -Fxq 'rpt-native-recursive-bottom 4.0' "$root/rpt-recursive-selected"
+! grep -Fq 'rpt-native-recursive-helper:i386' "$root/rpt-recursive"
+test "$(wc -l <"$root/rpt-recursive-selected")" -eq 4
+# An already configured native Multi-Arch:no helper can satisfy its native
+# parent; do not schedule a foreign copy of a same-name i386 decoy.
+cat >"$root/native-recursive-helper-installed" <<'EOF'
+Package: rpt-native-recursive-helper
+Status: install ok installed
+Architecture: amd64
+Version: 3.0
+Description: installed matching native helper
+
+EOF
+compare_plan recursive-installed "$root/native-recursive-helper-installed" rpt-native-recursive-user:i386
+test "$(wc -l <"$root/rpt-recursive-installed-selected")" -eq 2
+grep -Fxq 'rpt-native-recursive-tool 2.0' "$root/rpt-recursive-installed-selected"
+grep -Fxq 'rpt-native-recursive-user:i386 1.0' "$root/rpt-recursive-installed-selected"
+# Installed native dependency cannot be silently upgraded by a foreign root.
+sed 's/Version: 3.0/Version: 2.0/' "$root/native-recursive-helper-installed" >"$root/native-recursive-old"
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/native-recursive-old" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-native-recursive-user:i386 >"$root/native-recursive-old.log" 2>&1; then
+  echo 'RPT allowed an implicit native recursive helper upgrade' >&2; exit 1
+fi
 compare_plan new-native "$root/empty-status" rpt-new-native-user:i386
 compare_plan new-allowed "$root/empty-status" rpt-new-allowed-user:i386
 grep -Fxq 'rpt-new-native-leaf 2.0' "$root/rpt-new-native-selected"
@@ -287,4 +355,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS authenticated APT/RPT Multi-Arch new native leaves, installed providers, coinstall and tamper refusal'
+echo 'PASS signed Multi-Arch recursive native closure, installed reuse, leaf candidates and tamper refusal'
