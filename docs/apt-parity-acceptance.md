@@ -245,10 +245,14 @@ architecture-policy evidence and remain outside this subset.
 
 The signed, isolated APT/RPT differential covers: i386 consumer ->
 native foreign tool -> native Pre-Depends setup; an i386 consumer ->
-native tool with alternatives where the first Conflicts with installed
-amd64 state; and a native consumer of an authenticated all-architecture
-leaf. Positive versions/identities are compared with `apt-get -s`;
-an already installed older native Pre-Depends is a refusal case.
+native tool with alternatives where the first Conflicts with a **held**
+installed amd64 package; and a native consumer of an authenticated
+all-architecture leaf. Positive versions/identities are compared with
+`apt-get -s`; an already installed older native Pre-Depends is a
+refusal case. **If the conflicting installed package is not held, APT
+may instead remove it and install the first alternative.** RPT's
+foreign read-only planner intentionally forbids implicit native removal,
+so that broader case remains a known non-parity boundary.
 
 **Not closed by this milestone:** full cross-architecture SAT solving,
 arbitrary universal-package dependency graphs, virtual providers across
