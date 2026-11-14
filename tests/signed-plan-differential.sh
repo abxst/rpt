@@ -416,6 +416,10 @@ fi
   --architecture "$arch" --timeout-seconds 180
 # APT mark operations use durable journals and snapshots instead of direct
 # Docker copying of extended_states into the test guest.
+# This disposable guest is seeded with an empty APT mark set for a precise
+# autoremove oracle; real base images can contain unrelated automatic packages.
+# This also exercises the initially absent extended_states path.
+docker exec "rpt-session-$session" /bin/sh -ec 'rm -f /var/lib/apt/extended_states'
 if ./target/debug/rpt sandbox-session-mark \
   --session "$session" --id invalid-mark --journal-dir "$root/session-journal" \
   auto nonexistent-rpt-package >/dev/null 2>&1; then
