@@ -424,12 +424,25 @@ sudo ./target/debug/rpt native-rootfs-apply-transaction \
   --transaction "$root/native-reinstall.json" --artifacts "$root/sandbox-artifacts" \
   --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" \
   --journal-dir "$root/native-journal" --timeout-seconds 180
-# APT Architecture: all marks are stored using the native architecture.
-# Seed a precisely scoped guest mark set and verify RPT orphan planning
-# executes dpkg only against this isolated rootfs, not the VM host.
-sudo mkdir -p "$native_guest/var/lib/apt"
-printf 'Package: rpt-sandbox-demo\nArchitecture: %s\nAuto-Installed: 1\n\n' "$arch" \
-  | sudo tee "$native_guest/var/lib/apt/extended_states" >/dev/null
+# Exercise real APT marking outside Docker using the native RPT backend.
+sudo ./target/debug/rpt native-rootfs-mark \
+  --rootfs "$native_guest" --id native-mark-manual \
+  --journal-dir "$root/native-journal" manual rpt-sandbox-demo
+sudo chroot "$native_guest" /usr/bin/apt-mark showmanual rpt-sandbox-demo \
+  | grep -Fxq rpt-sandbox-demo
+./target/debug/rpt plan-autoremove \
+  --status "$native_guest/var/lib/dpkg/status" \
+  --extended-states "$native_guest/var/lib/apt/extended_states" \
+  --architecture "$arch" > "$root/native-after-manual.json"
+python3 - "$root/native-after-manual.json" <<'PY'
+import json,sys
+assert 'rpt-sandbox-demo:all' not in json.load(open(sys.argv[1]))['remove']
+PY
+sudo ./target/debug/rpt native-rootfs-mark \
+  --rootfs "$native_guest" --id native-mark-auto \
+  --journal-dir "$root/native-journal" auto rpt-sandbox-demo
+sudo chroot "$native_guest" /usr/bin/apt-mark showauto rpt-sandbox-demo \
+  | grep -Fxq rpt-sandbox-demo
 sudo ./target/debug/rpt native-rootfs-autoremove-planned \
   --rootfs "$native_guest" --id native-autoremove \
   --journal-dir "$root/native-journal" --architecture "$arch" --timeout-seconds 180
