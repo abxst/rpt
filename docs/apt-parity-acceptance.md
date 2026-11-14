@@ -217,6 +217,45 @@ substitution, upgrades of installed native dependencies, removal and
 coordinated Multi-Arch transactions remain fail-closed. No foreign
 dpkg execution or live-host mutation is authorized.
 
+## Cross-architecture Pre-Depends and alternative backtracking (M2.6.4 batch)
+
+The explicit `plan-install-foreign-policy` preview now admits owner-scoped
+native `Pre-Depends` alongside ordinary recursive native `Depends`.
+This is a **dependency-first read-only plan**, **not** proof of correct dpkg
+configuration ordering on a real host. While traversing a Pre-Depends
+branch, a dependency cycle back to an ancestor is refused instead of
+being treated as a safe ordinary Depends cycle. Native qualifiers still
+never reinterpret `:native` as the foreign request architecture.
+
+A new native candidate that conflicts with **installed dpkg metadata**
+is now rejected *inside the bounded resolver branch*, before choosing
+the next alternative. This permits deterministic backtracking to a
+second native dependency option without overlooking either direction of
+Conflicts/Breaks/Replaces. Every final chosen candidate must still be
+verified against signed Release/Packages bytes and APT candidate policy.
+The replay and transaction-size budgets remain bounded.
+
+A native dependency owner may also use an exact `Architecture: all`
+**leaf** marked `Multi-Arch: foreign`, with no recursive Depends or
+Pre-Depends. The solver preserves its actual `:all` identity, never
+pretends the data package is an amd64 or i386 binary, and verifies its
+signed origin before exposing it. Universal packages with other
+Multi-Arch flags or nested dependency graphs require more complete
+architecture-policy evidence and remain outside this subset.
+
+The signed, isolated APT/RPT differential covers: i386 consumer ->
+native foreign tool -> native Pre-Depends setup; an i386 consumer ->
+native tool with alternatives where the first Conflicts with installed
+amd64 state; and a native consumer of an authenticated all-architecture
+leaf. Positive versions/identities are compared with `apt-get -s`;
+an already installed older native Pre-Depends is a refusal case.
+
+**Not closed by this milestone:** full cross-architecture SAT solving,
+arbitrary universal-package dependency graphs, virtual providers across
+architectures, synchronized Multi-Arch: same upgrades, removals,
+configuration-script ordering parity, real package execution on the
+host, recovery guarantees, or full APT CLI/config compatibility.
+
 ## Signed foreign index acquisition and APT Multi-Arch differential
 
 The repository updater can now explicitly download additional Debian
