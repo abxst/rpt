@@ -51,7 +51,7 @@ The executor requires an explicit rootfs marker, a directory beneath
 dpkg status digest, archive bytes, embedded Debian control identity,
 and exact installed versions before recording success. It is journaled and
 process supervised, but **does not provide live host execution, secure isolation
-of privileged maintainer scripts, automatic rootfs rollback, removal/purge,
+of privileged maintainer scripts, automatic rootfs rollback, auto/manual marking,
 or complete APT parity**. Failures leave the disposable rootfs for inspection.
 
 See [native rootfs transactions](native-rootfs-transactions.md).
