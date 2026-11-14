@@ -1006,6 +1006,48 @@ for ordering in app-first blocker-first; do
 done
 echo "PASS signed APT/RPT mandatory-root dependency backtracking, both orders"
 
+# The installed dpkg provider is intentionally ABSENT from the signed index.
+# Its actual dpkg Status/Provides satisfies a versioned virtual dependency:
+# RPT must neither require a repo candidate for that already installed
+# provider nor schedule an unrelated package download.
+cat >"$root/installed-virtual-status" <<'STATUS'
+Package: rpt-local-provider
+Status: install ok installed
+Priority: optional
+Section: misc
+Architecture: all
+Version: 9.0
+Provides: rpt-local-virtual-service (= 2)
+Description: locally installed virtual provider, not a repository candidate
+
+STATUS
+provider_opts=("${opts[@]}" -o "Dir::State::status=$root/installed-virtual-status")
+apt-get "${provider_opts[@]}" -s -y install rpt-installed-virtual-app \
+  >"$root/apt-installed-virtual"
+./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/installed-virtual-status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  rpt-installed-virtual-app >"$root/rpt-installed-virtual"
+sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-installed-virtual" \
+  | LC_ALL=C sort -u >"$root/apt-installed-virtual-versions"
+sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-installed-virtual" \
+  | LC_ALL=C sort -u >"$root/rpt-installed-virtual-versions"
+grep -Fxq 'rpt-installed-virtual-app 1.0' "$root/apt-installed-virtual-versions"
+diff -u "$root/apt-installed-virtual-versions" "$root/rpt-installed-virtual-versions"
+# The same installed provider must NOT satisfy an out-of-range dependency.
+if apt-get "${provider_opts[@]}" -s -y install rpt-installed-virtual-bad \
+  >"$root/apt-installed-virtual-rejected" 2>&1; then
+  echo "APT unexpectedly accepted out-of-range installed virtual Provides" >&2; exit 1
+fi
+if ./target/debug/rpt plan-install-batch-policy \
+  --cache "$root/rpt-cache" --status "$root/installed-virtual-status" \
+  --apt-root "$root/rpt-apt" --architecture "$arch" \
+  rpt-installed-virtual-bad >"$root/rpt-installed-virtual-rejected" 2>&1; then
+  echo "RPT unexpectedly accepted out-of-range installed virtual Provides" >&2; exit 1
+fi
+echo "PASS signed APT/RPT installed versioned virtual provider and negative bound"
+
+
 
 # Compare APT Install-Recommends=true/false with an explicit RPT preview
 # mode. Both must select the same names and versions from signed metadata.
