@@ -2441,6 +2441,30 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
     }
 
     #[test]
+    fn failed_deep_replay_still_explores_earlier_parent_alternative() {
+        let mut bad_a = item("bad-a", "1", "");
+        bad_a.conflicts = "blocker".into();
+        let mut bad_b = item("bad-b", "1", "");
+        bad_b.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "middle | fallback")),
+            ("middle".into(), item("middle", "1", "bad-a | bad-b")),
+            ("bad-a".into(), bad_a),
+            ("bad-b".into(), bad_b),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        // Both inner options are locally viable but cannot survive the
+        // later root. Exhaust them and then unwind to first's fallback.
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["fallback", "first", "blocker", "second"]);
+    }
+
+    #[test]
     fn global_replay_never_skips_required_root_or_unsafe_replaces() {
         let mut preferred = item("preferred", "1", "");
         preferred.replaces = "blocker".into();
