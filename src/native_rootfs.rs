@@ -360,6 +360,8 @@ pub async fn apply(opts: Apply<'_>) -> Result<ApplyOutcome> {
     let (automatic, manual) = install_mark_targets(&bound.requested, &bound.steps);
     write_mark_targets(&stage.join("auto-marks.txt"), &automatic)?;
     write_mark_targets(&stage.join("manual-marks.txt"), &manual)?;
+    checkpoint_before(&root, &journal, opts.id, opts.checkpoint_rootfs,
+        &guest_status, Some(&expected_marks))?;
     let stage = fs::canonicalize(stage)?;
     let mut args = vec![
         "-euc".into(), INSTALL_SCRIPT.into(), "rpt-native-rootfs".into(),
@@ -367,8 +369,6 @@ pub async fn apply(opts: Apply<'_>) -> Result<ApplyOutcome> {
         stage.to_string_lossy().into_owned(), expected_marks,
     ];
     args.extend(names.iter().map(|name| stage.join(name).to_string_lossy().into_owned()));
-    checkpoint_before(&root, &journal, opts.id, opts.checkpoint_rootfs,
-        &guest_status, Some(&expected_marks))?;
     DryRunExecutor::new(journal, 1)?.submit_command(
         opts.id.to_owned(), "/bin/sh".into(), args,
         Duration::from_secs(opts.timeout_seconds), Duration::from_secs(5),
