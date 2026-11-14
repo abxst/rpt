@@ -36,6 +36,36 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Native dpkg rootfs behavior oracle on disposable CI VMs
+
+The independent `.github/workflows/native-rootfs-oracle.yml` workflow runs on
+GitHub-hosted Ubuntu Linux **VM runners**. For each guest image (Ubuntu
+22.04 and 24.04) it exports a complete, separate Linux root filesystem
+into a private temporary tree, and runs **real dpkg with
+`--root=<that tree>`**. It does not bind the host root, mount /proc,
+or pass the VM host's dpkg state into the guest.
+
+`tests/native-rootfs-transaction-oracle.sh` builds its own controlled
+`.deb` packages and checks: real unpack/configure; dependency-first
+Pre-Depends ordering; maintainer script execution; local conffile changes
+surviving `--force-confold` upgrades; expected .dpkg-dist creation; clean
+dpkg audit after successful operations; a failed postinst producing broken
+guest status; and recovery from a complete pre-transaction rootfs snapshot
+with the failed filesystem quarantined. An additional controlled SIGKILL
+during postinst repeats the rollback checks. Snapshot restore is explicit
+and performed only after the known test maintainer process has exited.
+
+The test hashes `/var/lib/dpkg/status` and APT extended states on the
+**host VM**, and verifies its hold list and dpkg audit, before and after
+the guest actions, including cleanup on failure.
+
+**Crucial boundary:** This is a **native dpkg semantics oracle**, not an
+RPT-native transaction engine. RPT itself still executes packages only
+inside Docker sandboxes. The test validates the VM rootfs behavior that
+a future RPT native-root adapter must match; it does not assert that RPT
+already supports executing or rolling back arbitrary host packages.
+No production host execution or automated rollback is enabled.
+
 ## Disposable Linux VM-hosted transaction acceptance
 
 The separate `.github/workflows/vm-transaction-acceptance.yml` workflow

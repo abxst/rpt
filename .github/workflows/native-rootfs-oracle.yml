@@ -1,0 +1,28 @@
+name: Native-root filesystem dpkg oracle (disposable VM only)
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-rootfs:
+    name: Ubuntu VM / isolated ${{ matrix.root_image }} rootfs
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        root_image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build RPT read-only diagnostic
+        run: |
+          cargo generate-lockfile
+          cargo build --locked --bin rpt
+      - name: Assert VM host is unmodified by native guest rootfs dpkg/recovery
+        env:
+          RPT_NATIVE_ROOT_IMAGE: ${{ matrix.root_image }}
+        run: bash tests/native-rootfs-transaction-oracle.sh ./target/debug/rpt
