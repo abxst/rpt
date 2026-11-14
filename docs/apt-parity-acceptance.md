@@ -373,6 +373,36 @@ expressions, virtual `Pre-Depends`, multiple equally viable providers,
 cross-architecture substitution and unconstrained APT policy are
 still deliberately unsupported.
 
+## Global replay across dependency decisions of multiple roots
+
+The experimental native-only solver now records *committed* decisions for
+textual dependency alternatives, identified by the owning package and
+group position. If a later requested root's transitive dependency causes
+the overall plan or final safety validation to fail, the solver can replay
+the earlier plan from its last untried alternative, with preceding choices
+fixed and descendants re-evaluated. It does not simply union separate
+root plans or omit a requested package. A single shared budget of **4,096
+branch attempts across all replays** bounds exploration.
+
+This extends the previous direct-root lookahead: for example,
+`first -> preferred | fallback`, `second -> blocker`, where
+`preferred Conflicts: blocker` is now solvable by choosing `fallback`
+even when `first` was processed first. Unit tests cover this and nested
+dependencies, reverse versioned Breaks and impossibility with
+`Replaces`. A signed `apt-get -s` fixture checks both root orders:
+when APT successfully resolves the same graph, binary/version sets must
+match exactly. Some APT resolver versions reject this graph despite
+there being a conflict-free alternative; that difference is explicitly
+reported as a **known compatibility gap**, never counted as parity.
+
+Global replay currently applies to mandatory textual choices with
+individual concrete candidate identities. It **does not** relax
+multi-provider ambiguity, rank equally viable virtual providers,
+automatically remove packages, fix installed-state corruption, or
+provide a full SAT solver. The same strict status, candidate, Multi-Arch,
+and file-ownership safety guards remain active. This is a **partial
+Gate D improvement**, not permission to execute on the host.
+
 ## Resolver and policy regression milestone
 
 The isolated `apt-cache policy` fixture exercises priority 999/1000/1001

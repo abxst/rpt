@@ -435,6 +435,28 @@ fn scoped_relations(
     Ok(scoped)
 }
 
+/// A replayable dependency alternative is identified by its owning binary
+/// and group ordinal, not by plan position (which changes while backtracking).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReplayKey {
+    owner: PackageKey,
+    group: usize,
+    soft: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ReplayChoice {
+    key: ReplayKey,
+    choice: usize,
+    count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ReplayRule {
+    Exactly(usize),
+    AtLeast(usize),
+}
+
 #[derive(Clone)]
 struct Solver<'a> {
     catalog: &'a BTreeMap<PackageKey, PackageSummary>,
@@ -455,6 +477,11 @@ struct Solver<'a> {
     /// against the FINAL staged package set so later upgrades cannot silently
     /// remove its Provides capability.
     installed_provider_proofs: Vec<(PackageKey, Requirement)>,
+    /// Exact replay constraints for earlier decisions, with an increased
+    /// minimum for the last choice being reconsidered.
+    replay_rules: BTreeMap<ReplayKey, ReplayRule>,
+    /// Chronological decision history along ONLY the committed branch.
+    replay_trace: Vec<ReplayChoice>,
 }
 
 impl Solver<'_> {
@@ -634,7 +661,10 @@ impl Solver<'_> {
     /// Debian alternatives are ordered: prefer the first viable binary,
     /// while retaining bounded backtracking for dependencies or conflicts
     /// that make an earlier choice impossible. Never leak failed branches.
-    fn resolve_groups(&mut self, groups: &[Vec<Requirement>], index: usize) -> Result<()> {
+    fn resolve_groups(
+        &mut self, owner: &PackageKey, groups: &[Vec<Requirement>], index: usize,
+        soft: bool,
+    ) -> Result<()> {
         if index == groups.len() { return Ok(()); }
         let group = &groups[index];
         // An already installed satisfier wins before scheduling a new binary,
@@ -659,48 +689,80 @@ impl Solver<'_> {
                     || self.key_for(&alternative.name)?.and_then(|key| self.catalog.get(&key))
                         .is_some_and(|item| item.multi_arch == "allowed" && item.version == *installed);
                 if allowed_installed && satisfies(installed, alternative)? {
-                    return self.resolve_groups(groups, index + 1);
+                    return self.resolve_groups(owner, groups, index + 1, soft);
                 }
             }
             if let Some(provider) = self.installed_virtual_provider(alternative)? {
                 // Proof follows the branch state; later explicit upgrades
                 // cannot silently invalidate the installed capability.
                 self.installed_provider_proofs.push((provider, alternative.clone()));
-                return self.resolve_groups(groups, index + 1);
+                return self.resolve_groups(owner, groups, index + 1, soft);
             }
         }
 
-        // Debian alternatives are ordered, but a single virtual capability
-        // may have several candidates. Try each provider on a cloned solver
-        // state, including its entire dependent closure and remaining groups.
-        // Only a UNIQUE viable provider is selected. If two providers are
-        // equally viable, fail closed rather than invent APT's ranking policy.
-        // The shared search budget counts attempts across failed branches.
+        // Replay is enabled only for discrete textual alternatives whose
+        // identity is unambiguous. A virtual requirement with two viable
+        // providers remains fail-closed: replay must not bypass APT ranking.
+        let mut seen_possible = BTreeSet::new();
+        let mut replayable = true;
+        for requirement in group {
+            let options = self.concrete_candidates(requirement)?;
+            if options.len() > 1 { replayable = false; }
+            seen_possible.extend(options);
+        }
+        replayable &= !soft && seen_possible.len() > 1;
+        let decision_key = ReplayKey {
+            owner: owner.clone(), group: index, soft,
+        };
+        let replay_rule = if replayable {
+            self.replay_rules.get(&decision_key).copied()
+        } else {
+            None
+        };
+        // Debian alternatives are ordered. Explore a copied solver branch
+        // before committing it. Branch budgets are SHARED across attempts.
         let mut seen = BTreeSet::new();
+        let mut ordinal = 0usize;
         for requirement in group {
             let candidates = self.concrete_candidates(requirement)?;
             let multiple_virtual = candidates.len() > 1;
             let mut chosen: Option<Self> = None;
             for option in candidates {
-                if !seen.insert(option.clone()) {
-                    continue;
-                }
+                if !seen.insert(option.clone()) { continue; }
+                let choice = ordinal;
+                ordinal += 1;
+                if replayable && match replay_rule {
+                    Some(ReplayRule::Exactly(target)) => choice != target,
+                    Some(ReplayRule::AtLeast(minimum)) => choice < minimum,
+                    None => false,
+                } { continue; }
                 let remaining = self.branch_budget.get();
                 if remaining == 0 { bail!("dependency branch budget exhausted"); }
                 self.branch_budget.set(remaining - 1);
                 let mut branch = self.clone();
-                // The version requirement was checked against Provides.
-                // Never apply a virtual capability version to the binary.
+                if replayable {
+                    // Log BEFORE walking the child closure, so retries can
+                    // backtrack from the deepest committed decision to the
+                    // earlier parent in deterministic depth-first order.
+                    branch.replay_trace.push(ReplayChoice {
+                        key: decision_key.clone(), choice,
+                        count: seen_possible.len(),
+                    });
+                }
+                // The virtual capability version was checked against
+                // Provides; it must not be applied to the provider's own
+                // binary version.
                 let actual = if requirement.name == option.name {
                     requirement.clone()
                 } else {
                     Requirement {
                         name: option.name.clone(), constraint: None,
-                        any_arch: false, requested_arch: Some(option.architecture.clone()),
+                        any_arch: false,
+                        requested_arch: Some(option.architecture.clone()),
                     }
                 };
                 if branch.resolve_concrete(&option, &actual).is_ok()
-                    && branch.resolve_groups(groups, index + 1).is_ok() {
+                    && branch.resolve_groups(owner, groups, index + 1, soft).is_ok() {
                     if multiple_virtual && chosen.is_some() {
                         bail!("ambiguous virtual package {}: multiple viable providers",
                             requirement.name);
@@ -714,6 +776,7 @@ impl Solver<'_> {
                 self.done = branch.done;
                 self.plan = branch.plan;
                 self.installed_provider_proofs = branch.installed_provider_proofs;
+                self.replay_trace = branch.replay_trace;
                 return Ok(());
             }
         }
@@ -888,7 +951,7 @@ impl Solver<'_> {
         }
         let groups = pre_groups.into_iter()
             .chain(parse_groups_for_arch(&current.depends, &dependency_arch)?).collect::<Vec<_>>();
-        self.resolve_groups(&groups, 0)?;
+        self.resolve_groups(key, &groups, 0, false)?;
         self.visiting.remove(key);
         self.done.insert(key.clone());
         let installed = self.installed.get(key).cloned();
@@ -925,11 +988,12 @@ impl Solver<'_> {
                 let groups = parse_groups_for_arch(&current.recommends, &dependency_arch)?;
                 for group in groups {
                     let mut trial = self.clone();
-                    if trial.resolve_groups(&[group], 0).is_ok() {
+                    if trial.resolve_groups(key, &[group], 0, true).is_ok() {
                         self.visiting = trial.visiting;
                         self.done = trial.done;
                         self.plan = trial.plan;
                         self.installed_provider_proofs = trial.installed_provider_proofs;
+                        self.replay_trace = trial.replay_trace;
                     }
                 }
             }
@@ -1320,19 +1384,33 @@ fn solve_catalog_many_options(
     packages: &[String], max_packages: usize, architecture: &str,
     include_recommends: bool,
 ) -> Result<Vec<PlanStep>> {
+    // All retries share the same bounded search fuel, so revisiting earlier
+    // choices never turns the 4,096-branch cap into an unbounded retry loop.
+    let search_budget = Rc::new(Cell::new(4096));
+    let mut pending = vec![BTreeMap::<ReplayKey, ReplayRule>::new()];
+    let mut examined = BTreeSet::new();
+    let mut first_error = None;
+    while let Some(replay_rules) = pending.pop() {
+    if !examined.insert(replay_rules.clone()) { continue; }
+    if search_budget.get() == 0 {
+        bail!("global dependency branch budget exhausted");
+    }
     let mut solver = Solver {
         catalog, installed, installed_relations, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         architecture: architecture.to_owned(),
-        branch_budget: Rc::new(Cell::new(4096)), include_recommends,
+        branch_budget: Rc::clone(&search_budget), include_recommends,
         requested_roots: BTreeSet::new(),
         installed_provider_proofs: Vec::new(),
+        replay_rules: replay_rules.clone(),
+        replay_trace: Vec::new(),
     };
     for package in packages {
         if let Some(key) = solver.key_for(package)? {
             solver.requested_roots.insert(key);
         }
     }
+    let attempt = (|| -> Result<()> {
     for package in packages {
         solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
     }
@@ -1372,7 +1450,40 @@ fn solve_catalog_many_options(
             }
         }
     }
-    Ok(solver.plan)
+    Ok(())
+    })();
+    match attempt {
+        Ok(()) => return Ok(solver.plan),
+        Err(error) => {
+            if first_error.is_none() { first_error = Some(error); }
+            // Preserve ALL unexplored prefixes. A forced descendant may
+            // fail before committing any new trace; an earlier sibling
+            // must remain on the DFS frontier instead of being lost.
+            //
+            // Enqueue earlier decisions first, then deeper ones, so LIFO
+            // explores the deepest alternative before older siblings.
+            for (index, decision) in solver.replay_trace.iter().enumerate() {
+                if decision.choice + 1 >= decision.count { continue; }
+                let mut rules = BTreeMap::new();
+                for earlier in &solver.replay_trace[..index] {
+                    rules.insert(
+                        earlier.key.clone(), ReplayRule::Exactly(earlier.choice),
+                    );
+                }
+                rules.insert(
+                    decision.key.clone(),
+                    ReplayRule::AtLeast(decision.choice + 1),
+                );
+                if !examined.contains(&rules) {
+                    pending.push(rules);
+                }
+            }
+        }
+    }
+    }
+    Err(first_error.unwrap_or_else(|| anyhow::anyhow!(
+        "no viable bounded dependency assignment"
+    )))
 }
 
 /// Build a candidate-specific read-only catalog for the current dependency
@@ -1701,6 +1812,8 @@ mod tests {
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
             requested_roots: BTreeSet::new(),
             installed_provider_proofs: Vec::new(),
+            replay_rules: BTreeMap::new(),
+            replay_trace: Vec::new(),
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
@@ -2284,6 +2397,92 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
     }
 
     #[test]
+    fn global_replay_backtracks_across_later_roots_transitive_dependencies() {
+        let mut preferred = item("preferred", "1", "");
+        preferred.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "preferred | fallback")),
+            ("preferred".into(), preferred),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        // The first root does not conflict directly with second. Only after
+        // second's transitive blocker is selected is the earlier decision bad.
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["fallback", "first", "blocker", "second"]);
+        let reverse = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["second".into(), "first".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(reverse.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["blocker", "second", "fallback", "first"]);
+    }
+
+    #[test]
+    fn global_replay_backtracks_inside_nested_dependency_closure() {
+        let mut preferred = item("preferred", "1", "");
+        preferred.breaks = "blocker (>= 2)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "intermediate")),
+            ("intermediate".into(), item("intermediate", "1", "preferred | fallback")),
+            ("preferred".into(), preferred),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "2", "")),
+        ]));
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(plan.iter().map(|p| p.package.as_str()).collect::<Vec<_>>(),
+            ["fallback", "intermediate", "first", "blocker", "second"]);
+    }
+
+    #[test]
+    fn failed_deep_replay_still_explores_earlier_parent_alternative() {
+        let mut bad_a = item("bad-a", "1", "");
+        bad_a.conflicts = "blocker".into();
+        let mut bad_b = item("bad-b", "1", "");
+        bad_b.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "middle | fallback")),
+            ("middle".into(), item("middle", "1", "bad-a | bad-b")),
+            ("bad-a".into(), bad_a),
+            ("bad-b".into(), bad_b),
+            ("fallback".into(), item("fallback", "1", "")),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        // Both inner options are locally viable but cannot survive the
+        // later root. Exhaust them and then unwind to first's fallback.
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()], 25, "amd64")
+            .unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["fallback", "first", "blocker", "second"]);
+    }
+
+    #[test]
+    fn global_replay_never_skips_required_root_or_unsafe_replaces() {
+        let mut preferred = item("preferred", "1", "");
+        preferred.replaces = "blocker".into();
+        let mut fallback = item("fallback", "1", "");
+        fallback.conflicts = "blocker".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("first".into(), item("first", "1", "preferred | fallback")),
+            ("preferred".into(), preferred),
+            ("fallback".into(), fallback),
+            ("second".into(), item("second", "1", "blocker")),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        assert!(solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["first".into(), "second".into()],
+            25, "amd64").is_err());
+    }
+
+    #[test]
     fn backtracks_failed_branch_and_restores_full_partial_plan() {
         let catalog = BTreeMap::from([
             ("app".into(), item("app", "1", "bad | good")),
@@ -2643,6 +2842,8 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
             requested_roots: BTreeSet::new(),
             installed_provider_proofs: Vec::new(),
+            replay_rules: BTreeMap::new(),
+            replay_trace: Vec::new(),
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
