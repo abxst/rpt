@@ -1015,10 +1015,11 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::NativeRootfsRemovePlanned {
             rootfs, id, journal_dir, architecture, cascade, purge, timeout_seconds, packages,
         } => {
-            let result = rpt::native_rootfs::remove_planned(
-                &rootfs, &journal_dir, &id, &architecture, &packages,
+            let result = rpt::native_rootfs::remove_planned(rpt::native_rootfs::Remove {
+                rootfs: &rootfs, journal: &journal_dir, id: &id,
+                architecture: &architecture, packages: &packages,
                 cascade, purge, timeout_seconds,
-            ).await.context(ErrorCategory::System)?;
+            }).await.context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             println!("Native disposable-rootfs removal complete; live host dpkg untouched.");
         }
