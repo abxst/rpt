@@ -136,7 +136,7 @@ holding the cooperative lock. It refuses a changed source, a failed copy,
 or a divergent snapshot. Partial copies are left for manual inspection.
 
 A durable, exclusively created checkpoint receipt is written to
-\`JOURNAL_DIR/native-rootfs-snapshots/tx001-baseline.json\`; it contains
+`JOURNAL_DIR/native-rootfs-snapshots/tx001-baseline.json`; it contains
 source/snapshot path identities, tree hash, dpkg status hash, guest APT
 marks hash and creation time. Verify it any time:
 
@@ -158,14 +158,14 @@ journal contains an interrupted transaction; it **never clears that gate**.
 
 ### Opt-in pre-transaction checkpoint hook
 
-Native \`native-rootfs-apply-transaction\`, \`native-rootfs-remove-planned\`
-(including \`--purge\`), \`native-rootfs-mark\`, and
-\`native-rootfs-autoremove-planned\` also accept
-\`--checkpoint-rootfs /tmp/NEW-GUEST-BEFORE\`. This **opt-in** option
+Native `native-rootfs-apply-transaction`, `native-rootfs-remove-planned`
+(including `--purge`), `native-rootfs-mark`, and
+`native-rootfs-autoremove-planned` also accept
+`--checkpoint-rootfs /tmp/NEW-GUEST-BEFORE`. This **opt-in** option
 creates and verifies a full guest checkpoint **after plan/preflight checks
 but before launching the mutating dpkg/apt-mark command**. The transaction
 ID must be 1–57 safe characters. Receipts are written as
-\`JOURNAL_DIR/native-rootfs-snapshots/<TRANSACTION_ID>-before.json\`.
+`JOURNAL_DIR/native-rootfs-snapshots/<TRANSACTION_ID>-before.json`.
 
 For example:
 
@@ -194,7 +194,7 @@ process state, external device effects or power-loss persistence. The
 journal lock coordinates RPT processes only, not arbitrary host writers.
 GNU cp and the guest filesystem must be trusted; privileged maintainer
 scripts are still not contained by chroot. Never use this to snapshot live
-\`/\` or enable host package mutation. A checkpoint is **explicit** and does
+`/` or enable host package mutation. A checkpoint is **explicit** and does
 not automatically wrap every RPT transaction.
 
 ## Optional WSL2 smoke test (Ubuntu amd64)
