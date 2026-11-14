@@ -36,6 +36,25 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Held packages and negative pinning differential
+
+The signed `tests/signed-plan-differential.sh` fixture checks that an exact
+`Pin-Priority: -1` excludes a recommended-only binary from both APT's
+simulated `install` result and RPT's opt-in Recommends plan, while preserving
+its required root package. This exercises policy candidate absence rather
+than an artificially missing repository file.
+
+The fixture also compares APT's explicit-install refusal of a held binary
+(`apt-get -s -y install` without an override) with RPT's fail-closed
+read-only plan. Both operations use an isolated dpkg status with
+`hold ok installed` and a signed higher version in the repository.
+Nothing changes in the host dpkg database.
+
+These checks document only a narrow subset of Gate C/D/H. They do not
+authorize RPT to change holds, emulate all APT pinning expressions or
+permit downgrades based on priorities above 1000; those are gated on
+broader differential validation.
+
 ## Verified Recommends policy (opt-in)
 
 The native-architecture, GPG/Release/SHA256-verified candidate planner can
