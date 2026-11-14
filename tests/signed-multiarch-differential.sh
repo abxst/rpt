@@ -71,6 +71,63 @@ Filename: pool/rpt-native-recursive-bottom_4.0_amd64.deb
 Size: 1
 Description: native-only bottom dependency
 
+Package: rpt-pre-native-tool
+Version: 2.0
+Architecture: amd64
+Multi-Arch: foreign
+Pre-Depends: rpt-pre-native-setup (>= 1.0)
+Filename: pool/rpt-pre-native-tool_2.0_amd64.deb
+Size: 1
+Description: native predepends test tool
+
+Package: rpt-pre-native-setup
+Version: 1.0
+Architecture: amd64
+Filename: pool/rpt-pre-native-setup_1.0_amd64.deb
+Size: 1
+Description: native setup dependency
+
+Package: rpt-alt-native-tool
+Version: 2.0
+Architecture: amd64
+Multi-Arch: foreign
+Depends: rpt-alt-native-bad | rpt-alt-native-good
+Filename: pool/rpt-alt-native-tool_2.0_amd64.deb
+Size: 1
+Description: native tool with ordered alternatives
+
+Package: rpt-alt-native-bad
+Version: 1.0
+Architecture: amd64
+Conflicts: rpt-alt-installed
+Filename: pool/rpt-alt-native-bad_1.0_amd64.deb
+Size: 1
+Description: first native alternative conflicts with installed binary
+
+Package: rpt-alt-native-good
+Version: 1.0
+Architecture: amd64
+Filename: pool/rpt-alt-native-good_1.0_amd64.deb
+Size: 1
+Description: second native alternative is safe
+
+Package: rpt-all-native-tool
+Version: 2.0
+Architecture: amd64
+Multi-Arch: foreign
+Depends: rpt-all-native-data
+Filename: pool/rpt-all-native-tool_2.0_amd64.deb
+Size: 1
+Description: native tool requiring shared all leaf
+
+Package: rpt-all-native-data
+Version: 1.0
+Architecture: all
+Multi-Arch: foreign
+Filename: pool/rpt-all-native-data_1.0_all.deb
+Size: 1
+Description: signed universal binary dependency
+
 EOF
 cat > "$root/www/dists/fixture/main/binary-i386/Packages" <<'EOF'
 Package: rpt-foreign-app
@@ -134,6 +191,38 @@ Architecture: i386
 Filename: pool/rpt-native-recursive-helper_99.0_i386.deb
 Size: 1
 Description: foreign decoy must not resolve amd64 owner's Depends
+
+Package: rpt-pre-native-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-pre-native-tool (>= 2.0)
+Filename: pool/rpt-pre-native-user_1.0_i386.deb
+Size: 1
+Description: foreign user of a native predepends tool
+
+Package: rpt-alt-native-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-alt-native-tool (>= 2.0)
+Filename: pool/rpt-alt-native-user_1.0_i386.deb
+Size: 1
+Description: foreign user of a native alternative tool
+
+Package: rpt-all-native-user
+Version: 1.0
+Architecture: i386
+Depends: rpt-all-native-tool (>= 2.0)
+Filename: pool/rpt-all-native-user_1.0_i386.deb
+Size: 1
+Description: foreign user of a native universal dependency tool
+
+Package: rpt-all-native-data
+Version: 1.0
+Architecture: all
+Multi-Arch: foreign
+Filename: pool/rpt-all-native-data_1.0_all.deb
+Size: 1
+Description: signed universal binary dependency
 
 Package: rpt-pair
 Version: 1.0
@@ -242,6 +331,42 @@ compare_plan() {
   test -s "$root/rpt-$label-selected"
   diff -u "$root/apt-$label-selected" "$root/rpt-$label-selected"
 }
+compare_plan native-predepends "$root/empty-status" rpt-pre-native-user:i386
+grep -Fxq 'rpt-pre-native-user:i386 1.0' "$root/rpt-native-predepends-selected"
+grep -Fxq 'rpt-pre-native-tool 2.0' "$root/rpt-native-predepends-selected"
+grep -Fxq 'rpt-pre-native-setup 1.0' "$root/rpt-native-predepends-selected"
+test "$(wc -l <"$root/rpt-native-predepends-selected")" -eq 3
+compare_plan native-all "$root/empty-status" rpt-all-native-user:i386
+grep -Fxq 'rpt-all-native-data 1.0' "$root/rpt-native-all-selected"
+test "$(wc -l <"$root/rpt-native-all-selected")" -eq 3
+cat >"$root/native-conflicting-installed" <<'EOF'
+Package: rpt-alt-installed
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+Description: installed native binary blocks first ordered alternative
+
+EOF
+compare_plan native-alts "$root/native-conflicting-installed" rpt-alt-native-user:i386
+grep -Fxq 'rpt-alt-native-good 1.0' "$root/rpt-native-alts-selected"
+! grep -Fq 'rpt-alt-native-bad' "$root/rpt-native-alts"
+test "$(wc -l <"$root/rpt-native-alts-selected")" -eq 3
+# Cross-architecture Pre-Depends does not authorize upgrading an existing
+# native setup package implicitly.
+cat >"$root/native-predepends-old" <<'EOF'
+Package: rpt-pre-native-setup
+Status: install ok installed
+Architecture: amd64
+Version: 0.5
+Description: old native setup
+
+EOF
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+  --status "$root/native-predepends-old" --apt-root "$root/rpt-apt" \
+  --native-architecture amd64 --foreign-architecture i386 \
+  rpt-pre-native-user:i386 >"$root/predepends-old.log" 2>&1; then
+  echo 'RPT improperly upgraded a native Pre-Depends through a foreign root' >&2; exit 1
+fi
 compare_plan recursive "$root/empty-status" rpt-native-recursive-user:i386
 grep -Fxq 'rpt-native-recursive-user:i386 1.0' "$root/rpt-recursive-selected"
 grep -Fxq 'rpt-native-recursive-tool 2.0' "$root/rpt-recursive-selected"
@@ -355,4 +480,4 @@ if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
   rpt-foreign-app:i386 >"$root/tampered.log" 2>&1; then
   echo 'RPT accepted a tampered signed Multi-Arch index' >&2; exit 1
 fi
-echo 'PASS signed Multi-Arch recursive native closure, installed reuse, leaf candidates and tamper refusal'
+echo 'PASS signed Multi-Arch recursive native Pre-Depends, ordered alternatives, all leaf and tamper refusal'
