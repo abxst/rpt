@@ -222,6 +222,22 @@ Filename: pool/rpt-joint-blocker_1.0_all.deb
 Size: 1
 Description: explicitly requested mandatory root
 
+Package: rpt-installed-virtual-app
+Version: 1.0
+Architecture: all
+Depends: rpt-local-virtual-service (>= 2)
+Filename: pool/rpt-installed-virtual-app_1.0_all.deb
+Size: 1
+Description: signed installed-provider dependency parity fixture
+
+Package: rpt-installed-virtual-bad
+Version: 1.0
+Architecture: all
+Depends: rpt-local-virtual-service (>= 3)
+Filename: pool/rpt-installed-virtual-bad_1.0_all.deb
+Size: 1
+Description: installed provider version too old for dependency
+
 Package: rpt-soft-app
 Version: 1.0
 Architecture: all
