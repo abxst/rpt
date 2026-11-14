@@ -48,3 +48,38 @@ Autoremove requires reliable APT auto/manual marks inside the container.
 Packages absent from `extended_states` are treated as manual. Missing marks
 are never inferred to mean a package is safe to remove. No persistent host
 transaction execution is exposed.
+
+
+## Journaled manual/automatic package marks
+
+APT manual/automatic state is now editable **inside the isolated Docker
+sandbox only**, without manually copying or editing extended_states:
+
+~~~sh
+rpt sandbox-session-mark --session dev01 --id mark-lib-auto \
+  --journal-dir ./rpt-journal auto libsample
+
+rpt sandbox-session-mark --session dev01 --id mark-lib-manual \
+  --journal-dir ./rpt-journal manual libsample
+
+rpt sandbox-session-plan-autoremove --session dev01 --architecture amd64
+~~~
+
+The command resolves all requested names against the guest's installed
+binary identities before mutation. Ambiguous Multi-Arch names require an
+explicit architecture; unknown, duplicate and malformed requests are rejected.
+A missing initial APT extended_states file is allowed, while nonregular files
+and read errors fail closed.
+
+The operation uses the existing cross-process session lock, verified
+pre-transaction Docker checkpoint, durable journal and supervised execution.
+Immediately before apt-mark, it verifies guest dpkg status and extended_states
+against their captured SHA-256 digests. Afterwards it confirms the new marks,
+checks that dpkg status remains byte-for-byte unchanged, and runs dpkg --audit.
+A failure stops the sandbox and preserves forensic evidence.
+
+Marking a package automatic does not immediately remove it: the subsequent
+autoremove plan still enforces dependency and protected-package checks.
+Automatically marking new dependency packages during an install requires
+future binding to the exact signed resolver plan and is not yet implemented.
+Host APT/dpkg files remain untouched.
