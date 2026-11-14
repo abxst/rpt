@@ -222,6 +222,38 @@ Filename: pool/rpt-joint-blocker_1.0_all.deb
 Size: 1
 Description: explicitly requested mandatory root
 
+Package: rpt-multi-virtual-app
+Version: 1.0
+Architecture: all
+Depends: rpt-multi-virtual-api (>= 2)
+Filename: pool/rpt-multi-virtual-app_1.0_all.deb
+Size: 1
+Description: multiple virtual-provider dependency with forced unique choice
+
+Package: rpt-multi-virtual-a
+Version: 1.0
+Architecture: all
+Provides: rpt-multi-virtual-api (= 2)
+Conflicts: rpt-multi-virtual-blocker
+Filename: pool/rpt-multi-virtual-a_1.0_all.deb
+Size: 1
+Description: unsuitable virtual provider in joint install
+
+Package: rpt-multi-virtual-b
+Version: 1.0
+Architecture: all
+Provides: rpt-multi-virtual-api (= 2)
+Filename: pool/rpt-multi-virtual-b_1.0_all.deb
+Size: 1
+Description: sole viable virtual provider in joint install
+
+Package: rpt-multi-virtual-blocker
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-multi-virtual-blocker_1.0_all.deb
+Size: 1
+Description: jointly requested package restricting virtual provider choices
+
 Package: rpt-installed-virtual-app
 Version: 1.0
 Architecture: all
