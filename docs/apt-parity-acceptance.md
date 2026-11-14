@@ -36,6 +36,37 @@ Each gate needs **positive and negative** fixtures and reproducible CI evidence.
 5. Treat *every* unexplained difference as a failure. Include offline, 404, transient 503, invalid signature, expired Release, inconsistent By-Hash, truncated .deb, interrupted transaction, and disk-full cases.
 6. Only after full parity, run repeatable APT-versus-RPT performance benchmarks. The existing parallel downloader is not evidence of faster end-to-end upgrades.
 
+## Signed foreign index acquisition and APT Multi-Arch differential
+
+The repository updater can now explicitly download additional Debian
+architecture indexes, retaining the mandatory native index:
+
+    rpt update --driver deb --root ./apt-config --output ./rpt-lists \
+      --additional-architecture i386
+
+Each foreign `binary-<arch>/Packages` file must have a SHA-256 entry
+authenticated by the same InRelease signature as the native index.
+Missing, altered or unsigned foreign indexes fail the entire repository
+refresh rather than returning a partially verified cache. By default
+RPT still downloads **only its native architecture**; at most four
+distinct additional architectures can be requested. This is metadata
+acquisition only and does not call `dpkg --add-architecture`.
+
+The signed `tests/signed-multiarch-differential.sh` fixture configures a
+temporary, two-architecture amd64/i386 repository with a freshly generated
+GPG key and isolated APT state. It compares `apt-get -s` and RPT for
+a foreign-only dependency closure and a same-version
+`Multi-Arch: same` binary with an already installed native partner.
+It also demands rejection of a mismatched installed native version and
+modified signed-cache bytes.
+
+This remains a limited **read-only** parity milestone. Source entries
+currently must be usable by the native-architecture updater; foreign-only
+Deb822 `Architectures:` source selection, unqualified cross-architecture
+providers, Multi-Arch: foreign/allowed, synchronized upgrades, and full
+APT removal/replacement semantics are not implemented. Foreign package
+installation on the host or in a sandbox is still prohibited.
+
 ## Explicit foreign-architecture candidate-policy preview
 
 The existing restricted foreign-architecture resolver is exposed through the
