@@ -728,8 +728,12 @@ impl Solver<'_> {
             bail!("dependency plan exceeded maximum package count");
         }
         self.visiting.insert(key.clone());
-        let dependency_arch = if current.architecture == "all" { &self.architecture } else { &current.architecture };
-        let pre_groups = parse_groups_for_arch(&current.pre_depends, dependency_arch)?;
+        let dependency_arch = if current.architecture == "all" {
+            self.architecture.clone()
+        } else {
+            current.architecture.clone()
+        };
+        let pre_groups = parse_groups_for_arch(&current.pre_depends, &dependency_arch)?;
         // A Pre-Depends back-edge cannot be safely represented by a simple
         // package set: configuring the target before unpacking the source
         // requires an execution-order model.
@@ -743,7 +747,7 @@ impl Solver<'_> {
             }
         }
         let groups = pre_groups.into_iter()
-            .chain(parse_groups_for_arch(&current.depends, dependency_arch)?).collect::<Vec<_>>();
+            .chain(parse_groups_for_arch(&current.depends, &dependency_arch)?).collect::<Vec<_>>();
         self.resolve_groups(&groups, 0)?;
         self.visiting.remove(key);
         self.done.insert(key.clone());
@@ -778,7 +782,7 @@ impl Solver<'_> {
                 // mandatory change even if this suggestion cannot be
                 // satisfied; a failed branch must not leak into the plan.
                 // Parsing remains strict: unsupported metadata fails closed.
-                let groups = parse_groups_for_arch(&current.recommends, dependency_arch)?;
+                let groups = parse_groups_for_arch(&current.recommends, &dependency_arch)?;
                 for group in groups {
                     let mut trial = self.clone();
                     if trial.resolve_groups(&[group], 0).is_ok() {
@@ -1287,7 +1291,7 @@ pub fn preview_many_with_policy_options(
         }
         let mut discovered = false;
         for name in mandatory {
-            if roots.insert(name) { discovered = true; }
+            if roots.insert(name.clone()) { discovered = true; }
             // A mandatory relationship upgrades this identity from optional.
             optional_names.remove(&name);
         }
@@ -2072,7 +2076,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         let mut solver = Solver {
             catalog: &keyed, installed: &binary_installed, installed_relations: &binary_relations,
             visiting: BTreeSet::new(), done: BTreeSet::new(),
-            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)),
+            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(100)), include_recommends: false,
         };
         assert!(solver.resolve(&parse_atom("app").unwrap()).is_err());
     }
