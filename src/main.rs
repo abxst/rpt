@@ -466,6 +466,23 @@ enum Command {
         #[arg(long, default_value = "./rpt-journal")] journal_dir: PathBuf,
         #[arg(long, default_value_t = 600)] timeout_seconds: u64,
     },
+    /// Create a verified, copy-based checkpoint of a clean disposable guest.
+    /// Holds the cooperative transaction journal lock; never snapshots /.
+    NativeRootfsSnapshotCreate {
+        #[arg(long)] rootfs: PathBuf,
+        #[arg(long)] snapshot_rootfs: PathBuf,
+        #[arg(long)] journal_dir: PathBuf,
+        #[arg(long)] id: String,
+    },
+    /// Rehash a native rootfs checkpoint and verify its dpkg state.
+    NativeRootfsSnapshotVerify {
+        #[arg(long)] receipt: PathBuf,
+    },
+    /// Copy a verified checkpoint into a new disposable rootfs; never overwrite.
+    NativeRootfsSnapshotRestore {
+        #[arg(long)] receipt: PathBuf,
+        #[arg(long)] new_rootfs: PathBuf,
+    },
     /// Read-only recovery diagnostics for a disposable rootfs and its journal.
     /// Does not repair dpkg or authorize retry after interruption.
     NativeRootfsRecoveryInspect {
@@ -1031,6 +1048,24 @@ async fn execute(cli: Cli) -> Result<()> {
                 rpt::native_rootfs::ApplyOutcome::MarksOnly =>
                     println!("Native disposable-rootfs mark-only transaction verified and applied; no dpkg package changes, live host untouched."),
             }
+        }
+        Command::NativeRootfsSnapshotCreate {
+            rootfs, snapshot_rootfs, journal_dir, id,
+        } => {
+            let report = rpt::native_snapshot::create(
+                &rootfs, &snapshot_rootfs, &journal_dir, &id,
+            ).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::NativeRootfsSnapshotVerify { receipt } => {
+            let report = rpt::native_snapshot::verify(&receipt)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::NativeRootfsSnapshotRestore { receipt, new_rootfs } => {
+            let report = rpt::native_snapshot::restore(&receipt, &new_rootfs)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::NativeRootfsRecoveryInspect { rootfs, journal_dir } => {
             let report = rpt::native_rootfs::inspect_recovery(&rootfs, &journal_dir)
