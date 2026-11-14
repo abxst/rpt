@@ -317,6 +317,34 @@ requested upgrade dropping its original virtual capability.
 This is **partial Gate D parity** only, not full virtual-provider
 ranking, alternatives, Multi-Arch, or live APT replacement.
 
+## Bounded virtual-provider alternatives under mandatory conflicts
+
+For `Depends` and `Recommends`, the experimental native-only solver
+can enumerate up to **32** exact catalog binary identities that advertise
+a matching virtual `Provides` capability. Every choice runs through the
+existing branch budget (4,096 attempts) and full dependent closure,
+`Conflicts`, `Breaks`, `Replaces`, mandatory-root constraints, and
+architecture/status guards. A versioned dependency is checked against the
+declared virtual **Provides version** (not the provider binary version).
+
+A provider is selected only if it is the **unique viable choice** for
+that virtual requirement after the remainder of the dependency groups
+is resolved. If two candidates both work, RPT refuses to invent a
+ranking rule. If none works, RPT refuses the plan. The signed
+`apt-get -s` differential fixture checks both root argument orders:
+one provider is incompatible with a separately requested package, and
+the other is uniquely viable. Unit tests exercise transitive branch
+failures, versioned capabilities, foreign binaries, ambiguous provider
+refusal, 32-provider bound and Pre-Depends ambiguity.
+
+This is **partial Gate D** only. Pure virtual roots and ambiguous
+virtual `Pre-Depends` remain fail-closed. APT's provider preferences
+for multiple viable candidates, globally nested solver decisions,
+installed dependency-chain constraints, package removals, real
+Multi-Arch and full pinning policy still need differential coverage.
+Candidate policy is rechecked before returning a plan, but this
+does not authorize dpkg transactions on the live host.
+
 ## Resolver and policy regression milestone
 
 The isolated `apt-cache policy` fixture exercises priority 999/1000/1001

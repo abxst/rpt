@@ -222,6 +222,38 @@ Filename: pool/rpt-joint-blocker_1.0_all.deb
 Size: 1
 Description: explicitly requested mandatory root
 
+Package: rpt-multi-virtual-app
+Version: 1.0
+Architecture: all
+Depends: rpt-multi-virtual-api (>= 2)
+Filename: pool/rpt-multi-virtual-app_1.0_all.deb
+Size: 1
+Description: multiple virtual-provider dependency with forced unique choice
+
+Package: rpt-multi-virtual-a
+Version: 1.0
+Architecture: all
+Provides: rpt-multi-virtual-api (= 2)
+Conflicts: rpt-multi-virtual-blocker
+Filename: pool/rpt-multi-virtual-a_1.0_all.deb
+Size: 1
+Description: unsuitable virtual provider in joint install
+
+Package: rpt-multi-virtual-b
+Version: 1.0
+Architecture: all
+Provides: rpt-multi-virtual-api (= 2)
+Filename: pool/rpt-multi-virtual-b_1.0_all.deb
+Size: 1
+Description: sole viable virtual provider in joint install
+
+Package: rpt-multi-virtual-blocker
+Version: 1.0
+Architecture: all
+Filename: pool/rpt-multi-virtual-blocker_1.0_all.deb
+Size: 1
+Description: jointly requested package restricting virtual provider choices
+
 Package: rpt-installed-virtual-app
 Version: 1.0
 Architecture: all
@@ -1005,6 +1037,39 @@ for ordering in app-first blocker-first; do
   fi
 done
 echo "PASS signed APT/RPT mandatory-root dependency backtracking, both orders"
+
+# When several versioned virtual providers exist, a separate explicitly
+# requested package may make all but one infeasible. Compare the exact signed
+# candidate/version set with APT for both input orders. Ambiguous viable
+# providers outside this forced-unique case remain a separate parity gap.
+for ordering in app-first blocker-first; do
+  if [[ "$ordering" == app-first ]]; then
+    roots=(rpt-multi-virtual-app rpt-multi-virtual-blocker)
+  else
+    roots=(rpt-multi-virtual-blocker rpt-multi-virtual-app)
+  fi
+  apt-get "${opts[@]}" -s -y install "${roots[@]}" \
+    >"$root/apt-multi-provider"
+  ./target/debug/rpt plan-install-batch-policy \
+    --cache "$root/rpt-cache" --status "$root/apt/status" \
+    --apt-root "$root/rpt-apt" --architecture "$arch" \
+    "${roots[@]}" >"$root/rpt-multi-provider"
+  sed -nE 's/^Inst ([^ ]+) \(([^ )]+).*/\1 \2/p' "$root/apt-multi-provider" \
+    | LC_ALL=C sort -u >"$root/apt-multi-provider-versions"
+  sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-multi-provider" \
+    | LC_ALL=C sort -u >"$root/rpt-multi-provider-versions"
+  test -s "$root/apt-multi-provider-versions"
+  diff -u "$root/apt-multi-provider-versions" "$root/rpt-multi-provider-versions"
+  for pkg in rpt-multi-virtual-app rpt-multi-virtual-blocker rpt-multi-virtual-b; do
+    grep -Fxq "$pkg 1.0" "$root/apt-multi-provider-versions"
+  done
+  if grep -Fq "rpt-multi-virtual-a " "$root/apt-multi-provider-versions"; then
+    echo "APT chose a provider incompatible with the requested blocker" >&2
+    exit 1
+  fi
+done
+echo "PASS signed APT/RPT forced-unique virtual provider with joint roots (both orders)"
+
 
 # The installed dpkg provider is intentionally ABSENT from the signed index.
 # Its actual dpkg Status/Provides satisfies a versioned virtual dependency:

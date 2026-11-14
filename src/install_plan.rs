@@ -552,52 +552,67 @@ impl Solver<'_> {
         Ok(())
     }
 
-    fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
+    /// Collect concrete choices for one requirement in deterministic keyed
+    /// order. For a real package identity there is at most one candidate;
+    /// virtual Provides can expose several providers. Bounded enumeration
+    /// never downgrades a versioned virtual requirement to the provider's own
+    /// binary version, and never substitutes a foreign architecture.
+    fn concrete_candidates(&self, required: &Requirement) -> Result<Vec<PackageKey>> {
         if let Some(requested_arch) = &required.requested_arch {
-            let explicit = PackageKey { name: required.name.clone(), architecture: requested_arch.clone() };
+            let explicit = PackageKey {
+                name: required.name.clone(), architecture: requested_arch.clone(),
+            };
             if let Some(item) = self.catalog.get(&explicit) {
                 if required.any_arch { bail!("conflicting architecture qualifiers"); }
-                return Ok(if satisfies(&item.version, required)? { Some(explicit) } else { None });
+                return Ok(if satisfies(&item.version, required)? {
+                    vec![explicit]
+                } else { Vec::new() });
             }
             if requested_arch != &self.architecture {
-                return Ok(None); // Never silently substitute a native or all binary.
+                return Ok(Vec::new()); // Never substitute a native/all binary.
             }
         }
         if let Some(key) = self.key_for(&required.name)? {
             let real = &self.catalog[&key];
             if required.any_arch && real.multi_arch != "allowed" {
-                return Ok(None);
+                return Ok(Vec::new());
             }
-            return Ok(if satisfies(&real.version, required)? { Some(key) } else { None });
+            return Ok(if satisfies(&real.version, required)? {
+                vec![key]
+            } else { Vec::new() });
         }
         if required.any_arch {
             bail!("virtual Provides with :any require a full Multi-Arch resolver");
         }
-        let mut candidates = Vec::new();
+        let mut providers = Vec::new();
         for (key, item) in self.catalog {
-            // A virtual provider must be installable in this dependency
-            // architecture. A foreign binary must not satisfy a native
-            // dependency merely because it advertises the same capability.
             if key.architecture != self.architecture && key.architecture != "all" {
                 continue;
             }
-            if required.any_arch { continue; }
-            let mut matches = false;
             for cap in provides(item)? {
                 if capability_satisfies(&cap, required)? {
-                    matches = true;
+                    providers.push(key.clone());
                     break;
                 }
             }
-            if matches {
-                candidates.push(key.clone());
-                if candidates.len() > 1 { break; }
+            if providers.len() > 32 {
+                bail!("virtual package {} exceeds bounded provider search (32)",
+                    required.name);
             }
         }
-        if candidates.len() > 1 {
-            bail!("ambiguous virtual package {}: multiple providers; full APT solver required", required.name);
+        Ok(providers)
+    }
+
+    /// An explicit root or an early Pre-Depends cycle guard must not choose
+    /// arbitrarily among multiple virtual providers. Dependency alternatives
+    /// use the bounded branch solver below instead.
+    fn concrete(&self, required: &Requirement) -> Result<Option<PackageKey>> {
+        let choices = self.concrete_candidates(required)?;
+        if choices.len() > 1 {
+            bail!("ambiguous virtual package {}: multiple providers require bounded dependency search",
+                required.name);
         }
-        Ok(candidates.pop())
+        Ok(choices.into_iter().next())
     }
 
     fn resolve(&mut self, requested: &Requirement) -> Result<()> {
@@ -655,39 +670,46 @@ impl Solver<'_> {
             }
         }
 
-        // Preserve dependency expression order, not BTreeSet lexical order.
-        // Deduplicate concrete providers without changing the first matching
-        // requirement's version / architecture constraints.
+        // Debian alternatives are ordered, but a single virtual capability
+        // may have several candidates. Try each provider on a cloned solver
+        // state, including its entire dependent closure and remaining groups.
+        // Only a UNIQUE viable provider is selected. If two providers are
+        // equally viable, fail closed rather than invent APT's ranking policy.
+        // The shared search budget counts attempts across failed branches.
         let mut seen = BTreeSet::new();
-        let mut options = Vec::new();
         for requirement in group {
-            if let Some(concrete) = self.concrete(requirement)? {
-                if seen.insert(concrete.clone()) {
-                    options.push((concrete, requirement));
+            let candidates = self.concrete_candidates(requirement)?;
+            let multiple_virtual = candidates.len() > 1;
+            let mut chosen: Option<Self> = None;
+            for option in candidates {
+                if !seen.insert(option.clone()) {
+                    continue;
+                }
+                let remaining = self.branch_budget.get();
+                if remaining == 0 { bail!("dependency branch budget exhausted"); }
+                self.branch_budget.set(remaining - 1);
+                let mut branch = self.clone();
+                // The version requirement was checked against Provides.
+                // Never apply a virtual capability version to the binary.
+                let actual = if requirement.name == option.name {
+                    requirement.clone()
+                } else {
+                    Requirement {
+                        name: option.name.clone(), constraint: None,
+                        any_arch: false, requested_arch: Some(option.architecture.clone()),
+                    }
+                };
+                if branch.resolve_concrete(&option, &actual).is_ok()
+                    && branch.resolve_groups(groups, index + 1).is_ok() {
+                    if multiple_virtual && chosen.is_some() {
+                        bail!("ambiguous virtual package {}: multiple viable providers",
+                            requirement.name);
+                    }
+                    chosen = Some(branch);
+                    if !multiple_virtual { break; }
                 }
             }
-        }
-        if options.is_empty() {
-            bail!("no resolvable alternatives for dependency group");
-        }
-        for (option, requirement) in options {
-            let remaining = self.branch_budget.get();
-            if remaining == 0 { bail!("dependency branch budget exhausted"); }
-            self.branch_budget.set(remaining - 1);
-            let mut branch = self.clone();
-            // When a virtual capability maps to a unique actual provider,
-            // keep the policy-verified provider identity; never weaken a
-            // direct binary's requested version constraint.
-            let actual = if requirement.name == option.name {
-                requirement.clone()
-            } else {
-                Requirement {
-                    name: option.name.clone(), constraint: None,
-                    any_arch: false, requested_arch: Some(option.architecture.clone()),
-                }
-            };
-            if branch.resolve_concrete(&option, &actual).is_ok()
-                && branch.resolve_groups(groups, index + 1).is_ok() {
+            if let Some(branch) = chosen {
                 self.visiting = branch.visiting;
                 self.done = branch.done;
                 self.plan = branch.plan;
@@ -2351,6 +2373,107 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             &["app".into(), "provider".into()], 20, "amd64").unwrap();
         assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
             ["app", "provider"]);
+    }
+
+    #[test]
+    fn multiple_virtual_providers_choose_unique_conflict_free_candidate() {
+        let mut bad = item("badprovider", "1", "");
+        bad.provides = "virtual-service (= 2)".into();
+        bad.conflicts = "blocker".into();
+        let mut good = item("goodprovider", "1", "");
+        good.provides = "virtual-service (= 2)".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service (>= 2)")),
+            ("badprovider".into(), bad),
+            ("goodprovider".into(), good),
+            ("blocker".into(), item("blocker", "1", "")),
+        ]));
+        for roots in [
+            vec!["app".into(), "blocker".into()],
+            vec!["blocker".into(), "app".into()],
+        ] {
+            let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+                &BTreeMap::new(), &roots, 30, "amd64").unwrap();
+            let names = plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>();
+            assert!(names.contains(&"app") && names.contains(&"blocker"));
+            assert!(names.contains(&"goodprovider") && !names.contains(&"badprovider"));
+            assert_eq!(names.len(), 3);
+        }
+        // Without blocker both providers work; refuse arbitrary lexical ranking.
+        assert!(solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["app".into()], 30, "amd64")
+            .unwrap_err().to_string().contains("multiple viable providers"));
+    }
+
+    #[test]
+    fn multiple_virtual_providers_backtrack_on_transitive_failure() {
+        let mut bad = item("badprovider", "1", "helper, nonexistent");
+        bad.provides = "virtual-service".into();
+        let mut good = item("goodprovider", "1", "");
+        good.provides = "virtual-service".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service")),
+            ("badprovider".into(), bad),
+            ("goodprovider".into(), good),
+            ("helper".into(), item("helper", "1", "")),
+        ]));
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["app".into()], 30, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["goodprovider", "app"]);
+    }
+
+    #[test]
+    fn provider_version_and_foreign_architecture_remain_isolated() {
+        let mut old = item("oldprovider", "999", "");
+        old.provides = "virtual-service (= 1)".into();
+        let mut good = item("goodprovider", "1", "");
+        good.provides = "virtual-service (= 3)".into();
+        let mut foreign = item("foreignprovider", "4", "");
+        foreign.provides = "virtual-service (= 3)".into();
+        foreign.architecture = "i386".into();
+        let catalog = test_keyed(&BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service (>= 2)")),
+            ("oldprovider".into(), old),
+            ("goodprovider".into(), good),
+            ("foreignprovider".into(), foreign),
+        ]));
+        let plan = solve_catalog_many(&catalog, &BTreeMap::new(),
+            &BTreeMap::new(), &["app".into()], 30, "amd64").unwrap();
+        assert_eq!(plan.iter().map(|step| step.package.as_str()).collect::<Vec<_>>(),
+            ["goodprovider", "app"]);
+    }
+
+    #[test]
+    fn bounded_virtual_provider_enumeration_fails_closed() {
+        let mut catalog = BTreeMap::from([
+            ("app".into(), item("app", "1", "virtual-service")),
+        ]);
+        for index in 0..33 {
+            let name = format!("provider{index:02}");
+            let mut provider = item(&name, "1", "");
+            provider.provides = "virtual-service".into();
+            catalog.insert(name, provider);
+        }
+        assert!(solve(&catalog, &BTreeMap::new(), "app")
+            .unwrap_err().to_string().contains("32"));
+    }
+
+    #[test]
+    fn direct_virtual_root_and_ambiguous_predepends_remain_fail_closed() {
+        let mut one = item("providerone", "1", "");
+        one.provides = "virtual-service".into();
+        let mut two = item("providertwo", "1", "");
+        two.provides = "virtual-service".into();
+        let mut app = item("app", "1", "");
+        app.pre_depends = "virtual-service".into();
+        let catalog = BTreeMap::from([
+            ("app".into(), app),
+            ("providerone".into(), one),
+            ("providertwo".into(), two),
+        ]);
+        assert!(solve(&catalog, &BTreeMap::new(), "virtual-service").is_err());
+        assert!(solve(&catalog, &BTreeMap::new(), "app").is_err());
     }
 
     #[test]
