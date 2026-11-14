@@ -241,6 +241,75 @@ fn result(mode: &str, removed: &BTreeSet<InstalledKey>, blockers: BTreeSet<Strin
     }
 }
 
+/// Identify already installed binaries that conflict with the signed,
+/// selected upgrade candidates. Only forward Conflicts/Breaks from a new
+/// candidate and reverse Conflicts/Breaks from installed status are evidence
+/// for an automatic removal proposal. Never derive removals from unverified
+/// repository versions or from a package's mere absence in the index.
+///
+/// Caller MUST independently verify candidate versions under APT policy.
+pub(crate) fn signed_upgrade_removal_blockers(
+    status: &[u8], native: &str, candidates: &[PackageSummary],
+) -> Result<Vec<InstalledKey>> {
+    checked_arch(native)?;
+    let installed = read_installed_bytes(status)?;
+    ensure_initial_dependencies(&installed, native)?;
+    let mut blockers = BTreeSet::new();
+    let mut staged_identities = BTreeSet::new();
+    for item in candidates {
+        checked_name(&item.name)?;
+        checked_arch(&item.architecture)?;
+        if item.architecture != native && item.architecture != "all" {
+            bail!("cannot automatically remove blockers for foreign candidate");
+        }
+        let key = InstalledKey {
+            name: item.name.clone(), architecture: item.architecture.clone(),
+        };
+        if !staged_identities.insert(key.clone()) {
+            bail!("duplicate signed upgrade candidate");
+        }
+        let old = installed.get(&key).with_context(||
+            format!("automatic removal requires an installed upgrade target: {}",
+                key_label(&key)))?;
+        if old.protected {
+            bail!("automatic upgrade would change held, Essential or Protected {}",
+                key_label(&key));
+        }
+        if version::compare(&item.version, &old.version)? != Ordering::Greater {
+            bail!("signed candidate for {} is not an upgrade", key_label(&key));
+        }
+        let signed = staged_status(item, false)?;
+        for group in signed.conflicts.iter().chain(signed.breaks.iter()) {
+            for found in satisfiers(&installed, group, &key.architecture, native)? {
+                if found != key { blockers.insert(found); }
+            }
+        }
+        let singleton = BTreeMap::from([(key.clone(), signed)]);
+        for (other_key, other) in &installed {
+            if other_key == &key { continue; }
+            for group in other.conflicts.iter().chain(other.breaks.iter()) {
+                if satisfiers(&singleton, group, &other_key.architecture, native)?
+                    .contains(&key) {
+                    blockers.insert(other_key.clone());
+                }
+            }
+        }
+    }
+    // An updated binary is not a removable old blocker; its new version
+    // must be considered by the joint solver. If the no-removal solve is
+    // still inconsistent, the scenario search will refuse this case.
+    blockers.retain(|key| !staged_identities.contains(key));
+    if blockers.len() > 8 {
+        bail!("automatic full-upgrade found more than eight signed conflict blockers; manual review required");
+    }
+    for key in &blockers {
+        if installed.get(key).is_some_and(|entry| entry.protected) {
+            bail!("automatic full-upgrade conflicts with held, Essential or Protected {}", key_label(key));
+        }
+    }
+    Ok(blockers.into_iter().collect())
+}
+
 /// A strictly checked, read-only projection of dpkg status after removing
 /// an explicit set of complete installed binary identities. This is used
 /// only to ask the existing signed policy solver which new candidate versions
