@@ -1142,7 +1142,7 @@ pub fn preview_explicit_architecture(
     let scoped = scoped_relations(&relations, foreign_architecture)?;
     let plan = solve_catalog_foreign(
         &catalog, &installed, &scoped, requested, max_packages,
-        foreign_architecture, native_architecture, &relations,
+        (foreign_architecture, native_architecture), &relations,
     )?;
     // Validate against every installed identity outside the target architecture,
     // including the native host. No removals or version synchronization inferred.
@@ -1311,7 +1311,7 @@ pub fn preview_explicit_architecture_with_policy(
         if discovered { continue; }
         let plan = solve_catalog_foreign(
             &catalog, &installed, &scoped, requested, max_packages,
-            foreign_architecture, native_architecture, &relations,
+            (foreign_architecture, native_architecture), &relations,
         )?;
         for step in &plan {
             if roots.insert(PackageKey {
@@ -1415,13 +1415,13 @@ fn solve_catalog_foreign(
     catalog: &BTreeMap<PackageKey, PackageSummary>,
     installed: &BTreeMap<PackageKey, String>,
     installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
-    package: &str, max_packages: usize, foreign_architecture: &str,
-    native_architecture: &str,
+    package: &str, max_packages: usize, architectures: (&str, &str),
     full_relations: &BTreeMap<cache_query::InstalledKey, InstalledRelations>,
 ) -> Result<Vec<PlanStep>> {
+    let (foreign_architecture, native_architecture) = architectures;
     solve_catalog_many_options_with_external(
         catalog, installed, installed_relations, &[package.to_owned()],
-        max_packages, foreign_architecture, false, Some((native_architecture, full_relations)),
+        max_packages, (foreign_architecture, false), Some((native_architecture, full_relations)),
     )
 }
 
@@ -1434,7 +1434,7 @@ fn solve_catalog_many_options(
 ) -> Result<Vec<PlanStep>> {
     solve_catalog_many_options_with_external(
         catalog, installed, installed_relations, packages, max_packages,
-        architecture, include_recommends, None,
+        (architecture, include_recommends), None,
     )
 }
 
@@ -1442,10 +1442,10 @@ fn solve_catalog_many_options_with_external<'a>(
     catalog: &'a BTreeMap<PackageKey, PackageSummary>,
     installed: &'a BTreeMap<PackageKey, String>,
     installed_relations: &'a BTreeMap<PackageKey, InstalledRelations>,
-    packages: &[String], max_packages: usize, architecture: &str,
-    include_recommends: bool,
+    packages: &[String], max_packages: usize, options: (&str, bool),
     external_native: Option<(&'a str, &'a BTreeMap<cache_query::InstalledKey, InstalledRelations>)>,
 ) -> Result<Vec<PlanStep>> {
+    let (architecture, include_recommends) = options;
     // All retries share the same bounded search fuel, so revisiting earlier
     // choices never turns the 4,096-branch cap into an unbounded retry loop.
     let search_budget = Rc::new(Cell::new(4096));
@@ -2222,7 +2222,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         ]);
         let plan = solve_catalog_many_options_with_external(
             &catalog, &BTreeMap::new(), &BTreeMap::new(),
-            &["rpt-foreign-app:i386".into()], 20, "i386", false, Some(("amd64", &native)),
+            &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &native)),
         ).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].architecture, "i386");
@@ -2234,7 +2234,7 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
             }).unwrap().multi_arch = wrong_flag.into();
             assert!(solve_catalog_many_options_with_external(
                 &catalog, &BTreeMap::new(), &BTreeMap::new(),
-                &["rpt-foreign-app:i386".into()], 20, "i386", false, Some(("amd64", &denied)),
+                &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &denied)),
             ).is_err());
         }
         let mut outdated = native.clone();
@@ -2243,13 +2243,13 @@ Package: lib\nArchitecture: i386\nVersion: 1\nMulti-Arch: same\nStatus: hold ok 
         }).unwrap().version = "1".into();
         assert!(solve_catalog_many_options_with_external(
             &catalog, &BTreeMap::new(), &BTreeMap::new(),
-            &["rpt-foreign-app:i386".into()], 20, "i386", false, Some(("amd64", &outdated)),
+            &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &outdated)),
         ).is_err());
         app.depends = "rpt-host-tool:i386 (>= 2)".into();
         let explicit = test_keyed(&BTreeMap::from([("rpt-foreign-app".into(), app)]));
         assert!(solve_catalog_many_options_with_external(
             &explicit, &BTreeMap::new(), &BTreeMap::new(),
-            &["rpt-foreign-app:i386".into()], 20, "i386", false, Some(("amd64", &native)),
+            &["rpt-foreign-app:i386".into()], 20, ("i386", false), Some(("amd64", &native)),
         ).is_err());
     }
     #[test]
