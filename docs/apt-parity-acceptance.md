@@ -345,6 +345,34 @@ Multi-Arch and full pinning policy still need differential coverage.
 Candidate policy is rechecked before returning a plan, but this
 does not authorize dpkg transactions on the live host.
 
+## Pin-aware virtual provider candidate discovery
+
+Before choosing among providers for a **single mandatory virtual
+`Depends`**, RPT now enumerates the matching native/`all` binary
+identities and verifies each binary's exact policy candidate from
+authenticated repository origins. Candidate selection uses the existing
+restricted APT preference/target-release evaluator. If an explicit
+negative pin excludes a provider, that candidate is removed from the
+*repository* choice set before bounded search; it cannot create false
+multi-provider ambiguity. A provider pinned to a different verified
+binary version is evaluated using that candidate's actual
+`Provides`, not the latest repository version.
+
+Installed dpkg `Provides` remains independent: pinning an unavailable
+repository candidate does not erase a capability already present in
+installed status. The final plan still revalidates its selected package
+versions against authenticated candidate policy and does not authorize
+host package writes.
+
+The signed differential fixture checks `apt-get -s` against RPT for
+an application with two possible virtual providers, one pinned to
+priority `-1`, plus the rejection case when **both** providers are
+pinned out. Discovery is bounded to 128 distinct provider identities
+per round. This is **partial Gates C/D**; general alternative
+expressions, virtual `Pre-Depends`, multiple equally viable providers,
+cross-architecture substitution and unconstrained APT policy are
+still deliberately unsupported.
+
 ## Resolver and policy regression milestone
 
 The isolated `apt-cache policy` fixture exercises priority 999/1000/1001
