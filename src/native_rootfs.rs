@@ -173,7 +173,8 @@ pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
     Ok(BoundTransaction {
         schema_version: 1, session: root_identity(&root), architecture: architecture.into(),
         status_sha256: hex::encode(Sha256::digest(&bytes)), requested: packages.to_vec(),
-        max_packages, include_recommends, steps, manifest,
+        max_packages, include_recommends,
+        system_upgrade: false, steps, manifest,
     })
 }
 
@@ -194,7 +195,7 @@ pub fn prepare_system_upgrade(
     if audit.requested_upgrades.is_empty() {
         bail!("no eligible signed upgrades in disposable rootfs; no transaction intent created");
     }
-    let bound = prepare(
+    let mut bound = prepare(
         &root, cache, apt_root, architecture, max_packages,
         &audit.requested_upgrades, false,
     )?;
@@ -208,6 +209,7 @@ pub fn prepare_system_upgrade(
     if changes.downgrades != 0 || changes.reinstalls != 0 {
         bail!("system upgrade intent contains a downgrade or reinstall");
     }
+    bound.system_upgrade = true;
     Ok(bound)
 }
 
@@ -357,6 +359,22 @@ pub async fn apply(opts: Apply<'_>) -> Result<ApplyOutcome> {
         opts.cache, &root.join("var/lib/dpkg/status"), opts.apt_root,
         &bound.requested, &bound.architecture, bound.max_packages, bound.include_recommends)?;
     if steps != bound.steps { bail!("native plan changed since signing/policy resolution"); }
+    if bound.system_upgrade {
+        if mark_only || bound.include_recommends {
+            bail!("system-upgrade intent cannot be mark-only or include Recommends");
+        }
+        // Status and signed candidates are checked AGAIN at apply, not only
+        // when the automatic upgrade intent was initially prepared.
+        let audited = crate::system_upgrade::preview(
+            opts.cache, &root.join("var/lib/dpkg/status"), opts.apt_root,
+            &bound.architecture, 128, bound.max_packages,
+        ).context("rechecking full installed-state upgrade and reverse dependencies")?;
+        if audited.requested_upgrades != bound.requested
+            || audited.transaction.changes !=
+                crate::transaction_plan_audit::classify(&bound.steps)?.changes {
+            bail!("system-upgrade plan changed since global installed-state preflight");
+        }
+    }
     let trusted = package_provenance::prepare_exact(opts.cache, &steps, &bound.architecture)?;
     if serde_json::to_value(&trusted.packages)? != serde_json::to_value(&bound.manifest.packages)? {
         bail!("native artifact identities differ from signed repository");
