@@ -442,6 +442,7 @@ struct Solver<'a> {
     limit: usize,
     architecture: String,
     branch_budget: Rc<Cell<usize>>,
+    include_recommends: bool,
 }
 
 impl Solver<'_> {
@@ -772,6 +773,21 @@ impl Solver<'_> {
                 version: current.version.clone(), installed,
             });
             self.check_negative_relations()?;
+            if self.include_recommends {
+                // APT recommends are soft dependencies. Preserve every
+                // mandatory change even if this suggestion cannot be
+                // satisfied; a failed branch must not leak into the plan.
+                // Parsing remains strict: unsupported metadata fails closed.
+                let groups = parse_groups_for_arch(&current.recommends, dependency_arch)?;
+                for group in groups {
+                    let mut trial = self.clone();
+                    if trial.resolve_groups(&[group], 0).is_ok() {
+                        self.visiting = trial.visiting;
+                        self.done = trial.done;
+                        self.plan = trial.plan;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1096,11 +1112,22 @@ fn solve_catalog_many(
     installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
     packages: &[String], max_packages: usize, architecture: &str,
 ) -> Result<Vec<PlanStep>> {
+    solve_catalog_many_options(catalog, installed, installed_relations, packages,
+        max_packages, architecture, false)
+}
+
+fn solve_catalog_many_options(
+    catalog: &BTreeMap<PackageKey, PackageSummary>,
+    installed: &BTreeMap<PackageKey, String>,
+    installed_relations: &BTreeMap<PackageKey, InstalledRelations>,
+    packages: &[String], max_packages: usize, architecture: &str,
+    include_recommends: bool,
+) -> Result<Vec<PlanStep>> {
     let mut solver = Solver {
         catalog, installed, installed_relations, visiting: BTreeSet::new(),
         done: BTreeSet::new(), plan: Vec::new(), limit: max_packages,
         architecture: architecture.to_owned(),
-        branch_budget: Rc::new(Cell::new(4096)),
+        branch_budget: Rc::new(Cell::new(4096)), include_recommends,
     };
     for package in packages {
         solver.resolve(&parse_atom_for_arch(package, architecture)?)?;
@@ -1159,6 +1186,17 @@ pub fn preview_many_with_policy(
     cache: &Path, status: &Path, apt_root: &Path, packages: &[String],
     architecture: &str, max_packages: usize,
 ) -> Result<Vec<PlanStep>> {
+    preview_many_with_policy_options(
+        cache, status, apt_root, packages, architecture, max_packages, false,
+    )
+}
+
+/// Verified candidate policy and an explicitly opted-in soft dependency mode.
+/// Default remains mandatory dependencies only until APT parity is established.
+pub fn preview_many_with_policy_options(
+    cache: &Path, status: &Path, apt_root: &Path, packages: &[String],
+    architecture: &str, max_packages: usize, include_recommends: bool,
+) -> Result<Vec<PlanStep>> {
     if packages.is_empty() || packages.len() > 128 {
         bail!("expected 1..=128 requested packages");
     }
@@ -1189,6 +1227,7 @@ pub fn preview_many_with_policy(
     // A package's installed version is not sufficient evidence that its
     // dependency metadata is available from a signed repository occurrence.
     let mut validated = BTreeSet::<String>::new();
+    let mut optional_names = BTreeSet::<String>::new();
     let mut roots = BTreeSet::new();
     roots.extend(requested.iter().cloned());
     for _ in 0..16 {
@@ -1199,7 +1238,20 @@ pub fn preview_many_with_policy(
             let chosen = crate::apt_pin_eval::preview_candidate_with_phasing(
                 name, &origins, &preferences, installed.iter().find(|(key, _)| key.name == *name).map(|(_, version)| version.as_str()),
                 target_release.as_deref(), None,
-            )?.candidate.with_context(|| format!("APT policy has no candidate for {name}"))?;
+            )?.candidate;
+            let chosen = match chosen {
+                Some(candidate) => candidate,
+                None if optional_names.contains(name) => {
+                    // A soft dependency pinned out of the candidate set does
+                    // not invalidate the whole mandatory install plan.
+                    let key = metadata_query::native_key_for(&catalog, name, architecture)?;
+                    catalog.remove(&key);
+                    validated.insert(name.clone());
+                    changed = true;
+                    continue;
+                }
+                None => bail!("APT policy has no candidate for {name}"),
+            };
             if !origins.iter().any(|origin| origin.version == chosen) {
                 bail!("candidate {name} {chosen} is not present in verified repository metadata");
             }
@@ -1232,9 +1284,48 @@ pub fn preview_many_with_policy(
         let mut discovered = false;
         for name in mandatory {
             if roots.insert(name) { discovered = true; }
+            // A mandatory relationship upgrades this identity from optional.
+            optional_names.remove(&name);
+        }
+        if include_recommends {
+            let mut recommended = BTreeSet::new();
+            for name in &roots {
+                if !validated.contains(name) { continue; }
+                let key = match metadata_query::native_key_for(&catalog, name, architecture) {
+                    Ok(key) => key,
+                    Err(_) => continue,
+                };
+                let summary = &catalog[&key];
+                let effective_arch = if summary.architecture == "all" {
+                    architecture
+                } else {
+                    &summary.architecture
+                };
+                for group in parse_groups_for_arch(&summary.recommends, effective_arch)? {
+                    for req in group {
+                        if req.requested_arch.as_deref().is_some_and(|arch|
+                            arch != architecture && arch != "all") {
+                            continue;
+                        }
+                        if metadata_query::native_key_for(&catalog, &req.name, architecture).is_ok()
+                            && !roots.contains(&req.name) {
+                            recommended.insert(req.name);
+                        }
+                    }
+                }
+            }
+            for name in recommended {
+                if roots.insert(name.clone()) {
+                    optional_names.insert(name);
+                    discovered = true;
+                }
+            }
         }
         if discovered { continue; }
-        let plan = solve_catalog_many(&catalog, &installed, &installed_relations, packages, max_packages, architecture)?;
+        let plan = solve_catalog_many_options(
+            &catalog, &installed, &installed_relations, packages,
+            max_packages, architecture, include_recommends,
+        )?;
         for step in &plan {
             if roots.insert(step.package.clone()) {
                 discovered = true;
@@ -1327,7 +1418,7 @@ mod tests {
         let mut s = Solver {
             catalog: &keyed, installed: &keyed_installed, installed_relations: &BTreeMap::new(),
             visiting: BTreeSet::new(), done: BTreeSet::new(),
-            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)),
+            plan: Vec::new(), limit: 20, architecture: "amd64".into(), branch_budget: Rc::new(Cell::new(4096)), include_recommends: false,
         };
         s.resolve(&parse_atom_for_arch(name, "amd64")?)?;
         Ok(s.plan)
