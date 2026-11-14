@@ -99,12 +99,14 @@ sudo chroot "$guest" /usr/bin/apt-mark showmanual hello | grep -Fxq hello
 
 # Checkpoint is taken before the guest is mutated further, and the
 # recovered copy must still contain this hello installation.
-sudo "$rpt" native-rootfs-snapshot-create \
+echo "[WSL] Creating verified checkpoint (may scan many rootfs files)..."
+timeout --kill-after=15s 20m sudo "$rpt" native-rootfs-snapshot-create \
   --rootfs "$guest" --snapshot-rootfs "$work/wsl-checkpoint" \
   --journal-dir "$journal" --id wsl-pre-remove \
   >"$work/checkpoint-receipt.json"
 snapshot_receipt="$journal/native-rootfs-snapshots/wsl-pre-remove.json"
-sudo "$rpt" native-rootfs-snapshot-verify --receipt "$snapshot_receipt" \
+echo "[WSL] Re-verifying checkpoint tree..."
+timeout --kill-after=15s 20m sudo "$rpt" native-rootfs-snapshot-verify --receipt "$snapshot_receipt" \
   >"$work/checkpoint-verified.json"
 python3 - "$work/checkpoint-verified.json" <<'PY'
 import json,sys
@@ -234,7 +236,8 @@ done
 # Recovery diagnostics observe an unchanged guest and journal but do not
 # authorize a retry or mutate the journal. A deliberately unfinished record
 # in an independent journal must be reported without clearing it.
-sudo "$rpt" native-rootfs-recovery-inspect \
+echo "[WSL] Inspecting successful transaction journal..."
+timeout --kill-after=15s 3m sudo "$rpt" native-rootfs-recovery-inspect \
   --rootfs "$guest" --journal-dir "$journal" >"$work/recovery-healthy.json"
 python3 - "$work/recovery-healthy.json" <<'PY'
 import json, sys
@@ -248,7 +251,8 @@ PY
 mkdir -p "$work/unfinished-journal"
 printf '%s\n' '{"id":"unfinished","phase":"running","error":null}' \
   >"$work/unfinished-journal/unfinished.json"
-sudo "$rpt" native-rootfs-recovery-inspect \
+echo "[WSL] Inspecting synthetic interrupted journal..."
+timeout --kill-after=15s 3m sudo "$rpt" native-rootfs-recovery-inspect \
   --rootfs "$guest" --journal-dir "$work/unfinished-journal" \
   >"$work/recovery-unfinished.json"
 python3 - "$work/recovery-unfinished.json" <<'PY'
@@ -261,9 +265,11 @@ grep -Fq '"phase":"running"' "$work/unfinished-journal/unfinished.json"
 
 # This restore creates a new guest and cannot silently erase the original
 # post-remove guest, its journal, or the snapshot.
-sudo "$rpt" native-rootfs-snapshot-restore \
+echo "[WSL] Restoring verified checkpoint into a NEW guest (not the original)..."
+timeout --kill-after=15s 20m sudo "$rpt" native-rootfs-snapshot-restore \
   --receipt "$snapshot_receipt" --new-rootfs "$work/wsl-restored" \
   >"$work/restore-receipt.json"
+echo "[WSL] Restore completed; checking guest dpkg and unchanged host state..."
 test "$(sudo dpkg-query --admindir="$work/wsl-restored/var/lib/dpkg" \
   -W '-f=${Status}' hello)" = 'install ok installed'
 sudo test -z "$(sudo dpkg --root="$work/wsl-restored" --audit)"
