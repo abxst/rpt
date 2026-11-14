@@ -100,6 +100,20 @@ A journaled and supervised command handles SIGINT/SIGTERM/timeouts, including
 process-group shutdown verification. On failure, the rootfs may be broken.
 Do not rerun blindly; retain the rootfs and journal for manual inspection.
 
+Use the **read-only recovery diagnostic** to inspect the guest's current
+SHA256 dpkg status, `dpkg --root ... --audit` output, and recorded transaction
+phases in one JSON report:
+
+    sudo rpt native-rootfs-recovery-inspect \
+      --rootfs /tmp/my-guest --journal-dir ./rpt-native-journal
+
+The report exposes `needs_operator_review` when dpkg reports inconsistencies,
+journal files are invalid/incomplete, or a transaction has failed or has not
+finished. It does not change dpkg, rewrite journal entries, unlock recovery
+gates, restore filesystem files, or imply it is safe to retry. This is an
+**observational snapshot** (a transaction could change state concurrently),
+not a cryptographic snapshot or a rollback guarantee.
+
 ## Optional WSL2 smoke test (Ubuntu amd64)
 
 Run from the RPT repository in a **disposable Ubuntu WSL2 distro**, as an
@@ -127,14 +141,14 @@ verifies the resulting rootfs; it does **not** remount the host or suppress
 the diagnostic. An unsuccessful bootstrap or failed guest checks still fail
 the test.
 
-Real Ubuntu 26.04 `resolute` WSL2 v5 passed signed archive
-verification, install/remove/reinstall, automatic manual marking during install,
+Real Ubuntu 26.04 `resolute` WSL2 v6 passed signed archive
+verification, install/remove/reinstall, automatic manual marking, **journaled
+zero-archive mark-only** (`auto` to `manual` without changing dpkg status),
 autoremove, and direct purge of **config-files-only** packages, with unchanged
-live WSL dpkg status. The new zero-archive mark-only path has not yet been
-exercised by the operator's WSL; that requires running the expanded script
-independently. This remains a disposable-rootfs acceptance test, not evidence
-that privileged maintainer scripts are confined or that all APT semantics
-are supported.
+live WSL dpkg status. The new read-only recovery-inspection test needs to pass
+independently on WSL to validate its reporting. This remains a disposable-rootfs
+acceptance test, not evidence that privileged maintainer scripts are confined
+or that all APT semantics are supported.
 
 ## Scope and limitations
 

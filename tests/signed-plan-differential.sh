@@ -617,6 +617,40 @@ test "$(sudo sha256sum "$mark_guest/var/lib/dpkg/status" | cut -d' ' -f1)" = "$m
 test -z "$(sudo dpkg --root="$mark_guest" --audit)"
 echo "PASS signed native zero-archive mark-only; no dpkg changes or artifact directory"
 
+# Read-only recovery diagnosis: no journal unlock, no package changes, and
+# malformed/unfinished metadata is reported rather than silently discarded.
+sudo ./target/debug/rpt native-rootfs-recovery-inspect \
+  --rootfs "$mark_guest" --journal-dir "$root/native-mark-journal" \
+  >"$root/native-healthy-recovery.json"
+python3 - "$root/native-healthy-recovery.json" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+assert data["dpkg_audit"] == ""
+assert len(data["dpkg_status_sha256"]) == 64
+assert data["journal"]["records"]
+assert data["needs_operator_review"] is False
+PY
+mkdir -p "$root/native-recovery-unfinished"
+printf '%s\n' '{"id":"pending","phase":"interrupted","error":"SIGTERM"}' \
+  >"$root/native-recovery-unfinished/pending.json"
+sudo ./target/debug/rpt native-rootfs-recovery-inspect \
+  --rootfs "$mark_guest" --journal-dir "$root/native-recovery-unfinished" \
+  >"$root/native-interrupted-recovery.json"
+python3 - "$root/native-interrupted-recovery.json" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+assert data["needs_operator_review"]
+assert data["journal"]["records"][0]["phase"] == "interrupted"
+assert data["journal"]["requires_manual_recovery"]
+PY
+grep -Fq '"phase":"interrupted"' "$root/native-recovery-unfinished/pending.json"
+if sudo ./target/debug/rpt native-rootfs-recovery-inspect \
+  --rootfs / --journal-dir "$root/native-mark-journal" \
+  >/dev/null 2>&1; then
+  echo "Native recovery inspector unexpectedly accepted live /" >&2; exit 1
+fi
+echo "PASS native read-only recovery report, interrupted journal and live-root refusal"
+
 
 
 # Install/remove and install/purge exercise actual dpkg operations in the

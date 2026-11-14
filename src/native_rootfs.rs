@@ -1,9 +1,11 @@
 //! Signed dpkg transactions on an explicitly marked disposable Linux rootfs.
 //! This is independent of Docker, not an executor for the live machine.
 use crate::{artifact_store, dry_run_executor::DryRunExecutor, install_plan, package_provenance,
+    recovery_inspector,
     sandbox_execution::{self, valid_id}, sandbox_session::BoundTransaction};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
+use serde::Serialize;
 use std::{collections::BTreeSet, fs, path::{Path, PathBuf}, time::Duration};
 
 const MARKER: &str = "rpt-disposable-rootfs-v1\n";
@@ -38,6 +40,66 @@ fn status(root: &Path) -> Result<Vec<u8>> {
     let path = root.join("var/lib/dpkg/status");
     if !fs::symlink_metadata(&path)?.file_type().is_file() { bail!("dpkg status must be a regular file"); }
     fs::read(path).context("reading guest dpkg status")
+}
+
+/// A read-only recovery view of a disposable guest and the associated journal.
+/// This deliberately does not decide whether an interrupted operation can be
+/// retried, clear a recovery gate, repair dpkg, or roll back the filesystem.
+#[derive(Debug, Serialize)]
+pub struct NativeRecoveryReport {
+    pub rootfs: String,
+    pub journal_dir: String,
+    pub dpkg_status_sha256: String,
+    pub dpkg_audit: String,
+    pub journal: recovery_inspector::RecoveryReport,
+    pub needs_operator_review: bool,
+    pub note: &'static str,
+}
+
+pub async fn inspect_recovery(root: &Path, journal: &Path) -> Result<NativeRecoveryReport> {
+    let root = rootfs(root)?;
+    // A recovery report is observation only. Never create or canonicalize a
+    // nonexistent journal and never accept a symlinked journal directory.
+    if !fs::symlink_metadata(journal)?.file_type().is_dir() {
+        bail!("native recovery journal must be an existing real directory");
+    }
+    let journal = fs::canonicalize(journal)?;
+    if journal == Path::new("/") || journal.starts_with(&root) {
+        bail!("native recovery journal must be outside the disposable guest");
+    }
+    let status_before = hex::encode(Sha256::digest(status(&root)?));
+    let inspection = recovery_inspector::inspect(&journal)?;
+    let mut process = tokio::process::Command::new("dpkg");
+    process.arg(format!("--root={}", root.display()))
+        .arg("--audit")
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(15), process.output())
+        .await.context("timed out during read-only guest dpkg audit")??;
+    if !output.status.success() {
+        bail!("read-only guest dpkg audit failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    if output.stdout.len() > 256 * 1024 || output.stderr.len() > 256 * 1024 {
+        bail!("guest dpkg audit output is abnormally large; manual inspection required");
+    }
+    let status_after = hex::encode(Sha256::digest(status(&root)?));
+    if status_after != status_before {
+        bail!("guest dpkg status changed during recovery inspection; retry later");
+    }
+    let dpkg_audit = String::from_utf8(output.stdout)
+        .context("guest dpkg audit output is not UTF-8")?;
+    let needs_operator_review = inspection.requires_manual_recovery
+        || inspection.records.iter().any(|record|
+            matches!(record.phase, crate::transaction_journal::Phase::Failed))
+        || !dpkg_audit.trim().is_empty();
+    Ok(NativeRecoveryReport {
+        rootfs: root.display().to_string(),
+        journal_dir: journal.display().to_string(),
+        dpkg_status_sha256: status_before,
+        dpkg_audit,
+        journal: inspection,
+        needs_operator_review,
+        note: "Diagnostic snapshot only; no journal unlock, automatic dpkg repair, rollback, or authorization to retry. Privileged chroot is not a security boundary.",
+    })
 }
 
 /// Installed user roots must become manual, and only newly installed
