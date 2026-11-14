@@ -342,10 +342,11 @@ grep -Fq '"phase": "succeeded"' "$root/sandbox-journal/sandbox-ci.json"
 sudo -n true
 native_guest="$root/native-guest"
 sudo mkdir -p "$native_guest"
-docker create --name "rpt-native-export-$" --network=none \
+native_container="rpt-native-export-$(basename "$root")"
+docker create --name "$native_container" --network=none \
   --entrypoint /bin/sh "$sandbox_image" -c true >/dev/null
-docker export "rpt-native-export-$" | sudo tar -xpf - -C "$native_guest"
-docker rm "rpt-native-export-$" >/dev/null
+docker export "$native_container" | sudo tar -xpf - -C "$native_guest"
+docker rm "$native_container" >/dev/null
 printf 'rpt-disposable-rootfs-v1\n' \
   | sudo tee "$native_guest/.rpt-disposable-rootfs" >/dev/null
 if ./target/debug/rpt native-rootfs-prepare-transaction --rootfs / \
