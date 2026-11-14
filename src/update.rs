@@ -35,6 +35,12 @@ impl Default for UpdateOptions {
     }
 }
 
+#[derive(Clone)]
+struct RepoUpdatePolicy {
+    opts: UpdateOptions,
+    additional_architectures: Vec<String>,
+}
+
 #[derive(Default)]
 struct Stats {
     attempts: AtomicU64,
@@ -426,9 +432,10 @@ async fn fetch_index(client: Client, url: String, path: PathBuf, expected: Index
 
 async fn update_repo(
     client: Client, repo: Repo, dest: PathBuf, budget: Arc<Semaphore>,
-    opts: UpdateOptions, multi: MultiProgress, stats: Arc<Stats>,
-    additional_architectures: &[String],
+    policy: RepoUpdatePolicy, multi: MultiProgress, stats: Arc<Stats>,
 ) -> Result<(usize, u64)> {
+    let opts = policy.opts;
+    let additional_architectures = &policy.additional_architectures;
     let name = scoped_name(&repo);
     let stage = dest.join(format!(".{name}-{}", std::process::id()));
     fs::create_dir_all(&stage).await?;
@@ -574,11 +581,13 @@ pub async fn update_with_architectures(
         let budget = budget.clone();
         let stats = stats.clone();
         let multi = multi.clone();
-        let architectures = additional_architectures.to_vec();
+        let policy = RepoUpdatePolicy {
+            opts, additional_architectures: additional_architectures.to_vec(),
+        };
         async move {
             let name = format!("{} {}", repo.uri, repo.suite);
             (name, update_repo(
-                client, repo, dest, budget, opts, multi, stats, &architectures,
+                client, repo, dest, budget, policy, multi, stats,
             ).await)
         }
     })).buffer_unordered(opts.workers).collect::<Vec<_>>().await;
