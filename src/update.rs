@@ -15,6 +15,7 @@ use std::{
     time::Duration,
     sync::{Arc, atomic::{AtomicU64, Ordering}},
     io::IsTerminal,
+    os::unix::fs::MetadataExt,
     fs::OpenOptions,
 };
 use tokio::{fs, io::AsyncWriteExt, process::Command, sync::{Semaphore, mpsc, oneshot, Mutex}, task::JoinSet};
@@ -126,6 +127,49 @@ pub struct Repo {
     /// Signed source architecture restriction. Additional architectures
     /// are never selected outside this explicit source filter.
     pub architectures: Option<Vec<String>>,
+}
+
+/// Open or create the canonical update lease without following a preexisting
+/// symlink. Verify the inode both before and after opening: the reader leases
+/// must refer to exactly the same file while publishing the cache.
+fn acquire_update_lock(dest: &Path) -> Result<std::fs::File> {
+    let root = std::fs::symlink_metadata(dest)?;
+    if !root.file_type().is_dir() {
+        bail!("signed cache update destination must be a real non-symlink directory");
+    }
+    let path = dest.join(".rpt-update.lock");
+    let before = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).context("inspecting signed cache update lock"),
+    };
+    let file = if let Some(meta) = &before {
+        if !meta.file_type().is_file() {
+            bail!("signed cache update lock must be an ordinary non-symlink file");
+        }
+        OpenOptions::new().read(true).write(true).open(&path)?
+    } else {
+        // create_new is atomic and refuses to follow a newly raced symlink.
+        OpenOptions::new().read(true).write(true).create_new(true).open(&path)?
+    };
+    let opened = file.metadata()?;
+    let after = std::fs::symlink_metadata(&path)?;
+    if !opened.file_type().is_file() || !after.file_type().is_file()
+        || opened.dev() != after.dev() || opened.ino() != after.ino()
+        || before.as_ref().is_some_and(|prior|
+            prior.dev() != opened.dev() || prior.ino() != opened.ino())
+    {
+        bail!("signed cache update lock was replaced during opening");
+    }
+    file.try_lock_exclusive().context("another RPT update or reader owns this cache")?;
+    // Reject a cooperating/noncooperating pathname replacement around lock
+    // acquisition, so subsequent RPT readers never silently use a new inode.
+    let current = std::fs::symlink_metadata(&path)?;
+    if !current.file_type().is_file()
+        || current.dev() != opened.dev() || current.ino() != opened.ino() {
+        bail!("signed cache update lock pathname changed after acquisition");
+    }
+    Ok(file)
 }
 
 /// Native Debian architecture of this build. Foreign architecture index
@@ -652,12 +696,7 @@ pub async fn update_with_architectures(
     fs::create_dir_all(dest).await?;
     // File stays in place between runs to prevent an inode-replacement race.
     // The handle is held across every await for the entire update transaction.
-    let lock_path = dest.join(".rpt-update.lock");
-    let lock_file = OpenOptions::new().read(true).write(true).create(true)
-        .truncate(false).open(&lock_path).context(ErrorCategory::System)?;
-    lock_file.try_lock_exclusive()
-        .context("another RPT update is using this cache")
-        .context(ErrorCategory::System)?;
+    let _lock_file = acquire_update_lock(dest).context(ErrorCategory::System)?;
     let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
     let count = repositories.len();
     let budget = Arc::new(Semaphore::new(opts.workers));
@@ -878,6 +917,28 @@ mod tests {
         second.try_lock_exclusive().unwrap();
         second.unlock().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn safe_updater_lock_refuses_symlinks_and_concurrent_readers() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let first = acquire_update_lock(&cache).unwrap();
+        assert!(acquire_update_lock(&cache).is_err());
+        drop(first);
+        let second = acquire_update_lock(&cache).unwrap();
+        drop(second);
+        let lock = cache.join(".rpt-update.lock");
+        std::fs::remove_file(&lock).unwrap();
+        let external = root.path().join("external");
+        std::fs::write(&external, b"must remain unchanged").unwrap();
+        std::os::unix::fs::symlink(&external, &lock).unwrap();
+        assert!(acquire_update_lock(&cache).is_err());
+        assert_eq!(std::fs::read(&external).unwrap(), b"must remain unchanged");
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&cache, &alias).unwrap();
+        assert!(acquire_update_lock(&alias).is_err());
     }
 
     #[test]

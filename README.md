@@ -103,6 +103,7 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 - **M29 cooperative signed-cache read leases**: native, foreign and upgrade policy planners, plus exact manifest extraction, hold a shared lock against concurrent `rpt update` index publication, preventing half-updated cache reads by cooperative processes; see [M29](docs/m29-cooperative-cache-lease.md).
 - **M30 dpkg status snapshot binding**: signed native/foreign planners and whole-system upgrade preview compare the entire clean dpkg-status SHA256 before and after candidate solving, refusing concurrent package-state drift; see [M30](docs/m30-status-snapshot-plan.md).
 - **M31 real QEMU RPT guest-audit oracle**: the QEMU power-cut acceptance now runs the exact built `rpt dpkg-audit` inside the rebooted interrupted VM, requires it to reject dirty state, and verifies healthy state after independent disk recovery. It does **not** claim RPT performed the interrupted transaction; see [M31](docs/m31-qemu-rpt-audit.md).
+- **M32 update-lock hardening**: the metadata updater refuses symlinked cache roots and lock files, atomically creates missing locks and checks the inode across acquisition before swapping indexes. This complements the M29 shared reader lease; see [M32](docs/m32-update-lock-hardening.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
