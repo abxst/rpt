@@ -30,7 +30,7 @@ cleanup() {
     # M8 creates additional root-owned fresh guests, sealed checkpoints,
     # restored trees and interrupted journals. Purge only inside the
     # validated private /tmp/rpt-signed.* test workspace.
-    sudo rm -rf -- "$root"/native-chaos-*
+    sudo rm -rf -- "$root"/native-chaos-* "$root"/native-boundary-*
   fi
   rm -rf "$root"
 }
@@ -1650,6 +1650,9 @@ echo 'PASS M7 combined signed remove+upgrade single journal, mandatory checkpoin
 # M8 faults reuse the authenticated repository and M7's restored v1 guest;
 # each fault has a NEW signed, status-bound intent, checkpoint and journal.
 bash tests/native-full-upgrade-chaos.sh "$root" "$arch" ./target/debug/rpt
+# M14 guest rootfs boundary is a separate signed, *negative* oracle: hostile
+# symlinks and hardlinks outside the guest must fail before any host dpkg call.
+bash tests/native-guest-boundary.sh "$root" "$arch" ./target/debug/rpt
 
 # Seed v1 in a new persistent sandbox; reject an intent created before seeding.
 ./target/debug/rpt sandbox-session-create --session "$session" --image "$sandbox_image"
