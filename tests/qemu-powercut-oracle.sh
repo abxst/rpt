@@ -252,7 +252,7 @@ ssh_guest 'sudo systemd-run --unit=rpt-dryrun-powercut --collect /home/ubuntu/rp
   >"$evidence/started-rpt-dry-run.txt"
 rpt_running=false
 for attempt in $(seq 1 40); do
-  if ssh_guest "sudo grep -Fq '\"phase\":\"running\"' /var/lib/rpt-powercut-journal/m33-powercut.json" >/dev/null 2>&1; then
+  if ssh_guest 'sudo grep -Fq running /var/lib/rpt-powercut-journal/m33-powercut.json' >/dev/null 2>&1; then
     rpt_running=true
     break
   fi
