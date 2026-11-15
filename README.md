@@ -59,6 +59,13 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   v1 receipts fail closed. No live-host snapshotting, power-loss atomicity
   or production rollback is implied. See
   [M13 checkpoint oracle](docs/native-full-upgrade-chaos.md).
+- **M14 native guest host-boundary preflight**: refuses host-escaping
+  critical symlinks, hardlinks from dpkg/APT state to unobserved outside
+  inodes, and special files in guest package state; signed VM negative tests
+  verify pre-mutation refusal and unchanged runner dpkg/APT state.
+  This is **not** VM isolation, race-free pathname safety, power-loss
+  recovery, or production host authorization. See
+  [M14 boundary acceptance](docs/m14-native-guest-boundary.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

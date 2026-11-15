@@ -6,9 +6,94 @@ use crate::{artifact_store, dry_run_executor::DryRunExecutor, install_plan, pack
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use serde::Serialize;
-use std::{collections::BTreeSet, fs, path::{Path, PathBuf}, time::Duration};
+use std::{collections::{BTreeMap, BTreeSet}, fs, os::unix::fs::MetadataExt, path::{Path, PathBuf}, time::Duration};
 
 const MARKER: &str = "rpt-disposable-rootfs-v1\n";
+
+/// Guard host-visible paths before passing --root to host dpkg. Unlike a
+/// guest chroot, host-side pathname resolution can follow symlinks outside the
+/// guest, or write through a hardlink that aliases a host inode. This is an
+/// additional off-host safety preflight, NOT a sandbox for maintainer scripts.
+const MAX_STATE_ENTRIES: usize = 100_000;
+const MAX_STATE_DEPTH: usize = 64;
+
+fn anchored_file(root: &Path, rel: &str, allow_internal_symlink: bool) -> Result<PathBuf> {
+    let path = root.join(rel);
+    let meta = fs::symlink_metadata(&path)
+        .with_context(|| format!("missing required guest file: {}", path.display()))?;
+    if !allow_internal_symlink && meta.file_type().is_symlink() {
+        bail!("guest package database file cannot be a symlink: {}", path.display());
+    }
+    let target = fs::canonicalize(&path)
+        .with_context(|| format!("resolving guest path {}", path.display()))?;
+    if !target.starts_with(root) || !fs::metadata(&path)?.is_file() {
+        bail!("guest file resolves outside rootfs or is not regular: {}", path.display());
+    }
+    if !allow_internal_symlink && meta.nlink() > 1 {
+        bail!("guest package database file has external hardlink risk: {}", path.display());
+    }
+    Ok(target)
+}
+
+/// Inspect every host-accessible entry under dpkg/APT state, never following
+/// symlinks. Hardlinks are accepted only if *all* linked directory entries are
+/// contained in the scanned state tree, so no outside alias can be modified.
+fn guard_package_state_tree(root: &Path, relative: &str, required: bool) -> Result<()> {
+    fn walk(root: &Path, path: &Path, count: &mut usize, depth: usize,
+            links: &mut BTreeMap<(u64, u64), (u64, u64)>) -> Result<()> {
+        if depth > MAX_STATE_DEPTH { bail!("guest package state directory depth exceeded"); }
+        *count += 1;
+        if *count > MAX_STATE_ENTRIES { bail!("guest package state entry limit exceeded"); }
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            bail!("symlinks in guest package database/mark state are unsupported: {}", path.display());
+        }
+        if !path.starts_with(root) {
+            bail!("guest package state escaped rootfs: {}", path.display());
+        }
+        if meta.is_dir() {
+            for item in fs::read_dir(path)? {
+                walk(root, &item?.path(), count, depth + 1, links)?;
+            }
+        } else if meta.is_file() {
+            let entry = links.entry((meta.dev(), meta.ino())).or_insert((meta.nlink(), 0));
+            if entry.0 != meta.nlink() {
+                bail!("guest package state link count changed during inspection");
+            }
+            entry.1 += 1;
+        } else {
+            bail!("unsupported special file in guest package state: {}", path.display());
+        }
+        Ok(())
+    }
+    let base = root.join(relative);
+    match fs::symlink_metadata(&base) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => bail!("guest package state must be a real directory: {}", base.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {
+            // Missing APT state is allowed only when every existing ancestor is
+            // also within the guest. An attacker cannot plant a symlink parent.
+            for segment in ["var", "var/lib"] {
+                let ancestor = root.join(segment);
+                if let Ok(meta) = fs::symlink_metadata(&ancestor) {
+                    if !meta.is_dir() { bail!("unsafe guest state ancestor: {}", ancestor.display()); }
+                }
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error).with_context(|| format!("guest package state {}", base.display())),
+    }
+    let mut links = BTreeMap::new();
+    let mut count = 0;
+    walk(root, &base, &mut count, 0, &mut links)?;
+    for ((device, inode), (declared, observed)) in links {
+        if declared != observed {
+            bail!("guest package state has external hardlink alias: dev={device} inode={inode} {observed}/{declared}");
+        }
+    }
+    Ok(())
+}
+
 
 pub(crate) fn rootfs(path: &Path) -> Result<PathBuf> {
     if !cfg!(target_os = "linux") { bail!("native rootfs requires Linux"); }
@@ -22,9 +107,13 @@ pub(crate) fn rootfs(path: &Path) -> Result<PathBuf> {
         || fs::read(&marker)? != MARKER.as_bytes() {
         bail!("missing exact disposable-rootfs marker");
     }
-    for path in ["var/lib/dpkg/status", "usr/bin/dpkg", "bin/sh"] {
-        if !root.join(path).exists() { bail!("incomplete rootfs: {path}"); }
-    }
+    anchored_file(&root, "var/lib/dpkg/status", false)?;
+    // Ubuntu/Debian may use /bin -> usr/bin and sh -> dash. Accept these
+    // only when host pathname resolution stays inside the marked guest.
+    anchored_file(&root, "usr/bin/dpkg", true)?;
+    anchored_file(&root, "bin/sh", true)?;
+    guard_package_state_tree(&root, "var/lib/dpkg", true)?;
+    guard_package_state_tree(&root, "var/lib/apt", false)?;
     // Refuse bind mounts, proc/sys/dev mounts, and external writable volumes.
     let mount_prefix = format!("{}/", root.display());
     for line in fs::read_to_string("/proc/self/mountinfo")?.lines() {
@@ -37,8 +126,7 @@ pub(crate) fn rootfs(path: &Path) -> Result<PathBuf> {
 }
 pub(crate) fn root_identity(root: &Path) -> String { format!("native-rootfs:{}", root.display()) }
 pub(crate) fn status(root: &Path) -> Result<Vec<u8>> {
-    let path = root.join("var/lib/dpkg/status");
-    if !fs::symlink_metadata(&path)?.file_type().is_file() { bail!("dpkg status must be a regular file"); }
+    let path = anchored_file(root, "var/lib/dpkg/status", false)?;
     fs::read(path).context("reading guest dpkg status")
 }
 
@@ -119,9 +207,19 @@ pub(crate) fn install_mark_targets(requested: &[String], steps: &[install_plan::
 pub(crate) fn mark_state_digest(root: &Path) -> Result<String> {
     let marks = root.join("var/lib/apt/extended_states");
     match fs::symlink_metadata(&marks) {
-        Ok(meta) if meta.file_type().is_file() && meta.len() <= 64 * 1024 * 1024 =>
-            Ok(hex::encode(Sha256::digest(fs::read(&marks)?))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".into()),
+        Ok(meta) if meta.file_type().is_file() && meta.len() <= 64 * 1024 * 1024 => {
+            let safe = anchored_file(root, "var/lib/apt/extended_states", false)?;
+            Ok(hex::encode(Sha256::digest(fs::read(safe)?)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Even an absent mark file must have an unaliased parent.
+            let parent = marks.parent().context("invalid APT state path")?;
+            if parent.exists() {
+                let real = fs::canonicalize(parent)?;
+                if !real.starts_with(root) { bail!("APT marks parent escapes guest rootfs"); }
+            }
+            Ok("missing".into())
+        }
         _ => bail!("guest APT marks must be absent or a regular file <=64 MiB"),
     }
 }
@@ -709,6 +807,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(rootfs(dir.path()).is_err());
     }
+    fn synthetic_guest(path: &Path) -> PathBuf {
+        let guest = path.join("guest");
+        for dir in ["var/lib/dpkg", "usr/bin", "bin"] {
+            fs::create_dir_all(guest.join(dir)).unwrap();
+        }
+        fs::write(guest.join(".rpt-disposable-rootfs"), MARKER).unwrap();
+        fs::write(guest.join("var/lib/dpkg/status"), b"").unwrap();
+        fs::write(guest.join("usr/bin/dpkg"), b"mock guest dpkg").unwrap();
+        std::os::unix::fs::symlink("../usr/bin/dpkg", guest.join("bin/sh")).unwrap();
+        guest
+    }
+
+    #[test]
+    fn m14_allows_internal_usrmerge_alias_and_internal_state_hardlinks() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        fs::write(guest.join("var/lib/dpkg/one"), "same inode").unwrap();
+        fs::hard_link(guest.join("var/lib/dpkg/one"),
+            guest.join("var/lib/dpkg/two")).unwrap();
+        assert!(rootfs(&guest).is_ok());
+        assert_eq!(status(&guest).unwrap(), b"");
+        assert_eq!(mark_state_digest(&guest).unwrap(), "missing");
+    }
+
+    #[test]
+    fn m14_blocks_guest_status_hardlinked_to_external_host_file() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        let outside = dir.path().join("host-sensitive");
+        fs::write(&outside, b"host original").unwrap();
+        fs::remove_file(guest.join("var/lib/dpkg/status")).unwrap();
+        fs::hard_link(&outside, guest.join("var/lib/dpkg/status")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        assert!(status(&guest).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"host original");
+    }
+
+    #[test]
+    fn m14_blocks_guest_state_symlink_escape_and_unsafe_nested_entries() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        let outside = dir.path().join("host-state");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("status"), b"host original").unwrap();
+        fs::remove_dir_all(guest.join("var/lib/dpkg")).unwrap();
+        std::os::unix::fs::symlink(&outside, guest.join("var/lib/dpkg")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        fs::remove_file(guest.join("var/lib/dpkg")).unwrap();
+        fs::create_dir(guest.join("var/lib/dpkg")).unwrap();
+        fs::write(guest.join("var/lib/dpkg/status"), b"").unwrap();
+        std::os::unix::fs::symlink(&outside, guest.join("var/lib/dpkg/info")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        assert_eq!(fs::read(outside.join("status")).unwrap(), b"host original");
+    }
+
+    #[test]
+    fn m14_blocks_absolute_host_symlink_and_external_apt_mark_hardlink() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        fs::remove_file(guest.join("bin/sh")).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", guest.join("bin/sh")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        fs::remove_file(guest.join("bin/sh")).unwrap();
+        std::os::unix::fs::symlink("../usr/bin/dpkg", guest.join("bin/sh")).unwrap();
+        fs::create_dir_all(guest.join("var/lib/apt")).unwrap();
+        let outside = dir.path().join("host-apt-states");
+        fs::write(&outside, b"host state").unwrap();
+        fs::hard_link(&outside, guest.join("var/lib/apt/extended_states")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        assert!(mark_state_digest(&guest).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"host state");
+    }
+
     #[test]
     fn native_install_auto_manual_marks_never_demote_preinstalled_dependencies() {
         let requested = vec!["rpt-app".to_owned(), "rpt-already-installed".to_owned()];

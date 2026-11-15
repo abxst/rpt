@@ -28,6 +28,7 @@ jobs:
       - name: Validate M8-M12 oracle syntax and production qualification contract
         run: |
           bash -n tests/native-full-upgrade-chaos.sh
+          bash -n tests/native-guest-boundary.sh
           bash -n tests/signed-plan-differential.sh
           bash -n tests/version-corpus-differential.sh
           bash -n tests/production-gate-contract.sh
