@@ -264,6 +264,8 @@ pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
     max_packages: usize, packages: &[String], include_recommends: bool) -> Result<BoundTransaction> {
     let root = rootfs(root)?;
     let bytes = status(&root)?;
+    // Guest dpkg may have unmerged numbered updates not present in status.
+    crate::dpkg_health::require_no_pending_updates(&root.join("var/lib/dpkg/status"))?;
     // Refuse to stage a signed guest transaction on half-configured state;
     // the executor independently verifies the guest again at apply time.
     crate::dpkg_health::require_clean_snapshot(&bytes)?;

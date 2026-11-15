@@ -87,6 +87,8 @@ pub fn simulate(status: &Path, native: &str, operation: Operation<'_>) -> Result
     }
     let before = checked_regular(status, false)?
         .context("dpkg status does not exist")?;
+    // dpkg may have unmerged numbered updates superseding clean raw status.
+    crate::dpkg_health::require_no_pending_updates(status)?;
     let status_sha256 = digest(&before);
     // A full-system upgrade must not silently ignore partly configured dpkg
     // records when building a seemingly clean installed package inventory.
