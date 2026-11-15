@@ -249,6 +249,7 @@ pub fn audit_configured_cache(cache: &Path, apt_root: &Path) -> Result<CacheAudi
         if source.keyring.to_string_lossy().as_ref() != repo.keyring.as_str() {
             bail!("cache Signed-By keyring differs from currently configured source");
         }
+        let mut observed_components = BTreeSet::new();
         for path in &repo.signed_index_paths {
             let parts = path.split('/').collect::<Vec<_>>();
             if parts.len() != 3 || !source.components.iter().any(|s| s == parts[0])
@@ -256,6 +257,7 @@ pub fn audit_configured_cache(cache: &Path, apt_root: &Path) -> Result<CacheAudi
             {
                 bail!("cached index is not within a configured source component");
             }
+            observed_components.insert(parts[0]);
             let architecture = parts[1].strip_prefix("binary-")
                 .context("malformed signed Packages index architecture")?;
             if let Some(allowed) = &source.architectures {
@@ -263,6 +265,11 @@ pub fn audit_configured_cache(cache: &Path, apt_root: &Path) -> Result<CacheAudi
                     bail!("cached index architecture excluded by current signed source");
                 }
             }
+        }
+        if observed_components.len() != source.components.len()
+            || source.components.iter().any(|c| !observed_components.contains(c.as_str()))
+        {
+            bail!("cache is missing indexes for one or more configured source components");
         }
     }
     audit.source_set_bound = true;
