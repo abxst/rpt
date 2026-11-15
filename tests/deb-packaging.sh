@@ -26,7 +26,13 @@ test -x "$tmp/unpacked/usr/bin/rpt"
 test ! -e "$tmp/unpacked/usr/bin/apt"
 test ! -e "$tmp/unpacked/usr/bin/apt-get"
 test ! -e "$tmp/unpacked/usr/bin/dpkg"
-test ! -e "$tmp/unpacked/DEBIAN"
+# dpkg-deb -x does not unpack the control archive: explicitly inspect it.
+mkdir "$tmp/control"
+dpkg-deb -e "$package" "$tmp/control"
+test -f "$tmp/control/control"
+for script in preinst postinst prerm postrm config; do
+  test ! -e "$tmp/control/$script"
+done
 "$tmp/unpacked/usr/bin/rpt" --version | grep -q '^rpt '
 if bash scripts/build-deb.sh "$binary" "$tmp/packages" >/dev/null 2>&1; then
   echo 'M25 package builder overwrote an existing archive' >&2; exit 1
