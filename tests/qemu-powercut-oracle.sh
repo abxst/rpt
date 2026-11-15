@@ -153,7 +153,8 @@ powercut_vm() {
   exit 1
 }
 create_package() {
-  local version="$1" mode="$2" root="$work/pkg-$version"
+  local version="$1" mode="$2"
+  local root="$work/pkg-$version"
   mkdir -p "$root/DEBIAN" "$root/usr/share/rpt-powercut"
   cat > "$root/DEBIAN/control" <<EOF
 Package: rpt-powercut
