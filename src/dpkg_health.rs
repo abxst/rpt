@@ -157,7 +157,7 @@ pub fn inspect(path: &Path) -> Result<DpkgHealth> {
     if !before.file_type().is_file() || before.len() > MAX_STATUS_BYTES {
         bail!("dpkg status must be an ordinary, non-symlink file <=64 MiB");
     }
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     let opened = file.metadata()?;
     if !opened.is_file() || before.dev() != opened.dev()
         || before.ino() != opened.ino() || opened.len() > MAX_STATUS_BYTES
