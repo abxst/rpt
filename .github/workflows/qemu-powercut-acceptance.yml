@@ -18,6 +18,10 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             qemu-system-x86 qemu-utils cloud-image-utils ubuntu-keyring \
             openssh-client gpgv
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile current RPT guest auditor from exact PR head
+        run: cargo build --locked --bin rpt
       - name: Validate M15 scripts and fail-closed synthetic evidence contract
         run: |
           bash -n tests/qemu-powercut-oracle.sh
@@ -26,7 +30,7 @@ jobs:
         timeout-minutes: 35
         run: |
           timeout --signal=TERM --kill-after=30s 2050 \
-            bash tests/qemu-powercut-oracle.sh
+            RPT_QEMU_BIN="$PWD/target/debug/rpt" bash tests/qemu-powercut-oracle.sh
       - name: Preserve read-only power-cut evidence and serial logs
         if: always()
         uses: actions/upload-artifact@v4

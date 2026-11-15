@@ -11,6 +11,10 @@ fi
 for cmd in qemu-system-x86_64 qemu-img cloud-localds curl gpgv ssh scp ssh-keygen dpkg-deb python3 timeout; do
   command -v "$cmd" >/dev/null || { echo "missing M15 dependency: $cmd" >&2; exit 2; }
 done
+rpt_guest_bin="${RPT_QEMU_BIN:?M31 requires RPT_QEMU_BIN to point to the current native rpt binary}"
+[[ -f "$rpt_guest_bin" && -x "$rpt_guest_bin" && ! -L "$rpt_guest_bin" ]] || {
+  echo "M31 guest audit binary is missing, non-executable or symlinked" >&2; exit 2;
+}
 test -f /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg || {
   echo 'Missing trusted Canonical cloud image signing keyring' >&2; exit 2;
 }
@@ -219,6 +223,10 @@ start_vm "$work/initial.qcow2" baseline
 # archives on the persistent guest root filesystem instead.
 scp_guest "$work/rpt-powercut-1.0.deb" /home/ubuntu/rpt-powercut-1.0.deb
 scp_guest "$work/rpt-powercut-2.0.deb" /home/ubuntu/rpt-powercut-2.0.deb
+# Carry the exact PR-head RPT binary into the independent QEMU disk before
+# sealing the baseline. Neither apt nor dpkg on the CI runner is replaced.
+scp_guest "$rpt_guest_bin" /home/ubuntu/rpt-audit
+ssh_guest 'chmod 0755 /home/ubuntu/rpt-audit && /home/ubuntu/rpt-audit --version'
 ssh_guest 'sudo dpkg --install /home/ubuntu/rpt-powercut-1.0.deb && test -z "$(sudo dpkg --audit)"'
 ssh_guest 'sudo dpkg-query -s rpt-powercut' >"$evidence/baseline-dpkg.txt"
 grep -Fxq 'Status: install ok installed' "$evidence/baseline-dpkg.txt"
@@ -261,6 +269,23 @@ ssh_guest 'sudo dpkg --audit' >"$evidence/after-kill-audit.txt"
 test -s "$evidence/after-kill-audit.txt" || {
   echo 'Power-cut guest unexpectedly has clean dpkg; fault not proven' >&2; exit 1;
 }
+# The actual RPT executable must independently recognize the same *broken*
+# guest status. It is an audit, NOT a claim that RPT ran the transaction.
+ssh_guest 'sudo /home/ubuntu/rpt-audit dpkg-audit --status /var/lib/dpkg/status' \
+    >"$evidence/after-kill-rpt-dpkg-health.json"
+if ssh_guest 'sudo /home/ubuntu/rpt-audit dpkg-audit --status /var/lib/dpkg/status --require-clean' \
+    >/dev/null 2>&1; then
+  echo 'M31 RPT accepted an interrupted dpkg guest after actual QEMU SIGKILL' >&2; exit 1
+fi
+python3 - "$evidence/after-kill-rpt-dpkg-health.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    report = json.load(stream)
+assert report["healthy"] is False and report["issues"], report
+assert report["read_only"] is True
+assert report["host_execution_allowed"] is False
+assert len(report["status_sha256"]) == 64
+PY
 if grep -Fxq 'Status: install ok installed' "$evidence/after-kill-dpkg.txt" &&
     grep -Fxq 'Version: 2.0' "$evidence/after-kill-dpkg.txt"; then
   echo 'Power-cut guest appears fully upgraded; fault was not observed' >&2; exit 1
@@ -279,6 +304,19 @@ ssh_guest 'sudo dpkg --audit' >"$evidence/recovered-audit.txt"
 grep -Fxq 'Status: install ok installed' "$evidence/recovered-dpkg.txt"
 grep -Fxq 'Version: 1.0' "$evidence/recovered-dpkg.txt"
 test ! -s "$evidence/recovered-audit.txt"
+# The identical RPT executable must now accept the independently restored
+# v1 baseline and still explicitly deny host package execution.
+ssh_guest 'sudo /home/ubuntu/rpt-audit dpkg-audit --status /var/lib/dpkg/status --require-clean' \
+    >"$evidence/recovered-rpt-dpkg-health.json"
+python3 - "$evidence/recovered-rpt-dpkg-health.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    report = json.load(stream)
+assert report["healthy"] is True and report["issues"] == [], report
+assert report["read_only"] is True
+assert report["host_execution_allowed"] is False
+assert len(report["status_sha256"]) == 64
+PY
 ssh_guest 'sudo test ! -e /var/lib/rpt-powercut/entered'
 poweroff_vm
 test "$(sha256sum "$work/crashed.qcow2" | awk '{print $1}')" = "$crashed_sha"
@@ -311,4 +349,4 @@ result = {
 Path(destination).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 PY
 python3 scripts/validate-powercut-evidence.py "$evidence/result.json"
-echo 'PASS M15 real QEMU SIGKILL during dpkg postinst, interrupted reboot, fresh-disk recovery, runner unchanged'
+echo 'PASS M15/M31 real QEMU SIGKILL during dpkg postinst, RPT guest audit detects broken state and clean independent recovery, runner unchanged'
