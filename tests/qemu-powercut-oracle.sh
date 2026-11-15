@@ -15,6 +15,13 @@ rpt_guest_bin="${RPT_QEMU_BIN:?M31 requires RPT_QEMU_BIN to point to the current
 [[ -f "$rpt_guest_bin" && -x "$rpt_guest_bin" && ! -L "$rpt_guest_bin" ]] || {
   echo "M31 guest audit binary is missing, non-executable or symlinked" >&2; exit 2;
 }
+rpt_guest_dry_run="${rpt_guest_bin%/*}/rpt-transaction-dry-run"
+rpt_guest_inspect="${rpt_guest_bin%/*}/rpt-journal-inspect"
+for test_binary in "$rpt_guest_dry_run" "$rpt_guest_inspect"; do
+  [[ -f "$test_binary" && -x "$test_binary" && ! -L "$test_binary" ]] || {
+    echo "M33 RPT dry-run journal binary missing: $test_binary" >&2; exit 2;
+  }
+done
 test -f /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg || {
   echo 'Missing trusted Canonical cloud image signing keyring' >&2; exit 2;
 }
@@ -226,7 +233,9 @@ scp_guest "$work/rpt-powercut-2.0.deb" /home/ubuntu/rpt-powercut-2.0.deb
 # Carry the exact PR-head RPT binary into the independent QEMU disk before
 # sealing the baseline. Neither apt nor dpkg on the CI runner is replaced.
 scp_guest "$rpt_guest_bin" /home/ubuntu/rpt-audit
-ssh_guest 'chmod 0755 /home/ubuntu/rpt-audit && /home/ubuntu/rpt-audit --version'
+scp_guest "$rpt_guest_dry_run" /home/ubuntu/rpt-dry-run
+scp_guest "$rpt_guest_inspect" /home/ubuntu/rpt-journal-inspect
+ssh_guest 'chmod 0755 /home/ubuntu/rpt-audit /home/ubuntu/rpt-dry-run /home/ubuntu/rpt-journal-inspect && /home/ubuntu/rpt-audit --version'
 ssh_guest 'sudo dpkg --install /home/ubuntu/rpt-powercut-1.0.deb && test -z "$(sudo dpkg --audit)"'
 ssh_guest 'sudo dpkg-query -s rpt-powercut' >"$evidence/baseline-dpkg.txt"
 grep -Fxq 'Status: install ok installed' "$evidence/baseline-dpkg.txt"
@@ -237,6 +246,23 @@ baseline_sha="$(sha256sum "$work/baseline.qcow2" | awk '{print $1}')"
 qemu-img create -f qcow2 -F qcow2 -b "$work/baseline.qcow2" "$work/crashed.qcow2" >/dev/null
 start_vm "$work/crashed.qcow2" crash
 ssh_guest 'test -s /home/ubuntu/rpt-powercut-2.0.deb && sudo dpkg-deb -f /home/ubuntu/rpt-powercut-2.0.deb Version | grep -Fxq 2.0'
+# M33: persist an RPT OWNED dry-run Running journal before the same QEMU
+# hard cut that interrupts real, independent guest dpkg postinst.
+ssh_guest 'sudo systemd-run --unit=rpt-dryrun-powercut --collect /home/ubuntu/rpt-dry-run --journal-dir /var/lib/rpt-powercut-journal --id m33-powercut --pause-after-running-ms 180000' \
+  >"$evidence/started-rpt-dry-run.txt"
+rpt_running=false
+for attempt in $(seq 1 40); do
+  if ssh_guest "sudo grep -Fq '\"phase\":\"running\"' /var/lib/rpt-powercut-journal/m33-powercut.json" >/dev/null 2>&1; then
+    rpt_running=true
+    break
+  fi
+  guard_pid || { echo 'QEMU exited before durable RPT Running journal' >&2; exit 1; }
+  sleep 1
+done
+if [[ "$rpt_running" != true ]]; then
+  ssh_guest 'sudo journalctl -u rpt-dryrun-powercut.service --no-pager -n 80 || true' >"$evidence/failed-rpt-dry-run-service.txt" 2>&1 || :
+  echo 'M33 RPT did not persist Running before QEMU cut; fault not tested' >&2; exit 1
+fi
 ssh_guest 'sudo systemd-run --unit=rpt-powercut-upgrade --collect /usr/bin/dpkg --install /home/ubuntu/rpt-powercut-2.0.deb' \
   >"$evidence/started-upgrade.txt"
 entered=false
@@ -266,6 +292,19 @@ crashed_sha_before_reboot="$(sha256sum "$work/crashed.qcow2" | awk '{print $1}')
 start_vm "$work/crashed.qcow2" after-kill
 ssh_guest 'sudo dpkg-query -s rpt-powercut' >"$evidence/after-kill-dpkg.txt"
 ssh_guest 'sudo dpkg --audit' >"$evidence/after-kill-audit.txt"
+# A real kernel/power-cut must leave RPT's own *dry-run* journal blocked.
+# This is not a dpkg transaction executed by RPT.
+if ssh_guest 'sudo /home/ubuntu/rpt-journal-inspect /var/lib/rpt-powercut-journal --json' \
+    >"$evidence/after-kill-rpt-journal.json" 2>"$evidence/after-kill-rpt-journal-error.txt"; then
+  echo 'M33 inspector accepted a Running RPT journal after hard QEMU SIGKILL' >&2; exit 1
+fi
+python3 - "$evidence/after-kill-rpt-journal.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    records = json.load(stream)
+assert any(x["id"] == "m33-powercut" and x["phase"] == "running"
+           for x in records), records
+PY
 test -s "$evidence/after-kill-audit.txt" || {
   echo 'Power-cut guest unexpectedly has clean dpkg; fault not proven' >&2; exit 1;
 }
@@ -304,6 +343,9 @@ ssh_guest 'sudo dpkg --audit' >"$evidence/recovered-audit.txt"
 grep -Fxq 'Status: install ok installed' "$evidence/recovered-dpkg.txt"
 grep -Fxq 'Version: 1.0' "$evidence/recovered-dpkg.txt"
 test ! -s "$evidence/recovered-audit.txt"
+# A different fresh disk restored from the pre-fault baseline contains no
+# RPT dry-run journal. No unsafe in-place recovery of the failed journal.
+ssh_guest 'sudo test ! -e /var/lib/rpt-powercut-journal'
 # The identical RPT executable must now accept the independently restored
 # v1 baseline and still explicitly deny host package execution.
 ssh_guest 'sudo /home/ubuntu/rpt-audit dpkg-audit --status /var/lib/dpkg/status --require-clean' \
@@ -349,4 +391,4 @@ result = {
 Path(destination).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 PY
 python3 scripts/validate-powercut-evidence.py "$evidence/result.json"
-echo 'PASS M15/M31 real QEMU SIGKILL during dpkg postinst, RPT guest audit detects broken state and clean independent recovery, runner unchanged'
+echo 'PASS M15/M31/M33 real QEMU SIGKILL: blocked RPT dry-run Running journal, broken dpkg audit, independent clean disk restore, runner unchanged'

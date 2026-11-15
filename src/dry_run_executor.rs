@@ -119,6 +119,15 @@ impl DryRunExecutor {
     /// Records the lifecycle of a simulated transaction.
     /// A process crash while Running remains fail-closed for operator inspection.
     pub async fn submit(&self, id: String, fail_message: Option<String>) -> Result<()> {
+        self.submit_with_pause(id, fail_message, Duration::ZERO).await
+    }
+
+    /// Test-only deterministic delay AFTER durable Running has been recorded.
+    /// The process may be hard-killed by the external QEMU acceptance harness.
+    /// Never pauses or invokes real dpkg; ordinary submit() remains unchanged.
+    pub async fn submit_with_pause(
+        &self, id: String, fail_message: Option<String>, pause: Duration,
+    ) -> Result<()> {
         let dir = self.journal_dir.clone();
         self.queue.submit(move || async move {
             let journal = Journal::wait_async(dir).await.context("acquiring transaction journal lock")?;
@@ -126,6 +135,9 @@ impl DryRunExecutor {
             journal.advance(&record).context("preparing dry-run transaction")?;
             record.phase = Phase::Running;
             journal.advance(&record).context("starting dry-run transaction")?;
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+            }
             if let Some(message) = fail_message {
                 record.phase = Phase::Failed;
                 record.error = Some(message.clone());
@@ -149,6 +161,34 @@ mod tests {
     fn fixture() -> PathBuf {
         std::env::temp_dir().join(format!("rpt-dry-run-{}-{}-{}",
             std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(), NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)))
+    }
+
+    #[tokio::test]
+    async fn deliberate_running_pause_is_visible_before_terminal_state() {
+        let dir = fixture();
+        let executor = DryRunExecutor::new(dir.clone(), 4).unwrap();
+        let join = tokio::spawn(executor.submit_with_pause(
+            "paused".into(), None, Duration::from_millis(350),
+        ));
+        let mut observed_running = false;
+        for _ in 0..45 {
+            let path = dir.join("paused.json");
+            if let Ok(bytes) = std::fs::read(path) {
+                if let Ok(record) = serde_json::from_slice::<JournalRecord>(&bytes) {
+                    if record.phase == Phase::Running {
+                        observed_running = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(observed_running, "Running phase must be persisted before pause");
+        join.await.unwrap().unwrap();
+        let bytes = std::fs::read(dir.join("paused.json")).unwrap();
+        let result: JournalRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result.phase, Phase::Succeeded);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

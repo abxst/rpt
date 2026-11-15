@@ -2,7 +2,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use rpt::dry_run_executor::DryRunExecutor;
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode, time::Duration};
 use rpt::transaction_journal::{JournalRecord, Phase};
 
 #[derive(Parser)]
@@ -16,6 +16,9 @@ struct Args {
     simulate_failure: Option<String>,
     #[arg(long, default_value_t = 16)]
     queue_capacity: usize,
+    /// CI-only: hold a nonmutating Running journal so QEMU can power-cut it.
+    #[arg(long, hide = true, default_value_t = 0)]
+    pause_after_running_ms: u64,
     /// Emit machine-readable JSON lines to stderr.
     #[arg(long)]
     json: bool,
@@ -30,11 +33,17 @@ async fn execute(args: Args) -> Result<u8> {
     if args.simulate_failure.as_deref().is_some_and(str::is_empty) {
         bail!("simulated failure message cannot be empty");
     }
+    if args.pause_after_running_ms > 300_000 {
+        bail!("CI-only dry-run running pause exceeds 300 seconds");
+    }
     let executor = DryRunExecutor::new(args.journal_dir.clone(), args.queue_capacity)?;
     emit_event(args.json, &args.id, "queued", None);
     let id = args.id.clone();
     // Never drop an active transaction future on SIGINT/SIGTERM.
-    let mut job = Box::pin(executor.submit(args.id, args.simulate_failure));
+    let mut job = Box::pin(executor.submit_with_pause(
+        args.id, args.simulate_failure,
+        Duration::from_millis(args.pause_after_running_ms),
+    ));
     #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]

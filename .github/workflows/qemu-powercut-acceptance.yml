@@ -23,7 +23,7 @@ jobs:
       - name: Compile current RPT guest auditor from exact PR head
         run: |
           cargo generate-lockfile
-          cargo build --locked --bin rpt
+          cargo build --locked --bin rpt --bin rpt-transaction-dry-run --bin rpt-journal-inspect
       - name: Validate M15 scripts and fail-closed synthetic evidence contract
         run: |
           bash -n tests/qemu-powercut-oracle.sh
