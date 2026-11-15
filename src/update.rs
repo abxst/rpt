@@ -696,7 +696,7 @@ pub async fn update_with_architectures(
     fs::create_dir_all(dest).await?;
     // File stays in place between runs to prevent an inode-replacement race.
     // The handle is held across every await for the entire update transaction.
-    let lock_file = acquire_update_lock(dest).context(ErrorCategory::System)?;
+    let _lock_file = acquire_update_lock(dest).context(ErrorCategory::System)?;
     let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
     let count = repositories.len();
     let budget = Arc::new(Semaphore::new(opts.workers));
