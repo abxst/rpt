@@ -193,7 +193,9 @@ for name in SHA256SUMS SHA256SUMS.gpg "$image"; do
 done
 gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
   "$work/SHA256SUMS.gpg" "$work/SHA256SUMS" >"$evidence/cloud-signature.txt" 2>&1
-grep -F " $image" "$work/SHA256SUMS" >"$work/image-only.sha256"
+# Match the exact image filename in either GNU text (two spaces) or
+# binary (space+asterisk) digest notation; a prefix match is not sufficient.
+grep -E "^[0-9a-f]{64} [ *]$image$" "$work/SHA256SUMS" >"$work/image-only.sha256"
 test "$(wc -l <"$work/image-only.sha256")" -eq 1
 (cd "$work" && sha256sum -c image-only.sha256)
 image_sha="$(sha256sum "$work/$image" | awk '{print $1}')"
