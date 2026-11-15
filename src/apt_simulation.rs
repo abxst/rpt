@@ -5,8 +5,9 @@
 //! the existing strict, bounded signed candidate/removal planners with a
 //! uniform machine-readable result and explicit unsupported-policy gates.
 use crate::{
-    removal_planner, system_auto_upgrade::{self, AutoUpgradeSelection},
-    system_upgrade, transaction_plan_audit::Change,
+    install_plan::{self, PlanStep}, removal_planner,
+    system_auto_upgrade::{self, AutoUpgradeSelection}, system_upgrade,
+    transaction_plan_audit::{self, Action, Change},
 };
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -15,6 +16,8 @@ use sha2::{Digest, Sha256};
 use std::{fs, io::ErrorKind, path::Path};
 
 pub enum Operation<'a> {
+    Install { cache: &'a Path, apt_root: &'a Path, packages: &'a [String],
+        max_packages: usize, include_recommends: bool, reinstall: bool },
     Remove { packages: &'a [String], cascade: bool },
     Purge { packages: &'a [String], cascade: bool },
     Autoremove { extended_states: &'a Path },
@@ -38,6 +41,9 @@ pub struct AptSimulation {
     pub dpkg_status_sha256: String,
     pub apt_marks_sha256: Option<String>,
     pub selected_changes: Vec<Change>,
+    /// Compatibility with M11's signed install selected package/version list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<Vec<PlanStep>>,
     pub selected_removals: Vec<String>,
     pub blockers: Vec<String>,
     pub detailed_audit: Value,
@@ -64,6 +70,16 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// A plain APT install of the already installed exact version is a no-op;
+/// --reinstall makes it an explicit reinstall intent. Classification never
+/// implies a real dpkg operation or an executable transaction.
+fn install_changes(steps: &[PlanStep], reinstall: bool) -> Result<Vec<Change>> {
+    let audit = transaction_plan_audit::classify(steps)?;
+    Ok(audit.changes.into_iter().filter(|change| {
+        reinstall || change.action != Action::Reinstall
+    }).collect())
+}
+
 pub fn simulate(status: &Path, native: &str, operation: Operation<'_>) -> Result<AptSimulation> {
     if native.is_empty() || native == "all" || !native.bytes().all(|c|
         c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
@@ -74,11 +90,27 @@ pub fn simulate(status: &Path, native: &str, operation: Operation<'_>) -> Result
     let status_sha256 = digest(&before);
     // A full-system upgrade must not silently ignore partly configured dpkg
     // records when building a seemingly clean installed package inventory.
-    if matches!(&operation, Operation::Upgrade { .. } | Operation::FullUpgrade { .. }) {
+    if matches!(&operation, Operation::Install { .. } | Operation::Upgrade { .. } | Operation::FullUpgrade { .. }) {
         crate::dpkg_health::require_clean_snapshot(&before)?;
     }
     let mut marks_snapshot: Option<(&Path, Option<Vec<u8>>)> = None;
+    let mut selected_install: Option<Vec<PlanStep>> = None;
     let (kind, selected_changes, selected_removals, blockers, audit) = match operation {
+        Operation::Install { cache, apt_root, packages, max_packages, include_recommends, reinstall } => {
+            let steps = install_plan::preview_many_with_policy_options(
+                cache, status, apt_root, packages, native, max_packages, include_recommends,
+            )?;
+            let changes = install_changes(&steps, reinstall)?;
+            let detail = serde_json::json!({
+                "candidate_classification": transaction_plan_audit::classify(&steps)?,
+                "requested_packages": packages,
+                "include_recommends": include_recommends,
+                "explicit_reinstall": reinstall,
+                "note": "Same-version package candidates are no-ops unless --reinstall is set. Signed candidate subset only.",
+            });
+            selected_install = Some(steps);
+            ("install", changes, Vec::new(), Vec::new(), detail)
+        }
         Operation::Remove { packages, cascade } => {
             let plan = removal_planner::remove_snapshot(
                 &before, native, packages, cascade,
@@ -153,7 +185,7 @@ pub fn simulate(status: &Path, native: &str, operation: Operation<'_>) -> Result
         viable_in_supported_subset: blockers.is_empty(),
         simulation_only: true, apt_parity_verified: false, host_execution_allowed: false,
         dpkg_status_sha256: status_sha256, apt_marks_sha256: marks_sha256,
-        selected_changes, selected_removals, blockers, detailed_audit: audit,
+        selected_changes, selected: selected_install, selected_removals, blockers, detailed_audit: audit,
         warning: "Restricted read-only Debian planner; result is NOT full APT parity and NEVER authorizes host package execution.",
     })
 }
@@ -169,6 +201,22 @@ mod tests {
         let file = dir.path().join("status");
         fs::write(&file, status).unwrap();
         (dir, file)
+    }
+
+    #[test]
+    fn install_action_filters_same_version_unless_explicit_reinstall() {
+        let steps = vec![
+            PlanStep { package: "already".into(), architecture: "amd64".into(),
+                version: "1".into(), installed: Some("1".into()) },
+            PlanStep { package: "new".into(), architecture: "amd64".into(),
+                version: "2".into(), installed: None },
+        ];
+        let plain = install_changes(&steps, false).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].action, Action::Install);
+        let forced = install_changes(&steps, true).unwrap();
+        assert_eq!(forced.len(), 2);
+        assert_eq!(forced[0].action, Action::Reinstall);
     }
 
     #[test]

@@ -1060,6 +1060,11 @@ assert report["operation"] == "install"
 assert report["simulation_only"] is True
 assert report["apt_parity_verified"] is False
 assert report["host_execution_allowed"] is False
+assert report["outcome"] == "planned" and report["viable_in_supported_subset"] is True
+assert len(report["dpkg_status_sha256"]) == 64
+assert report["apt_marks_sha256"] is None
+assert len(report["selected_changes"]) >= 1
+assert report["detailed_audit"]["explicit_reinstall"] is False
 actual = {p["package"] + " " + p["version"] for p in report["selected"]}
 expected = set(pathlib.Path(sys.argv[2]).read_text().splitlines())
 assert actual and actual == expected, (actual, expected)

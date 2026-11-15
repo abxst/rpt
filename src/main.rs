@@ -293,6 +293,8 @@ enum Command {
         #[arg(long, default_value = "amd64")] architecture: String,
         #[arg(long, default_value_t = 200)] max_packages: usize,
         #[arg(long, default_value_t = false)] include_recommends: bool,
+        /// Treat an exact already-installed version as an explicit reinstall proposal.
+        #[arg(long, default_value_t = false)] reinstall: bool,
         /// Machine-readable selected package/version set for differential testing.
         #[arg(long, default_value_t = false)] json: bool,
         #[arg(required = true)] packages: Vec<String>,
@@ -1096,31 +1098,28 @@ async fn execute(cli: Cli) -> Result<()> {
             }
             println!("Foreign plan preview: {} package(s); NO CHANGES MADE", steps.len());
         }
-        Command::AptSimulateInstall { cache, status, apt_root, architecture, max_packages, include_recommends, json, packages } => {
-            let steps = rpt::install_plan::preview_many_with_policy_options(
-                &cache, &status, &apt_root, &packages, &architecture,
-                max_packages, include_recommends,
-            ).context(ErrorCategory::System)?;
+        Command::AptSimulateInstall { cache, status, apt_root, architecture, max_packages, include_recommends, reinstall, json, packages } => {
+            let report = rpt::apt_simulation::simulate(&status, &architecture,
+                rpt::apt_simulation::Operation::Install {
+                    cache: &cache, apt_root: &apt_root, packages: &packages,
+                    max_packages, include_recommends, reinstall,
+                }).context(ErrorCategory::System)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "schema_version": 1,
-                    "operation": "install",
-                    "simulation_only": true,
-                    "apt_parity_verified": false,
-                    "host_execution_allowed": false,
-                    "selected": steps,
-                }))?);
+                println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("RPT READ-ONLY INSTALL SIMULATION — NOT APT PARITY");
-                for step in &steps {
-                    match &step.installed {
-                        Some(old) => println!("Inst {}:{} [{}] ({})", step.package,
-                            step.architecture, old, step.version),
-                        None => println!("Inst {}:{} ({})", step.package,
-                            step.architecture, step.version),
+                if let Some(selected) = &report.selected {
+                    for step in selected {
+                        match &step.installed {
+                            Some(old) => println!("Inst {}:{} [{}] ({})", step.package,
+                                step.architecture, old, step.version),
+                            None => println!("Inst {}:{} ({})", step.package,
+                                step.architecture, step.version),
+                        }
                     }
+                    println!("Simulation complete: {} candidate(s), {} proposed change(s); NO CHANGES MADE",
+                        selected.len(), report.selected_changes.len());
                 }
-                println!("Simulation complete: {} package(s); NO CHANGES MADE", steps.len());
             }
         }
         Command::AptSimulateRemove { status, architecture, cascade, packages } => {

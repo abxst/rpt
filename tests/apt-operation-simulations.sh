@@ -92,6 +92,18 @@ if "$rpt" apt-simulate-remove --status "$work/status" --architecture "../amd64" 
       librpt >"$work/unsafe.json" 2>/dev/null; then
   echo 'M16 accepted unsafe architecture scope' >&2; exit 1
 fi
+cat > "$work/interrupted-status" <<'EOF'
+Package: interrupted
+Version: 3
+Architecture: amd64
+Status: install ok half-configured
+
+EOF
+if "$rpt" apt-simulate-install --json --status "$work/interrupted-status" \
+    --cache "$work/missing-cache" requested >"$work/rejected.json" 2>"$work/rejected.err"; then
+    echo 'M22 install simulation ignored interrupted dpkg state' >&2; exit 1
+fi
+grep -q 'dpkg health' "$work/rejected.err"
 test "$(sha256sum "$work/status" | awk '{print $1}')" = "$before"
 test "$(sha256sum "$work/extended_states" | awk '{print $1}')" = "$marks_before"
 echo 'PASS M16 read-only APT operation simulation CLI, blocked removals, purge, autoremove and negative scopes'
