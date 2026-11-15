@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
+    ffi::CString,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::{ffi::OsStrExt, fs::{FileTypeExt, MetadataExt}},
@@ -46,13 +48,74 @@ fn hash_bytes(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
-/// Directory walk never follows guest symlinks. Include paths, file content,
-/// UNIX mode/ownership and special-file device identity. This is a byte-level
-/// consistency witness, not proof of preserved ACLs, hardlink topology,
-/// xattrs, application state or durability across power loss.
+/// Linux l* calls inspect the directory entry itself rather than following
+/// symlinks. Extended attributes include POSIX ACL and security.capability
+/// when present; refusing unreadable/unsupported metadata is intentional.
+#[cfg(target_os = "linux")]
+mod extended_attrs {
+    use super::*;
+    use std::{os::raw::{c_char, c_void}, ptr};
+    extern "C" {
+        fn llistxattr(path: *const c_char, list: *mut c_char, size: usize) -> isize;
+        fn lgetxattr(path: *const c_char, name: *const c_char,
+                     value: *mut c_void, size: usize) -> isize;
+    }
+    const LIMIT: usize = 1024 * 1024;
+
+    pub fn hash(path: &Path, digest: &mut Sha256) -> Result<()> {
+        let path = CString::new(path.as_os_str().as_bytes())
+            .context("NUL in native checkpoint path")?;
+        let names_size = unsafe { llistxattr(path.as_ptr(), ptr::null_mut(), 0) };
+        if names_size < 0 { return Err(std::io::Error::last_os_error().into()); }
+        if names_size as usize > LIMIT { bail!("extended attribute list exceeds 1 MiB"); }
+        let mut names = vec![0_u8; names_size as usize];
+        if !names.is_empty() {
+            let count = unsafe {
+                llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len())
+            };
+            if count < 0 { return Err(std::io::Error::last_os_error().into()); }
+            if count as usize != names.len() {
+                bail!("extended attribute names changed during checkpoint hashing");
+            }
+        }
+        let mut attrs = names.split(|b| *b == 0)
+            .filter(|name| !name.is_empty()).collect::<Vec<_>>();
+        attrs.sort_unstable();
+        digest.update((attrs.len() as u64).to_le_bytes());
+        for name in attrs {
+            let key = CString::new(name)?;
+            let len = unsafe {
+                lgetxattr(path.as_ptr(), key.as_ptr(), ptr::null_mut(), 0)
+            };
+            if len < 0 { return Err(std::io::Error::last_os_error().into()); }
+            if len as usize > LIMIT { bail!("extended attribute value exceeds 1 MiB"); }
+            let mut value = vec![0u8; len as usize];
+            if !value.is_empty() {
+                let read = unsafe {
+                    lgetxattr(path.as_ptr(), key.as_ptr(),
+                              value.as_mut_ptr().cast::<c_void>(), value.len())
+                };
+                if read < 0 { return Err(std::io::Error::last_os_error().into()); }
+                if read as usize != value.len() {
+                    bail!("extended attribute value changed during checkpoint hashing");
+                }
+            }
+            hash_bytes(digest, name);
+            hash_bytes(digest, &value);
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic metadata/content witness for a *disposable* rootfs. File
+/// identities are represented by their first sorted relative path, never raw
+/// inode numbers (which change when copying). Relative hardlink alias
+/// relationships, xattrs/ACLs/capabilities, mtime, owner, mode, bytes and
+/// special device IDs are all included. No proof of power-loss durability,
+/// external effects or safe execution of privileged maintainer scripts.
 fn tree_hash(root: &Path) -> Result<String> {
     fn walk(root: &Path, dir: &Path, hash: &mut Sha256,
-        count: &mut usize, depth: usize) -> Result<()> {
+        count: &mut usize, depth: usize, links: &mut BTreeMap<(u64, u64), Vec<u8>>) -> Result<()> {
         if depth > 128 { bail!("rootfs tree exceeds supported directory depth"); }
         let mut paths = fs::read_dir(dir)?
             .map(|e| e.map(|v| v.path()))
@@ -67,13 +130,27 @@ fn tree_hash(root: &Path) -> Result<String> {
             }
             let meta = fs::symlink_metadata(&path)?;
             let kind = meta.file_type();
-            hash_bytes(hash, path.strip_prefix(root)?.as_os_str().as_bytes());
+            let relative = path.strip_prefix(root)?.as_os_str().as_bytes();
+            hash_bytes(hash, relative);
             hash.update(meta.mode().to_le_bytes());
             hash.update(meta.uid().to_le_bytes());
             hash.update(meta.gid().to_le_bytes());
+            hash.update(meta.mtime().to_le_bytes());
+            hash.update(meta.mtime_nsec().to_le_bytes());
+            #[cfg(target_os = "linux")]
+            extended_attrs::hash(&path, hash)
+                .with_context(|| format!("hashing xattrs of {}", path.display()))?;
             if kind.is_file() {
                 hash.update(b"file");
                 hash.update(meta.len().to_le_bytes());
+                hash.update(meta.nlink().to_le_bytes());
+                if meta.nlink() > 1 {
+                    let first = links.entry((meta.dev(), meta.ino()))
+                        .or_insert_with(|| relative.to_vec());
+                    hash_bytes(hash, first);
+                } else {
+                    hash_bytes(hash, b"single-link");
+                }
                 let mut file = File::open(&path)?;
                 let mut block = [0u8; 65_536];
                 loop {
@@ -86,7 +163,7 @@ fn tree_hash(root: &Path) -> Result<String> {
                 hash_bytes(hash, fs::read_link(&path)?.as_os_str().as_bytes());
             } else if kind.is_dir() {
                 hash.update(b"directory");
-                walk(root, &path, hash, count, depth + 1)?;
+                walk(root, &path, hash, count, depth + 1, links)?;
             } else if kind.is_socket() {
                 bail!("cannot checkpoint a rootfs containing a Unix socket: {}", path.display());
             } else if kind.is_char_device() || kind.is_block_device() || kind.is_fifo() {
@@ -99,9 +176,10 @@ fn tree_hash(root: &Path) -> Result<String> {
         Ok(())
     }
     let mut hash = Sha256::new();
-    hash.update(b"rpt-native-tree-v1");
+    hash.update(b"rpt-native-tree-v2");
     let mut count = 0;
-    walk(root, root, &mut hash, &mut count, 0)?;
+    let mut links = BTreeMap::new();
+    walk(root, root, &mut hash, &mut count, 0, &mut links)?;
     Ok(hex::encode(hash.finalize()))
 }
 
@@ -213,7 +291,7 @@ pub fn create(root: &Path, destination: &Path, journal: &Path,
         bail!("source rootfs changed during checkpoint; no receipt written");
     }
     let receipt = NativeSnapshotReceipt {
-        schema_version: 1,
+        schema_version: 2,
         id: id.to_owned(),
         source_rootfs: root.display().to_string(),
         snapshot_rootfs: dest.display().to_string(),
@@ -240,7 +318,7 @@ pub fn verify(path: &Path) -> Result<NativeSnapshotReceipt> {
         bail!("snapshot receipt must be a regular file <=64 KiB");
     }
     let receipt: NativeSnapshotReceipt = serde_json::from_slice(&fs::read(path)?)?;
-    if receipt.schema_version != 1 || !valid_id(&receipt.id)
+    if receipt.schema_version != 2 || !valid_id(&receipt.id)
         || receipt.tree_sha256.len() != 64
         || !receipt.tree_sha256.bytes().all(|c| c.is_ascii_hexdigit())
         || receipt.status_sha256.len() != 64
@@ -332,7 +410,7 @@ mod tests {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let file = dir.path().join("fake.json");
         let receipt = NativeSnapshotReceipt {
-            schema_version: 1, id: "fake".into(),
+            schema_version: 2, id: "fake".into(),
             source_rootfs: "/tmp/example-source".into(),
             snapshot_rootfs: "/tmp/example-snapshot".into(),
             journal_dir: "/tmp/example-journal".into(),
