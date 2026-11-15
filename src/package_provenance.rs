@@ -246,7 +246,7 @@ pub fn audit_configured_cache(cache: &Path, apt_root: &Path) -> Result<CacheAudi
         let source = sources.get(&(repo.uri.clone(), repo.suite.clone()))
             .with_context(|| format!("cached repository is no longer configured: {} {}",
                 repo.uri, repo.suite))?;
-        if source.keyring.to_string_lossy() != repo.keyring {
+        if source.keyring.to_string_lossy().as_ref() != repo.keyring.as_str() {
             bail!("cache Signed-By keyring differs from currently configured source");
         }
         for path in &repo.signed_index_paths {
