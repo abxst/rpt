@@ -167,9 +167,11 @@ mod tests {
     async fn deliberate_running_pause_is_visible_before_terminal_state() {
         let dir = fixture();
         let executor = DryRunExecutor::new(dir.clone(), 4).unwrap();
-        let join = tokio::spawn(executor.submit_with_pause(
-            "paused".into(), None, Duration::from_millis(350),
-        ));
+        let join = tokio::spawn(async move {
+            executor.submit_with_pause(
+                "paused".into(), None, Duration::from_millis(350),
+            ).await
+        });
         let mut observed_running = false;
         for _ in 0..45 {
             let path = dir.join("paused.json");
