@@ -79,6 +79,10 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   reverse-dependency blockers, unchanged input-state SHA-256 and no host
   execution permissions. This is partial compatibility only. See
   [M16 operation simulations](docs/m16-apt-operation-simulations.md).
+- **M17 bounded apt.conf syntax**: flat and nested APT::Default-Release
+  scopes with comments, strict fail-closed unsupported policy, and
+  `apt-config-inspect` JSON; see
+  [M17 apt.conf parser](docs/m17-apt-conf-parser.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

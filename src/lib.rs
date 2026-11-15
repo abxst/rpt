@@ -13,6 +13,7 @@ pub mod removal_impact;
 pub mod removal_planner;
 pub mod policy;
 pub mod apt_preferences;
+pub mod apt_config_subset;
 pub mod apt_pin_eval;
 pub mod apt_phasing;
 pub mod update;
