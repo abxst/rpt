@@ -51,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=v0.1.0-alpha.23
+          TAG=v0.1.0-alpha.24
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release already exists, skipping."
             exit 0
@@ -68,4 +68,4 @@ jobs:
           gh release create "$TAG" dist/rpt-linux-amd64.tar.gz dist/SHA256SUMS \
             dist/PRODUCTION-QUALIFICATION.json \
             --title "RPT $TAG — experimental package engine (guest only)" --prerelease \
-            --notes "Experimental signed metadata, read-only APT-like simulation and disposable guest transactions. M13 v2 checkpoint metadata witnesses and M14 guest dpkg/APT host-alias preflight/negative VM tests; legacy v1 receipts are rejected. Live host dpkg and APT replacement remain BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."
+            --notes "Experimental signed metadata, read-only APT-like simulation and disposable guest transactions. M13/M14 guest metadata and host-alias checks; M15 experimental QEMU SIGKILL dpkg-only guest oracle with independent disk recovery (NOT RPT transaction power-loss certification). Live host dpkg and APT replacement remain BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."

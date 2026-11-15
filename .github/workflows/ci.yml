@@ -29,6 +29,9 @@ jobs:
         run: |
           bash -n tests/native-full-upgrade-chaos.sh
           bash -n tests/native-guest-boundary.sh
+          bash -n tests/qemu-powercut-oracle.sh
+          python3 -m py_compile scripts/validate-powercut-evidence.py
+          python3 -m unittest discover -s tests -p test_powercut_evidence.py -v
           bash -n tests/signed-plan-differential.sh
           bash -n tests/version-corpus-differential.sh
           bash -n tests/production-gate-contract.sh

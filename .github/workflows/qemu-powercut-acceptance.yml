@@ -1,0 +1,37 @@
+name: QEMU hard power-cut and independent disk recovery (M15)
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  power-cut:
+    name: Ubuntu 24.04 QCOW2 / QEMU SIGKILL / reboot / independent restore
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and signed cloud image verification dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-system-x86 qemu-utils cloud-image-utils ubuntu-keyring \
+            openssh-client gpgv
+      - name: Validate M15 scripts and fail-closed synthetic evidence contract
+        run: |
+          bash -n tests/qemu-powercut-oracle.sh
+          python3 -m unittest discover -s tests -p test_powercut_evidence.py -v
+      - name: Actually power-cut QEMU during guest dpkg postinst
+        timeout-minutes: 35
+        run: |
+          timeout --signal=TERM --kill-after=30s 2050 \
+            bash tests/qemu-powercut-oracle.sh
+      - name: Preserve read-only power-cut evidence and serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpt-m15-qemu-powercut
+          path: ${{ runner.temp }}/rpt-m15-evidence
+          retention-days: 7
+          if-no-files-found: warn
