@@ -406,6 +406,89 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_detects_hardlink_alias_changes_and_reflink_copy_preserves_them() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("copied");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("first"), b"identical bytes").unwrap();
+        fs::hard_link(source.join("first"), source.join("second")).unwrap();
+        let original = tree_hash(&source).unwrap();
+        let status = Command::new("cp")
+            .args(["-a", "--reflink=auto", "--"])
+            .arg(&source).arg(&destination).status().unwrap();
+        assert!(status.success());
+        assert_eq!(tree_hash(&destination).unwrap(), original,
+            "cp -a checkpoint must retain hardlink topology");
+        // Replacing one inode with an independent copy must invalidate a
+        // receipt even if the visible bytes and most metadata are unchanged.
+        let status = Command::new("cp")
+            .args(["-p", "--"])
+            .arg(destination.join("first")).arg(destination.join("detached"))
+            .status().unwrap();
+        assert!(status.success());
+        fs::rename(destination.join("detached"), destination.join("second")).unwrap();
+        assert_eq!(fs::read(destination.join("first")).unwrap(),
+            fs::read(destination.join("second")).unwrap());
+        assert_ne!(tree_hash(&destination).unwrap(), original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn checkpoint_detects_extended_attribute_only_mutation() {
+        use std::os::raw::{c_char, c_void};
+        extern "C" {
+            fn lsetxattr(path: *const c_char, name: *const c_char,
+                         value: *const c_void, size: usize, flags: i32) -> i32;
+        }
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"unchanged").unwrap();
+        let original = tree_hash(dir.path()).unwrap();
+        let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let key = CString::new("user.rpt.checkpoint").unwrap();
+        let set = |value: &[u8]| -> std::io::Result<()> {
+            let rc = unsafe {
+                lsetxattr(path_c.as_ptr(), key.as_ptr(),
+                          value.as_ptr().cast(), value.len(), 0)
+            };
+            if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+        };
+        if let Err(error) = set(b"original") {
+            // Only filesystems without user extended attributes can skip the
+            // positive xattr test; hashing any unreadable xattrs still fails.
+            if error.raw_os_error() == Some(95) { return; }
+            panic!("unable to set test extended attribute: {error}");
+        }
+        let with_attr = tree_hash(dir.path()).unwrap();
+        assert_ne!(original, with_attr);
+        set(b"tampered").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"unchanged");
+        assert_ne!(with_attr, tree_hash(dir.path()).unwrap());
+        set(b"original").unwrap();
+        assert_eq!(with_attr, tree_hash(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn old_v1_checkpoint_receipts_fail_closed() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let path = dir.path().join("receipt.json");
+        let record = NativeSnapshotReceipt {
+            schema_version: 1, id: "legacy".into(),
+            source_rootfs: "/tmp/legacy-source".into(),
+            snapshot_rootfs: "/tmp/legacy-snapshot".into(),
+            journal_dir: "/tmp/legacy-journal".into(),
+            status_sha256: "a".repeat(64),
+            apt_marks_sha256: "missing".into(),
+            tree_sha256: "b".repeat(64),
+            created_utc: "2026-01-01T00:00:00Z".into(),
+        };
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(format!("{:#}", verify(&path).unwrap_err())
+            .contains("invalid or unsupported native snapshot receipt"));
+    }
+
+    #[test]
     fn receipt_invalid_apt_mark_digest_is_refused_before_restore() {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let file = dir.path().join("fake.json");
