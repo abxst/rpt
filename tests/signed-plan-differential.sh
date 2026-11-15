@@ -466,6 +466,19 @@ opts=(
 apt-get "${opts[@]}" update >"$root/apt-update.log"
 ./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache" --no-progress >"$root/rpt-update.log"
 ./target/debug/rpt cache-audit --cache "$root/rpt-cache" >"$root/m23-cache-audit.json"
+./target/debug/rpt cache-audit --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" >"$root/m24-source-bound.json"
+python3 - "$root/m24-source-bound.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["source_set_bound"] is True
+assert r["verified_repositories"] >= 1 and not r["host_execution_allowed"]
+PY
+mkdir -p "$root/m24-no-enabled-sources"
+if ./target/debug/rpt cache-audit --cache "$root/rpt-cache" \
+    --apt-root "$root/m24-no-enabled-sources" >/dev/null 2>&1; then
+  echo 'M24 incorrectly accepted cached source after source disabled or removed' >&2; exit 1
+fi
+echo 'PASS M24 cache vs enabled Signed-By source-set policy and stale source refusal'
 python3 - "$root/m23-cache-audit.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))

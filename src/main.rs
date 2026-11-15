@@ -745,6 +745,8 @@ enum Command {
     /// Offline GPG/SHA256 audit of every RPT signed repository cache (no host execution).
     CacheAudit {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        /// Optionally require every cached repo/index to match currently enabled Signed-By APT sources.
+        #[arg(long)] apt_root: Option<PathBuf>,
     },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
@@ -969,9 +971,12 @@ async fn execute(cli: Cli) -> Result<()> {
                 ).await?;
             }
         }
-        Command::CacheAudit { cache } => {
-            let report = rpt::package_provenance::audit_cache(&cache)
-                .context(ErrorCategory::System)?;
+        Command::CacheAudit { cache, apt_root } => {
+            let report = if let Some(root) = apt_root {
+                rpt::package_provenance::audit_configured_cache(&cache, &root)?
+            } else {
+                rpt::package_provenance::audit_cache(&cache)?
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::CacheVersions { driver, cache, package, architecture } => {
