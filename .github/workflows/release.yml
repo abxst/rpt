@@ -34,12 +34,24 @@ jobs:
           tar -czf dist/rpt-linux-amd64.tar.gz -C target/release rpt
           cd dist
           sha256sum rpt-linux-amd64.tar.gz > SHA256SUMS
+      - name: Attach fail-closed acceptance status to prerelease
+        run: |
+          set -euo pipefail
+          python3 scripts/production-gate.py --expected-commit "${{ github.event.workflow_run.head_sha }}" \
+            > dist/PRODUCTION-QUALIFICATION.json
+          python3 - <<'PY'
+          import json
+          status = json.load(open("dist/PRODUCTION-QUALIFICATION.json"))
+          assert status["qualification"] == "BLOCKED"
+          assert status["manual_security_review_required"] is True
+          assert status["host_execution_allowed"] is False
+          PY
       - name: Publish guarded experimental prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=v0.1.0-alpha.20
+          TAG=v0.1.0-alpha.21
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release already exists, skipping."
             exit 0
@@ -54,5 +66,6 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
           gh release create "$TAG" dist/rpt-linux-amd64.tar.gz dist/SHA256SUMS \
-            --title "RPT $TAG — experimental transport MVP" --prerelease \
-            --notes "Experimental signed metadata to package manifest and verified download pipeline. Does not install packages or replace APT."
+            dist/PRODUCTION-QUALIFICATION.json \
+            --title "RPT $TAG — experimental package engine (guest only)" --prerelease \
+            --notes "Experimental signed metadata, policy previews, read-only APT-like simulation and disposable guest transactions. Live host dpkg and APT replacement are BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."
