@@ -122,6 +122,9 @@ pub struct Repo {
     pub suite: String,
     pub components: Vec<String>,
     pub keyring: PathBuf,
+    /// Signed source architecture restriction. Additional architectures
+    /// are never selected outside this explicit source filter.
+    pub architectures: Option<Vec<String>>,
 }
 
 /// Native Debian architecture of this build. Foreign architecture index
@@ -146,12 +149,20 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
             bail!("inline/multiline Signed-By and continuation fields are not yet supported");
         }
         let (key, value) = line.split_once(':').context("invalid Deb822 source field")?;
+        if !matches!(key, "Types" | "URIs" | "Suites" | "Components"
+            | "Signed-By" | "Architectures" | "Enabled" | "Trusted") {
+            bail!("unsupported Deb822 source field: {key}");
+        }
         if fields.insert(key.to_owned(), value.trim().to_owned()).is_some() {
             bail!("duplicate source field {key}");
         }
     }
-    if fields.get("Enabled").is_some_and(|x| x.eq_ignore_ascii_case("no")) {
-        return Ok(Vec::new());
+    if let Some(enabled) = fields.get("Enabled") {
+        match enabled.to_ascii_lowercase().as_str() {
+            "yes" => {}
+            "no" => return Ok(Vec::new()),
+            _ => bail!("unsupported Enabled source flag: {enabled}"),
+        }
     }
     let types = words(fields.get("Types").context("missing Types")?);
     if !types.iter().any(|t| t == "deb") {
@@ -160,17 +171,36 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
     if types.iter().any(|t| t != "deb" && t != "deb-src") {
         bail!("unsupported source type");
     }
-    if fields.get("Trusted").is_some_and(|x| x.eq_ignore_ascii_case("yes")) {
-        bail!("Trusted: yes would bypass repository verification");
+    if let Some(trusted) = fields.get("Trusted") {
+        if !trusted.eq_ignore_ascii_case("no") {
+            bail!("unsupported Trusted source flag: {trusted}; trust bypass disallowed");
+        }
     }
-    if let Some(arches) = fields.get("Architectures") {
-        if !words(arches).iter().any(|arch| arch == native_architecture().unwrap_or("")) { return Ok(Vec::new()); }
-    }
+    let architectures = if let Some(raw) = fields.get("Architectures") {
+        let values = words(raw).into_iter().map(str::to_owned).collect::<Vec<_>>();
+        if values.is_empty() || values.len() > 8
+            || values.iter().any(|arch| arch.is_empty() || arch == "all"
+                || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+            || values.iter().collect::<BTreeSet<_>>().len() != values.len() {
+            bail!("invalid or duplicate source Architectures");
+        }
+        // Foreign-only source selection remains unsupported in the native
+        // update path. Never select its index using a synthetic native name.
+        if !values.iter().any(|arch| arch == native_architecture().unwrap_or("")) {
+            return Ok(Vec::new());
+        }
+        Some(values)
+    } else { None };
     let key = fields.get("Signed-By").context("Signed-By keyring required")?;
     if key.split_whitespace().count() != 1 || !key.starts_with('/') {
         bail!("Signed-By must be one absolute keyring path");
     }
     let keyring = PathBuf::from(key);
+    if !keyring.is_absolute()
+        || keyring.components().any(|part| matches!(part,
+            std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        bail!("Signed-By path must be absolute and normalized");
+    }
     let suites = words(fields.get("Suites").context("missing Suites")?);
     let components = words(fields.get("Components").context("missing Components")?);
     if suites.is_empty() || components.is_empty() { bail!("empty Suites or Components"); }
@@ -190,7 +220,7 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
             out.push(Repo {
                 uri: uri.trim_end_matches('/').to_owned(),
                 suite: suite.clone(), components: components.clone(),
-                keyring: keyring.clone(),
+                keyring: keyring.clone(), architectures: architectures.clone(),
             });
         }
     }
@@ -347,6 +377,12 @@ fn indexes(
     let mut result = Vec::new();
     let mut architectures = vec![native_architecture()?.to_owned()];
     architectures.extend(additional_architectures.iter().cloned());
+    if let Some(allowed) = &repo.architectures {
+        architectures.retain(|arch| allowed.contains(arch));
+    }
+    if architectures.is_empty() {
+        bail!("repository architecture filter excludes selected architectures");
+    }
     for component in &repo.components {
         for arch in &architectures {
             let base = format!("{component}/binary-{arch}/Packages");
@@ -643,7 +679,7 @@ mod tests {
     fn checks_release_checksum_metadata() {
         let text = format!("-----BEGIN PGP SIGNED MESSAGE-----\\nHash: SHA256\\n\\nOrigin: Ubuntu\\nSHA256:\\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-{}/Packages.xz\\n-----BEGIN PGP SIGNATURE-----", native_architecture().unwrap()).replace("\\n","\n");
         let hashes = release_hashes(&text).unwrap();
-        let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into() };
+        let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into(), architectures: None };
         assert_eq!(indexes(&repo, &hashes, false, &[]).unwrap().len(), 1);
     }
     #[test]
@@ -660,6 +696,7 @@ mod tests {
         let repo = Repo {
             uri: "https://example.org".into(), suite: "test".into(),
             components: vec!["main".into()], keyring: "/tmp/none".into(),
+            architectures: None,
         };
         let extra = [other.to_owned()];
         let selected = indexes(&repo, &hashes, false, &extra).unwrap();
