@@ -34,6 +34,8 @@ jobs:
           bash -n tests/artifact-cache-lifecycle.sh
           bash -n tests/dpkg-health-audit.sh
           bash -n tests/cache-audit-negative.sh
+          bash -n tests/deb-packaging.sh
+          bash -n scripts/build-deb.sh
           bash -n tests/apt-sources-validation.sh
           bash -n tests/qemu-powercut-oracle.sh
           python3 -m py_compile scripts/validate-powercut-evidence.py
@@ -258,6 +260,8 @@ jobs:
         run: bash tests/signed-multiarch-differential.sh ./target/debug/rpt
       - name: Release build
         run: cargo build --release --locked
+      - name: Experimental Debian package (inspect and unpack only)
+        run: bash tests/deb-packaging.sh ./target/release/rpt
   arm64-native:
     name: Native ARM64 Ubuntu package differential
     runs-on: ubuntu-24.04-arm
@@ -280,3 +284,5 @@ jobs:
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --all-targets --locked
           cargo build --locked
+      - name: Experimental native ARM64 .deb (inspect only)
+        run: bash tests/deb-packaging.sh ./target/debug/rpt

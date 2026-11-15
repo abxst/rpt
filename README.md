@@ -96,6 +96,7 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 - **M22 install simulation contract**: signed `apt-simulate-install --json` shares the M16 status-digest, candidate-change and no-host-execution JSON contract while retaining the M11 `selected` compatibility field. Default same-version selection is no-op; `--reinstall` explicitly proposes reinstall. See [M22](docs/m22-signed-install-simulation.md).
 - **M23 offline signed cache audit**: `cache-audit` verifies each configured repository cache against GPG Signed-By, Release freshness and all cached index SHA256/size without network or package execution; see [M23](docs/m23-cache-audit.md).
 - **M24 source-set binding**: `cache-audit --apt-root DIR` also enforces exact currently enabled URI/suite/keyring and component/architecture restrictions and rejects caches for removed sources. This is a read-only qualification gate, not yet automatic enforcement in every package planner; see [M24](docs/m24-source-set-audit.md).
+- **M25 experimental native Debian packaging**: `scripts/build-deb.sh` produces an experimental standalone `rpt` .deb without shadowing `apt`/dpkg or running maintainer scripts; CI unpacks and executes the CLI on amd64 and ARM64, but never installs it on the runner. See [M25](docs/m25-experimental-deb.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
