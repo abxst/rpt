@@ -671,6 +671,17 @@ enum Command {
         #[arg(long)] reason: String,
         #[arg(long)] evidence: String,
     },
+    /// Initialize an empty, explicitly owned RPT package archive cache.
+    /// Never adopts an existing populated directory or host APT archives.
+    ArtifactCacheInit {
+        #[arg(long, default_value = "./rpt-artifacts")] root: PathBuf,
+    },
+    /// Read-only preview by default; explicit --apply removes ONLY
+    /// managed .deb archives and leftover partial downloads.
+    ArtifactCacheClean {
+        #[arg(long, default_value = "./rpt-artifacts")] root: PathBuf,
+        #[arg(long, default_value_t = false)] apply: bool,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -741,6 +752,16 @@ async fn execute(cli: Cli) -> Result<()> {
                     "dry_run": true, "journal_dir": journal_dir
                 })),
             }
+        }
+        Command::ArtifactCacheInit { root } => {
+            let report = rpt::artifact_cache::initialize(&root)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::ArtifactCacheClean { root, apply } => {
+            let report = rpt::artifact_cache::clean(&root, apply)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::DriverInfo { driver, os_release } => {
             let kind = match driver {
