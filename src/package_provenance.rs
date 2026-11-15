@@ -749,7 +749,6 @@ mod tests {
         fs::remove_file(temp.path().join("index-link.raw")).unwrap();
         assert!(verify_index_inventory(temp.path(), &[entry]).is_ok());
     }
-    use super::*;
     #[test]
     fn exact_manifest_validates_architecture_identity_and_duplicate_roots() {
         let mk = |arch: &str| crate::install_plan::PlanStep {
