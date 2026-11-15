@@ -52,6 +52,31 @@ A dedicated `setsid` session ensures that SIGKILL cannot target the
 runner's own process group. The script fails if it cannot positively verify
 the dedicated session identity.
 
+## M13 metadata fidelity extension (v2 checkpoints)
+
+Every M8 signed fault scenario additionally creates a pair of **hardlinked**
+guest files and attaches a `user.rpt.checkpoint` extended attribute. The
+verified fresh recovery root must preserve both inode alias identity and
+the original attribute value.
+
+Negative tests deliberately mutate only a checkpoint's extended attribute
+value (`prerm-failure`), break its hardlink relationship without changing
+payload bytes (`sigterm-postinst`), or corrupt dpkg status
+(`sigkill-postinst`). Each changed checkpoint must fail both
+`snapshot-verify` and `snapshot-restore` *before* a destination is
+created. After restoring the original xattr, the first receipt must
+verify again.
+
+V2 receipts and the `rpt-native-tree-v2` hash bind mtime, Linux xattrs,
+hardlink topology, ownership, mode, bytes, symlinks and special file
+identity; older v1 receipts are refused because their witness omitted
+important metadata. See [native rootfs transactions](native-rootfs-transactions.md).
+
+This is only an offline guest **consistency witness**. It does not
+authenticate who created the receipt, synchronize arbitrary external
+writers, flush all filesystem dirty data against power loss, contain a
+privileged maintainer script, or make the guest execution atomic.
+
 ## What this proves—and what it does not
 
 M8 verifies logical recovery behavior for three realistic failure points
