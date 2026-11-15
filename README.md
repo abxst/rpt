@@ -39,6 +39,13 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   artifacts, requires an approved SHA256 and a full-tree checkpoint, then
   runs remove→upgrade in ONE supervised journal with a full installed
   inventory postflight. No live-host dpkg permission or automatic rollback.
+- **M8 signed guest fault-injection acceptance**: dedicated disposable VM
+  cases inject `prerm` failure, SIGTERM, and session-scoped SIGKILL during
+  combined transactions; inspect failure/interrupted journals, verify
+  mandatory checkpoint receipts, restore to **new** rootfs paths, reject
+  tampered snapshots and compare host dpkg/APT state. See
+  [the M8 chaos oracle](docs/native-full-upgrade-chaos.md). This is evidence
+  for manual recovery only, **not** crash-atomic host rollback.
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

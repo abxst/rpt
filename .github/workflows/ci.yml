@@ -25,6 +25,10 @@ jobs:
         run: cargo test --all-targets --locked
       - name: Validate optional Docker-free WSL smoke script syntax
         run: bash -n tests/wsl-native-rootfs-smoke.sh
+      - name: Validate M8 signed native-rootfs fault oracle syntax
+        run: |
+          bash -n tests/native-full-upgrade-chaos.sh
+          bash -n tests/signed-plan-differential.sh
       - name: Package driver discovery and fail-closed API tests
         run: |
           set -euo pipefail

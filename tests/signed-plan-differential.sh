@@ -27,6 +27,10 @@ cleanup() {
       "$root/native-upgrade-guest" "$root/native-auto-journal" \
       "$root/native-combined-guest" "$root/native-combined-checkpoint" \
       "$root/native-combined-restored" "$root/native-combined-journal"
+    # M8 creates additional root-owned fresh guests, sealed checkpoints,
+    # restored trees and interrupted journals. Purge only inside the
+    # validated private /tmp/rpt-signed.* test workspace.
+    sudo rm -rf -- "$root"/native-chaos-*
   fi
   rm -rf "$root"
 }
@@ -1374,7 +1378,12 @@ cat > "$root/demo-v2/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -e
 touch /tmp/rpt-upgrade-postinst-running
-sleep 4
+if [ -e /etc/rpt-ci-hold-postinst ]; then
+  # Bounded deterministic signal window, enabled ONLY in disposable VM tests.
+  sleep 30
+else
+  sleep 4
+fi
 POSTINST
 chmod 0755 "$root/demo-v2/DEBIAN/postinst"
 dpkg-deb --build --root-owner-group "$root/helper-v1" \
@@ -1490,6 +1499,17 @@ Maintainer: RPT CI <rpt-test@example.invalid>
 Description: obsolete guest package to be removed with signed upgrade
 CONTROL
 printf 'obsolete 1\n' >"$root/obsolete-v1/usr/share/rpt-test/obsolete.txt"
+# A deliberately broken guest prerm exercises M8's pre-remove failure path.
+# The normal M7 happy-path guest does NOT contain the opt-in sentinel.
+cat >"$root/obsolete-v1/DEBIAN/prerm" <<'PRERM'
+#!/bin/sh
+set -eu
+if [ -e /etc/rpt-ci-fail-remove ]; then
+  echo 'RPT M8 deliberate prerm failure' >&2
+  exit 43
+fi
+PRERM
+chmod 0755 "$root/obsolete-v1/DEBIAN/prerm"
 dpkg-deb --build --root-owner-group "$root/obsolete-v1" \
   "$root/www/pool/rpt-sandbox-obsolete_1.0_all.deb" >/dev/null
 combined_guest="$root/native-combined-guest"
@@ -1595,6 +1615,10 @@ test "$(sudo dpkg-query --admindir="$root/native-combined-restored/var/lib/dpkg"
   -W '-f=${Status}|${Version}' rpt-sandbox-obsolete)" = 'install ok installed|1.0'
 test -z "$(sudo dpkg --root="$root/native-combined-restored" --audit)"
 echo 'PASS M7 combined signed remove+upgrade single journal, mandatory checkpoint, SHA approval, postflight inventory and separate restoration'
+
+# M8 faults reuse the authenticated repository and M7's restored v1 guest;
+# each fault has a NEW signed, status-bound intent, checkpoint and journal.
+bash tests/native-full-upgrade-chaos.sh "$root" "$arch" ./target/debug/rpt
 
 # Seed v1 in a new persistent sandbox; reject an intent created before seeding.
 ./target/debug/rpt sandbox-session-create --session "$session" --image "$sandbox_image"
