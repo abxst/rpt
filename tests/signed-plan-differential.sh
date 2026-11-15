@@ -27,6 +27,10 @@ cleanup() {
       "$root/native-upgrade-guest" "$root/native-auto-journal" \
       "$root/native-combined-guest" "$root/native-combined-checkpoint" \
       "$root/native-combined-restored" "$root/native-combined-journal"
+    # M8 creates additional root-owned fresh guests, sealed checkpoints,
+    # restored trees and interrupted journals. Purge only inside the
+    # validated private /tmp/rpt-signed.* test workspace.
+    sudo rm -rf -- "$root"/native-chaos-*
   fi
   rm -rf "$root"
 }
