@@ -54,6 +54,9 @@ pub(crate) fn discover_signed_upgrades(
     if max_roots == 0 || max_roots > 128 {
         bail!("system upgrade discovery supports max_roots 1..=128");
     }
+    // Direct discovery is also an entry point: hold the read lease across
+    // the complete index/catalog/candidate scan, including no-op cases.
+    let _cache_lease = package_provenance::acquire_cache_read_lease(cache)?;
     // Upgrade discovery can run independently of the normal install planner;
     // it must reject stale signed caches even for no-change/held-only plans.
     crate::package_provenance::audit_configured_cache(cache, apt_root)
