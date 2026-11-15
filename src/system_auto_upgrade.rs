@@ -69,6 +69,8 @@ pub fn preview(
     if start.len() > 64 * 1024 * 1024 {
         bail!("original dpkg status exceeds 64 MiB");
     }
+    // Numbered dpkg updates supersede the raw status snapshot.
+    crate::dpkg_health::require_no_pending_updates(status)?;
     // An interrupted dpkg transaction is not a signed conflict requiring
     // package removal. Do not enter automatic removal search in this state.
     crate::dpkg_health::require_clean_snapshot(&start)?;

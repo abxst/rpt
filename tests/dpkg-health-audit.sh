@@ -92,5 +92,40 @@ if "$rpt" plan-install-foreign-policy --status "$work/broken-status" \
     echo 'M28 signed foreign install accepted broken dpkg state' >&2; exit 1
 fi
 grep -q 'dpkg health' "$work/refusal.txt"
+# The real QEMU crash oracle found dpkg-query overlays numbered updates/0000
+# while RPT formerly inspected only stale, apparently clean raw status bytes.
+mkdir -p "$work/pending/updates"
+cp "$work/clean-status" "$work/pending/status"
+cat >"$work/pending/updates/0000" <<'EOF'
+Package: installed
+Architecture: amd64
+Version: 2.0
+Status: install ok half-configured
+
+EOF
+pending_sha="$(sha256sum "$work/pending/status" | cut -d' ' -f1)"
+"$rpt" dpkg-audit --status "$work/pending/status" >"$work/pending.json"
+python3 - "$work/pending.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert not r["healthy"] and r["pending_status_updates"] == 1, r
+assert any(issue["kind"] == "pending_status_updates" for issue in r["issues"])
+assert r["host_execution_allowed"] is False
+PY
+if "$rpt" dpkg-audit --status "$work/pending/status" --require-clean >/dev/null 2>&1; then
+    echo 'P0: RPT accepted a dpkg database with unmerged numbered updates' >&2; exit 1
+fi
+if "$rpt" plan-install-batch-policy --status "$work/pending/status" \
+    --cache "$work/missing-signed-cache" --architecture amd64 installed \
+    >/dev/null 2>"$work/refusal.txt"; then
+    echo 'P0: signed planner trusted stale dpkg status with numbered updates' >&2; exit 1
+fi
+grep -q 'dpkg health' "$work/refusal.txt"
+if "$rpt" apt-simulate-remove --status "$work/pending/status" installed \
+    >/dev/null 2>"$work/refusal.txt"; then
+    echo 'P0: APT remove simulator ignored pending dpkg updates' >&2; exit 1
+fi
+grep -q 'dpkg health' "$work/refusal.txt"
+test "$(sha256sum "$work/pending/status" | cut -d' ' -f1)" = "$pending_sha"
 test "$(sha256sum "$work/broken-status" | cut -d' ' -f1)" = "$before"
-echo 'PASS M20/M21/M28 read-only dpkg audit and all direct signed install/upgrade preflights'
+echo 'PASS M20/M21/M28/M31 dpkg status and numbered updates journal preflights'

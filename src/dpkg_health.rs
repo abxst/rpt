@@ -33,6 +33,8 @@ pub struct DpkgHealth {
     pub fully_installed: usize,
     pub residual_config: usize,
     pub not_installed: usize,
+    /// Numbered fragments in dpkg's pending status updates journal.
+    pub pending_status_updates: usize,
     pub issues: Vec<DpkgIssue>,
     pub healthy: bool,
     pub read_only: bool,
@@ -139,6 +141,7 @@ pub fn inspect_snapshot(bytes: &[u8]) -> Result<DpkgHealth> {
         fully_installed,
         residual_config,
         not_installed,
+        pending_status_updates: 0,
         healthy: issues.is_empty(),
         issues,
         read_only: true,
@@ -146,6 +149,47 @@ pub fn inspect_snapshot(bytes: &[u8]) -> Result<DpkgHealth> {
         host_execution_allowed: false,
         warning: "Diagnostic only; inspect dpkg state and recover in an isolated VM. No repair, host mutation, or full dpkg --audit parity is implemented.",
     })
+}
+
+/// The raw status file can be stale while dpkg-query overlays numbered
+/// /var/lib/dpkg/updates entries. Do not replay these fragments: fail closed
+/// until dpkg has reconciled the journal into its main database.
+fn pending_status_update_files(path: &Path) -> Result<Vec<String>> {
+    let parent = path.parent().context("dpkg status has no parent directory")?;
+    let updates = parent.join("updates");
+    let meta = match fs::symlink_metadata(&updates) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).context("checking dpkg status updates journal"),
+    };
+    if !meta.file_type().is_dir() {
+        bail!("dpkg health updates journal must be a real non-symlink directory");
+    }
+    let mut result = Vec::new();
+    let mut total = 0usize;
+    for entry in fs::read_dir(&updates)? {
+        let entry = entry?;
+        total += 1;
+        if total > 2048 { bail!("dpkg updates journal inventory exceeds 2048 entries"); }
+        let name = entry.file_name();
+        let name = name.to_str().context("non-UTF-8 dpkg updates journal filename")?;
+        if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) {
+            result.push(name.to_owned());
+            if result.len() > 128 { bail!("too many pending dpkg status updates"); }
+        }
+    }
+    result.sort();
+    Ok(result)
+}
+
+/// Snapshot-only callers must supply the actual status pathname separately,
+/// since deferred dpkg updates are *not* present in the original file bytes.
+pub fn require_no_pending_updates(path: &Path) -> Result<()> {
+    let pending = pending_status_update_files(path)?;
+    if !pending.is_empty() {
+        bail!("dpkg health audit found {} pending numbered status update(s); recover dpkg before planning", pending.len());
+    }
+    Ok(())
 }
 
 /// Read an ordinary dpkg status file with a bounded size and reject a final
@@ -169,7 +213,18 @@ pub fn inspect(path: &Path) -> Result<DpkgHealth> {
     if bytes.len() as u64 > MAX_STATUS_BYTES {
         bail!("dpkg status grew beyond 64 MiB");
     }
-    inspect_snapshot(&bytes)
+    let mut report = inspect_snapshot(&bytes)?;
+    let pending = pending_status_update_files(path)?;
+    if !pending.is_empty() {
+        report.pending_status_updates = pending.len();
+        report.healthy = false;
+        report.issues.push(DpkgIssue {
+            package: "dpkg-status-journal".into(), architecture: "all".into(),
+            version: None, selection: "unknown".into(), error: "ok".into(),
+            state: "pending-updates".into(), kind: "pending_status_updates",
+        });
+    }
+    Ok(report)
 }
 
 /// Fail closed before preparing signed whole-system upgrade plans. No dpkg
@@ -252,6 +307,38 @@ mod tests {
         assert!(verify_unchanged_clean_file(&path, &original_digest).is_err());
         fs::write(&path, b"Package: testpkg\nVersion: 2\nArchitecture: amd64\nStatus: install ok half-configured\n\n").unwrap();
         assert!(verify_unchanged_clean_file(&path, &original_digest).is_err());
+    }
+
+    #[test]
+    fn numbered_updates_make_clean_raw_status_untrustworthy() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status");
+        fs::write(&status, b"Package: a\nVersion: 1\nArchitecture: amd64\nStatus: install ok installed\n\n").unwrap();
+        assert!(inspect(&status).unwrap().healthy);
+        fs::create_dir(temp.path().join("updates")).unwrap();
+        fs::write(temp.path().join("updates/0000"),
+                  b"Package: a\nVersion: 2\nArchitecture: amd64\nStatus: install ok half-configured\n\n").unwrap();
+        let report = inspect(&status).unwrap();
+        assert!(!report.healthy);
+        assert_eq!(report.pending_status_updates, 1);
+        assert_eq!(report.issues.last().unwrap().kind, "pending_status_updates");
+        assert!(require_clean_file(&status).is_err());
+        assert!(require_no_pending_updates(&status).is_err());
+        fs::remove_file(temp.path().join("updates/0000")).unwrap();
+        assert!(inspect(&status).unwrap().healthy);
+        fs::write(temp.path().join("updates/tmp.i"), b"staging").unwrap();
+        assert!(require_no_pending_updates(&status).is_ok());
+    }
+
+    #[test]
+    fn symlinked_dpkg_updates_directory_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = temp.path().join("status");
+        fs::write(&status, b"").unwrap();
+        fs::create_dir(temp.path().join("other")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("other"), temp.path().join("updates")).unwrap();
+        assert!(inspect(&status).is_err());
+        assert!(require_no_pending_updates(&status).is_err());
     }
 
     #[test]
