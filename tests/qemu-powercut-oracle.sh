@@ -156,6 +156,10 @@ create_package() {
   local version="$1" mode="$2"
   local root="$work/pkg-$version"
   mkdir -p "$root/DEBIAN" "$root/usr/share/rpt-powercut"
+  # The CI harness uses umask 077 for SSH/private evidence, but Debian
+  # control directories MUST be world-traversable (>=0755) for dpkg-deb.
+  chmod 0755 "$root" "$root/DEBIAN" "$root/usr" "$root/usr/share" \
+    "$root/usr/share/rpt-powercut"
   cat > "$root/DEBIAN/control" <<EOF
 Package: rpt-powercut
 Version: $version
@@ -164,6 +168,7 @@ Maintainer: RPT VM Oracle <rpt-ci@example.invalid>
 Description: Disposable QEMU guest power-cut fixture
 EOF
   printf '%s\n' "$version" > "$root/usr/share/rpt-powercut/version"
+  chmod 0644 "$root/DEBIAN/control" "$root/usr/share/rpt-powercut/version"
   if [[ "$mode" == hung ]]; then
     cat > "$root/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
