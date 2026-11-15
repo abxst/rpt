@@ -131,14 +131,20 @@ mount-free disposable rootfs with a clean dpkg audit. Checkpoints are
 **full, copy-based rootfs clones**, using GNU cp's archive and
 reflink-if-available mode. RPT hashes the source tree before copying, verifies
 the copied tree (regular file bytes, relative names, symlink targets,
-mode/uid/gid and device type), and rehashes the source afterward while
+mode/uid/gid, mtimes, xattrs including ACL/capability attributes, relative
+hardlink topology and device type), and rehashes the source afterward while
 holding the cooperative lock. It refuses a changed source, a failed copy,
 or a divergent snapshot. Partial copies are left for manual inspection.
 
 A durable, exclusively created checkpoint receipt is written to
 `JOURNAL_DIR/native-rootfs-snapshots/tx001-baseline.json`; it contains
 source/snapshot path identities, tree hash, dpkg status hash, guest APT
-marks hash and creation time. Verify it any time:
+marks hash and creation time. **New checkpoints use receipt schema v2**
+and the domain-separated `rpt-native-tree-v2` witness. Legacy v1
+receipts are deliberately rejected by the v2 verifier/restorer because they
+did not cover extended attributes and link topology; do not manually relabel
+old receipts or attempt to recreate evidence on a failed guest.
+Verify a new receipt any time:
 
     sudo rpt native-rootfs-snapshot-verify \
       --receipt ./rpt-native-journal/native-rootfs-snapshots/tx001-baseline.json
@@ -189,9 +195,10 @@ all-or-nothing operation**. Recovery is always manual into a different guest.
 
 **Limitations:** This is a trusted, *offline/disposable* filesystem copy,
 not an atomic Btrfs/ZFS/LVM snapshot or an ACID package transaction. The
-tree witness does not prove hardlink topology, xattrs, ACLs, application
-process state, external device effects or power-loss persistence. The
-journal lock coordinates RPT processes only, not arbitrary host writers.
+v2 tree witness includes link relationships and Linux extended attributes
+but does **not** prove that userspace/guest processes were quiescent, that
+external effects were captured, or that data/metadata survived sudden power
+loss. The journal lock coordinates RPT processes only, not arbitrary host writers.
 GNU cp and the guest filesystem must be trusted; privileged maintainer
 scripts are still not contained by chroot. Never use this to snapshot live
 `/` or enable host package mutation. A checkpoint is **explicit** and does
