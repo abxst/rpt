@@ -739,13 +739,13 @@ mod tests {
             sha256: "0".repeat(64),
             size: 16,
         };
-        assert!(verify_index_inventory(temp.path(), &[entry.clone()]).is_ok());
+        assert!(verify_index_inventory(temp.path(), std::slice::from_ref(&entry)).is_ok());
         assert!(verify_index_inventory(temp.path(), &[entry.clone(), entry.clone()]).is_err());
         fs::write(temp.path().join("index-99.raw"), b"Package: unsigned\n").unwrap();
-        assert!(verify_index_inventory(temp.path(), &[entry.clone()]).is_err());
+        assert!(verify_index_inventory(temp.path(), std::slice::from_ref(&entry)).is_err());
         fs::remove_file(temp.path().join("index-99.raw")).unwrap();
         std::os::unix::fs::symlink(&listed, temp.path().join("index-link.raw")).unwrap();
-        assert!(verify_index_inventory(temp.path(), &[entry.clone()]).is_err());
+        assert!(verify_index_inventory(temp.path(), std::slice::from_ref(&entry)).is_err());
         fs::remove_file(temp.path().join("index-link.raw")).unwrap();
         assert!(verify_index_inventory(temp.path(), &[entry]).is_ok());
     }
