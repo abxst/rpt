@@ -1,6 +1,7 @@
 //! Isolated, concurrent acquisition of authenticated Debian repository metadata.
 //! Does not modify /var/lib/apt/lists or dpkg state.
 use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
 use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use crate::error::{code, describe, emit, classify, ErrorCategory, ErrorCode, LogFormat};
@@ -116,7 +117,7 @@ async fn worker_loop(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Repo {
     pub uri: String,
     pub suite: String,
