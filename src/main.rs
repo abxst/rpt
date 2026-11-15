@@ -26,6 +26,12 @@ enum Command {
         #[arg(long, default_value = "/etc/apt")]
         root: PathBuf,
     },
+    /// Validate authenticated APT repository source declarations without
+    /// network requests or any host package mutation.
+    SourcesValidate {
+        #[arg(long, default_value = "/etc/apt")]
+        root: PathBuf,
+    },
     /// Compare Debian package versions (negative / zero / positive output).
     VersionCompare {
         left: String,
@@ -1141,6 +1147,18 @@ async fn execute(cli: Cli) -> Result<()> {
                     step.installed.as_deref().unwrap_or("none"));
             }
             println!("Plan preview: {} package(s); NO CHANGES MADE", steps.len());
+        }
+        Command::SourcesValidate { root } => {
+            let sources = rpt::update::parse_sources(&root)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "validated_repository_subset": true,
+                "apt_parity_verified": false,
+                "host_execution_allowed": false,
+                "repositories": sources,
+                "warning": "Signed-By source declarations validated syntactically; keys/signatures and remote metadata are NOT verified without an update.",
+            }))?);
         }
         Command::Sources { root } => {
             for source in list_sources(&root).context(ErrorCategory::System)? {
