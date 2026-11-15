@@ -4,6 +4,7 @@ pub mod drivers;
 pub mod cache_query;
 pub mod metadata_query;
 pub mod install_plan;
+pub mod apt_simulation;
 pub mod transaction_plan_audit;
 pub mod system_upgrade;
 pub mod system_full_upgrade;

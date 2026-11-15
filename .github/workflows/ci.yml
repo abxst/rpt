@@ -29,6 +29,7 @@ jobs:
         run: |
           bash -n tests/native-full-upgrade-chaos.sh
           bash -n tests/native-guest-boundary.sh
+          bash -n tests/apt-operation-simulations.sh
           bash -n tests/apt-config-syntax.sh
           bash -n tests/qemu-powercut-oracle.sh
           python3 -m py_compile scripts/validate-powercut-evidence.py
@@ -42,6 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked
+          bash tests/apt-operation-simulations.sh ./target/debug/rpt
           bash tests/apt-config-syntax.sh ./target/debug/rpt
           ./target/debug/rpt driver-info --driver deb | grep -q 'Version comparison: implemented'
           ./target/debug/rpt driver-info --driver rpm | grep -q 'Package transactions: NOT IMPLEMENTED'
