@@ -46,6 +46,13 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   tampered snapshots and compare host dpkg/APT state. See
   [the M8 chaos oracle](docs/native-full-upgrade-chaos.md). This is evidence
   for manual recovery only, **not** crash-atomic host rollback.
+- **M9–M12 integrated experimental qualification batch**: stricter journal and
+  snapshot-receipt preflight; expanded Debian version/candidate pin
+  differentials; `apt-simulate-install` read-only text/JSON on signed policy
+  candidates; and a fail-closed A–I/VM evidence completeness gate.
+  **These milestones are not fully complete**, production qualification is
+  BLOCKED and live-host dpkg remains disabled. See
+  [M9–M12 qualification contract](docs/m9-m12-qualification.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
