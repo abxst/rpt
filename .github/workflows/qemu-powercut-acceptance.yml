@@ -31,8 +31,9 @@ jobs:
       - name: Actually power-cut QEMU during guest dpkg postinst
         timeout-minutes: 35
         run: |
-          timeout --signal=TERM --kill-after=30s 2050 \
-            RPT_QEMU_BIN="$PWD/target/debug/rpt" bash tests/qemu-powercut-oracle.sh
+          RPT_QEMU_BIN="$PWD/target/debug/rpt" \
+            timeout --signal=TERM --kill-after=30s 2050 \
+            bash tests/qemu-powercut-oracle.sh
       - name: Preserve read-only power-cut evidence and serial logs
         if: always()
         uses: actions/upload-artifact@v4
