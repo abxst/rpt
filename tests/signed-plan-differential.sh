@@ -1045,6 +1045,36 @@ sed -nE 's/^  ([^ :]+):[^ ]+ ([^ ]+) \(installed: .*\)$/\1 \2/p' "$root/rpt-mult
 test -s "$root/apt-multi-versions"
 test -s "$root/rpt-multi-versions"
 diff -u "$root/apt-multi-versions" "$root/rpt-multi-versions"
+# M11: APT-like read-only simulation is machine-verifiable against the same
+# signed repository and the independent apt-get -s selected-version oracle.
+m11_status_before="$(sha256sum "$root/apt/status" | cut -d' ' -f1)"
+./target/debug/rpt apt-simulate-install --cache "$root/rpt-cache" \
+  --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" --json rpt-order-app rpt-app > "$root/m11-sim.json"
+python3 - "$root/m11-sim.json" "$root/apt-multi-versions" <<'PY'
+import json, pathlib, sys
+report = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert report["schema_version"] == 1
+assert report["operation"] == "install"
+assert report["simulation_only"] is True
+assert report["apt_parity_verified"] is False
+assert report["host_execution_allowed"] is False
+actual = {p["package"] + " " + p["version"] for p in report["selected"]}
+expected = set(pathlib.Path(sys.argv[2]).read_text().splitlines())
+assert actual and actual == expected, (actual, expected)
+PY
+test "$(sha256sum "$root/apt/status" | cut -d' ' -f1)" = "$m11_status_before"
+./target/debug/rpt apt-simulate-install --cache "$root/rpt-cache" \
+  --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" rpt-order-app rpt-app >"$root/m11-sim-text"
+grep -Fq 'NO CHANGES MADE' "$root/m11-sim-text"
+if ./target/debug/rpt apt-simulate-install --cache "$root/rpt-cache" \
+  --status "$root/apt/status" --apt-root "$root/rpt-apt" \
+  --architecture "$arch" rpt-app rpt-conflict >/dev/null 2>&1; then
+  echo "M11 simulation accepted an unsatisfiable joint plan" >&2
+  exit 1
+fi
+echo "PASS M11 signed read-only install simulation, JSON/CLI and apt-get -s selected versions"
 if ./target/debug/rpt plan-install-batch-policy --cache "$root/rpt-cache" \
   --status "$root/apt/status" --apt-root "$root/rpt-apt" \
   --architecture "$arch" rpt-app rpt-conflict >"$root/rpt-multi-conflict" 2>&1; then
