@@ -99,7 +99,7 @@ PY
     # process groups distinct from the runner shell. The PID file is written
     # by the shell that execs RPT (not by sudo).
     pidfile="$work/native-chaos-$mode.pid"
-    sudo -n setsid sh -c 'printf "%s\\n" "$$" > "$1"; shift; exec "$@"' \
+    sudo -n setsid sh -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
       m8-launch "$pidfile" "$rpt" "${args[@]}" >"$log" 2>&1 &
     launcher=$!
     ready=false
@@ -192,7 +192,7 @@ PY
   if [[ "$mode" == sigkill-postinst ]]; then
     # A mutable snapshot is NOT trustworthy: refuse both verification and
     # restore after a single-byte change. Never heal the evidence in place.
-    sudo sh -c 'printf "\\nM8-corruption\\n" >> "$1"' \
+    sudo sh -c 'printf "\nM8-corruption\n" >> "$1"' \
       sh "$checkpoint/var/lib/dpkg/status"
     if sudo "$rpt" native-rootfs-snapshot-verify --receipt "$receipt" \
       >"$work/native-chaos-tamper-verify.log" 2>&1; then
