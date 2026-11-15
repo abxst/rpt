@@ -92,6 +92,7 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   index scoping and conflicting/symlinked source refusal. See
   [M19 source validation](docs/m19-apt-sources-validation.md).
 - **M20 read-only dpkg health audit**: `dpkg-audit` reports interrupted/inconsistent dpkg states and optionally fails an automation gate with `--require-clean`; read-only upgrade simulations refuse broken dpkg state. It does not repair packages or authorize host transactions; see [M20 diagnostics](docs/m20-dpkg-health-audit.md).
+- **M21 core upgrade preflight**: direct signed no-removal, automatic/explicit-removal full-upgrade previews, and disposable native-rootfs transaction preparation reject interrupted dpkg state before planning, not only through apt-simulate; see [M21 guard](docs/m21-core-upgrade-preflight.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

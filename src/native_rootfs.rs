@@ -264,6 +264,9 @@ pub fn prepare(root: &Path, cache: &Path, apt_root: &Path, architecture: &str,
     max_packages: usize, packages: &[String], include_recommends: bool) -> Result<BoundTransaction> {
     let root = rootfs(root)?;
     let bytes = status(&root)?;
+    // Refuse to stage a signed guest transaction on half-configured state;
+    // the executor independently verifies the guest again at apply time.
+    crate::dpkg_health::require_clean_snapshot(&bytes)?;
     let steps = install_plan::preview_many_with_policy_options(
         cache, &root.join("var/lib/dpkg/status"), apt_root, packages,
         architecture, max_packages, include_recommends)?;

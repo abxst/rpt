@@ -172,6 +172,26 @@ pub fn inspect(path: &Path) -> Result<DpkgHealth> {
     inspect_snapshot(&bytes)
 }
 
+/// Fail closed before preparing signed whole-system upgrade plans. No dpkg
+/// mutation is implied; a clean status file alone is not APT parity.
+pub fn require_clean_snapshot(bytes: &[u8]) -> Result<()> {
+    let report = inspect_snapshot(bytes)?;
+    if !report.healthy {
+        bail!("dpkg health audit reports {} incomplete or inconsistent package(s); recover the guest first",
+            report.issues.len());
+    }
+    Ok(())
+}
+
+pub fn require_clean_file(path: &Path) -> Result<()> {
+    let report = inspect(path)?;
+    if !report.healthy {
+        bail!("dpkg health audit reports {} incomplete or inconsistent package(s); recover the guest first",
+            report.issues.len());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

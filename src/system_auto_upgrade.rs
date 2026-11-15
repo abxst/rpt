@@ -69,6 +69,9 @@ pub fn preview(
     if start.len() > 64 * 1024 * 1024 {
         bail!("original dpkg status exceeds 64 MiB");
     }
+    // An interrupted dpkg transaction is not a signed conflict requiring
+    // package removal. Do not enter automatic removal search in this state.
+    crate::dpkg_health::require_clean_snapshot(&start)?;
     let digest = hex::encode(Sha256::digest(&start));
     let check_stable = || -> Result<()> {
         if hex::encode(Sha256::digest(fs::read(status)?)) != digest {

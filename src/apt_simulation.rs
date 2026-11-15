@@ -75,11 +75,7 @@ pub fn simulate(status: &Path, native: &str, operation: Operation<'_>) -> Result
     // A full-system upgrade must not silently ignore partly configured dpkg
     // records when building a seemingly clean installed package inventory.
     if matches!(&operation, Operation::Upgrade { .. } | Operation::FullUpgrade { .. }) {
-        let health = crate::dpkg_health::inspect_snapshot(&before)?;
-        if !health.healthy {
-            bail!("dpkg health audit reports {} incomplete or inconsistent package(s); recover the guest first",
-                health.issues.len());
-        }
+        crate::dpkg_health::require_clean_snapshot(&before)?;
     }
     let mut marks_snapshot: Option<(&Path, Option<Vec<u8>>)> = None;
     let (kind, selected_changes, selected_removals, blockers, audit) = match operation {
