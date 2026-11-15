@@ -43,6 +43,8 @@ pub fn preview(
     if original.len() > 64 * 1024 * 1024 {
         bail!("dpkg status exceeds 64 MiB");
     }
+    // Refuse an unmerged dpkg journal before hypothetical removal projection.
+    crate::dpkg_health::require_no_pending_updates(status)?;
     // Explicit removals may not erase evidence of a broken original dpkg
     // database before the survivor-state dependency audit.
     crate::dpkg_health::require_clean_snapshot(&original)?;
