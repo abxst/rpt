@@ -650,7 +650,6 @@ pub struct ExactManifest {
 pub fn prepare_exact(
     cache: &Path, steps: &[crate::install_plan::PlanStep], native_arch: &str,
 ) -> Result<ExactManifest> {
-    let _cache_lease = acquire_cache_read_lease(cache)?;
     if steps.len() > 5000 { bail!("plan exceeds 5000 packages"); }
     if native_arch.is_empty() || !native_arch.bytes().all(|b| b.is_ascii_alphanumeric()) {
         bail!("invalid native architecture");
@@ -682,6 +681,8 @@ pub fn prepare_exact(
             warning: "Verified download manifest only; no dpkg execution.".into(),
         });
     }
+    // A zero-artifact transaction reads no repository indexes and needs no cache.
+    let _cache_lease = acquire_cache_read_lease(cache)?;
     let mut dirs = Vec::<PathBuf>::new();
     for entry in fs::read_dir(cache).with_context(|| format!("reading {}", cache.display()))? {
         let path = entry?.path();
