@@ -178,7 +178,7 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
         }
     }
     let architectures = if let Some(raw) = fields.get("Architectures") {
-        let values = words(raw).into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let values = words(raw);
         if values.is_empty() || values.len() > 8
             || values.iter().any(|arch| arch.is_empty() || arch == "all"
                 || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
