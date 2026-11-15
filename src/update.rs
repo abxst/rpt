@@ -1,6 +1,7 @@
 //! Isolated, concurrent acquisition of authenticated Debian repository metadata.
 //! Does not modify /var/lib/apt/lists or dpkg state.
 use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
 use futures_util::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use crate::error::{code, describe, emit, classify, ErrorCategory, ErrorCode, LogFormat};
@@ -116,12 +117,15 @@ async fn worker_loop(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Repo {
     pub uri: String,
     pub suite: String,
     pub components: Vec<String>,
     pub keyring: PathBuf,
+    /// Signed source architecture restriction. Additional architectures
+    /// are never selected outside this explicit source filter.
+    pub architectures: Option<Vec<String>>,
 }
 
 /// Native Debian architecture of this build. Foreign architecture index
@@ -146,31 +150,58 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
             bail!("inline/multiline Signed-By and continuation fields are not yet supported");
         }
         let (key, value) = line.split_once(':').context("invalid Deb822 source field")?;
+        if !matches!(key, "Types" | "URIs" | "Suites" | "Components"
+            | "Signed-By" | "Architectures" | "Enabled" | "Trusted") {
+            bail!("unsupported Deb822 source field: {key}");
+        }
         if fields.insert(key.to_owned(), value.trim().to_owned()).is_some() {
             bail!("duplicate source field {key}");
         }
     }
-    if fields.get("Enabled").is_some_and(|x| x.eq_ignore_ascii_case("no")) {
-        return Ok(Vec::new());
+    if let Some(enabled) = fields.get("Enabled") {
+        match enabled.to_ascii_lowercase().as_str() {
+            "yes" => {}
+            "no" => return Ok(Vec::new()),
+            _ => bail!("unsupported Enabled source flag: {enabled}"),
+        }
     }
     let types = words(fields.get("Types").context("missing Types")?);
+    if types.is_empty() || types.iter().any(|t| t != "deb" && t != "deb-src") {
+        bail!("unsupported source type");
+    }
     if !types.iter().any(|t| t == "deb") {
         return Ok(Vec::new());
     }
-    if types.iter().any(|t| t != "deb" && t != "deb-src") {
-        bail!("unsupported source type");
+    if let Some(trusted) = fields.get("Trusted") {
+        if !trusted.eq_ignore_ascii_case("no") {
+            bail!("unsupported Trusted source flag: {trusted}; trust bypass disallowed");
+        }
     }
-    if fields.get("Trusted").is_some_and(|x| x.eq_ignore_ascii_case("yes")) {
-        bail!("Trusted: yes would bypass repository verification");
-    }
-    if let Some(arches) = fields.get("Architectures") {
-        if !words(arches).iter().any(|arch| arch == native_architecture().unwrap_or("")) { return Ok(Vec::new()); }
-    }
+    let architectures = if let Some(raw) = fields.get("Architectures") {
+        let values = words(raw);
+        if values.is_empty() || values.len() > 8
+            || values.iter().any(|arch| arch.is_empty() || arch == "all"
+                || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+            || values.iter().collect::<BTreeSet<_>>().len() != values.len() {
+            bail!("invalid or duplicate source Architectures");
+        }
+        // Foreign-only source selection remains unsupported in the native
+        // update path. Never select its index using a synthetic native name.
+        if !values.iter().any(|arch| arch == native_architecture().unwrap_or("")) {
+            return Ok(Vec::new());
+        }
+        Some(values)
+    } else { None };
     let key = fields.get("Signed-By").context("Signed-By keyring required")?;
     if key.split_whitespace().count() != 1 || !key.starts_with('/') {
         bail!("Signed-By must be one absolute keyring path");
     }
     let keyring = PathBuf::from(key);
+    if !keyring.is_absolute()
+        || keyring.components().any(|part| matches!(part,
+            std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        bail!("Signed-By path must be absolute and normalized");
+    }
     let suites = words(fields.get("Suites").context("missing Suites")?);
     let components = words(fields.get("Components").context("missing Components")?);
     if suites.is_empty() || components.is_empty() { bail!("empty Suites or Components"); }
@@ -190,7 +221,7 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
             out.push(Repo {
                 uri: uri.trim_end_matches('/').to_owned(),
                 suite: suite.clone(), components: components.clone(),
-                keyring: keyring.clone(),
+                keyring: keyring.clone(), architectures: architectures.clone(),
             });
         }
     }
@@ -202,28 +233,74 @@ fn safe_component(value: &str) -> bool {
         && value != "." && value != ".."
 }
 
-/// Parses a restricted safe subset of APT sources. Unsupported forms fail closed.
+/// Parse only a small unambiguous legacy [key=value] option grammar.
+fn parse_legacy_deb(source: &str) -> Result<Vec<Repo>> {
+    let pieces = source.split_whitespace().collect::<Vec<_>>();
+    if pieces.first() != Some(&"deb") { bail!("unsupported legacy binary source"); }
+    let mut index = 1usize;
+    let mut keyring = None;
+    let mut architectures = None;
+    let mut trusted = None;
+    if pieces.get(index).is_some_and(|x| x.starts_with('[')) {
+        let mut closed = false;
+        let begin = index;
+        for _ in 0..8 {
+            let raw = *pieces.get(index).context("unterminated legacy source option list")?;
+            let value = if index == begin {
+                raw.strip_prefix('[').context("invalid source options")?
+            } else { raw };
+            let value = match value.strip_suffix(']') {
+                Some(last) => { closed = true; last }
+                None => value,
+            };
+            let (name, value) = value.split_once('=')
+                .context("legacy source option must be key=value")?;
+            if value.is_empty() || (value.contains('[') || value.contains(']')) {
+                bail!("invalid legacy source option value");
+            }
+            match name {
+                "signed-by" if keyring.is_none() => keyring = Some(value.to_owned()),
+                "arch" if architectures.is_none() => {
+                    if value.split(',').any(str::is_empty) {
+                        bail!("invalid legacy source architecture filter");
+                    }
+                    architectures = Some(value.replace(',', " "));
+                }
+                "trusted" if trusted.is_none() => trusted = Some(value.to_owned()),
+                _ => bail!("unsupported or duplicate legacy source option {name}"),
+            }
+            index += 1;
+            if closed { break; }
+        }
+        if !closed { bail!("unterminated legacy source options"); }
+    }
+    let keyring = keyring.context("legacy repository requires signed-by= keyring")?;
+    let uri = pieces.get(index).context("missing source URI")?;
+    let suite = pieces.get(index + 1).context("missing source suite")?;
+    let components = &pieces[index+2..];
+    if components.is_empty() { bail!("legacy binary source has no components"); }
+    let mut stanza = format!(
+        "Types: deb\nURIs: {uri}\nSuites: {suite}\nComponents: {}\nSigned-By: {keyring}",
+        components.join(" "),
+    );
+    if let Some(arch) = architectures {
+        stanza.push_str(&format!("\nArchitectures: {arch}"));
+    }
+    if let Some(trust) = trusted {
+        stanza.push_str(&format!("\nTrusted: {trust}"));
+    }
+    parse_stanza(&stanza)
+}
+
+/// Parse and de-duplicate an authenticated-source subset. Reject conflicting
+/// declarations for one URI/suite instead of silently selecting one keyring,
+/// component set or architecture filter.
 pub fn parse_sources(root: &Path) -> Result<Vec<Repo>> {
     let sources = crate::sources::list_sources(root)?;
     let mut result = Vec::new();
     for item in sources {
         if item.starts_with("deb ") || item.starts_with("deb\t") {
-            // Legacy .list entries with [signed-by=...] are accepted; other
-            // option combinations need explicit implementation rather than guessing.
-            let mut pieces = item.split_whitespace();
-            let _deb = pieces.next();
-            let first = pieces.next().context("missing repository URI")?;
-            let (key, uri) = if first == "[signed-by=" {
-                bail!("invalid legacy options");
-            } else if first.starts_with("[signed-by=") && first.ends_with(']') {
-                (first.trim_start_matches("[signed-by=").trim_end_matches(']'), pieces.next().context("missing URI")?)
-            } else {
-                bail!("legacy sources must specify [signed-by=/absolute/keyring.gpg]");
-            };
-            let suite = pieces.next().context("missing suite")?;
-            let components = pieces.map(str::to_owned).collect::<Vec<_>>();
-            let fields = format!("Types: deb\nURIs: {uri}\nSuites: {suite}\nComponents: {}\nSigned-By: {key}", components.join(" "));
-            result.extend(parse_stanza(&fields)?);
+            result.extend(parse_legacy_deb(&item)?);
         } else if item.starts_with("deb-src ") || item.starts_with("deb-src\t") {
             continue;
         } else if item.contains("Types:") {
@@ -233,9 +310,18 @@ pub fn parse_sources(root: &Path) -> Result<Vec<Repo>> {
         }
     }
     if result.is_empty() { bail!("no supported signed binary repositories"); }
-    let mut dedup = BTreeSet::new();
-    result.retain(|r| dedup.insert((r.uri.clone(), r.suite.clone(), r.keyring.clone())));
-    Ok(result)
+    let mut seen = BTreeMap::<(String, String), Repo>::new();
+    for repo in result {
+        let identity = (repo.uri.clone(), repo.suite.clone());
+        if let Some(existing) = seen.get(&identity) {
+            if existing != &repo {
+                bail!("conflicting source declarations for {} {}", repo.uri, repo.suite);
+            }
+        } else {
+            seen.insert(identity, repo);
+        }
+    }
+    Ok(seen.into_values().collect())
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +433,12 @@ fn indexes(
     let mut result = Vec::new();
     let mut architectures = vec![native_architecture()?.to_owned()];
     architectures.extend(additional_architectures.iter().cloned());
+    if let Some(allowed) = &repo.architectures {
+        architectures.retain(|arch| allowed.contains(arch));
+    }
+    if architectures.is_empty() {
+        bail!("repository architecture filter excludes selected architectures");
+    }
     for component in &repo.components {
         for arch in &architectures {
             let base = format!("{component}/binary-{arch}/Packages");
@@ -640,10 +732,76 @@ mod tests {
         assert!(parse_stanza("Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: main\nSigned-By: /tmp/key.gpg\nTrusted: yes").is_err());
     }
     #[test]
+    fn legacy_source_options_are_order_independent_and_architecture_scoped() {
+        let native = native_architecture().unwrap();
+        for options in [
+            format!("arch={native} signed-by=/tmp/rpt-key.gpg trusted=no"),
+            format!("trusted=no signed-by=/tmp/rpt-key.gpg arch={native}"),
+        ] {
+            let repos = parse_legacy_deb(&format!(
+                "deb [{options}] https://example.org/ubuntu noble main universe",
+            )).unwrap();
+            assert_eq!(repos.len(), 1);
+            assert_eq!(repos[0].architectures, Some(vec![native.to_owned()]));
+            assert_eq!(repos[0].components, vec!["main".to_owned(), "universe".to_owned()]);
+            let mut indexes_hashes = BTreeMap::new();
+            let foreign = if native == "amd64" { "i386" } else { "amd64" };
+            indexes_hashes.insert(format!("main/binary-{native}/Packages"),
+                (10, "a".repeat(64)));
+            indexes_hashes.insert(format!("main/binary-{foreign}/Packages"),
+                (10, "b".repeat(64)));
+            indexes_hashes.insert(format!("universe/binary-{native}/Packages"),
+                (10, "c".repeat(64)));
+            indexes_hashes.insert(format!("universe/binary-{foreign}/Packages"),
+                (10, "d".repeat(64)));
+            let selected = indexes(&repos[0], &indexes_hashes, false, &[foreign.into()]).unwrap();
+            assert_eq!(selected.len(), 2);
+            assert!(selected.iter().all(|entry| entry.path.contains(&format!("binary-{native}/"))));
+        }
+    }
+
+    #[test]
+    fn source_options_fail_closed_on_unknown_or_trust_bypass() {
+        for raw in [
+            "deb [signed-by=/tmp/key.gpg trusted=yes] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg arch+=amd64] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg check-valid-until=no] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg signed-by=/tmp/other] https://example.org noble main",
+            "deb [arch=amd64] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg https://example.org noble main",
+            "deb https://example.org noble main",
+        ] {
+            assert!(parse_legacy_deb(raw).is_err(), "unsafe legacy source accepted: {raw}");
+        }
+        let base = "Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: main\nSigned-By: /tmp/key.gpg";
+        for extra in [
+            "\nTrusted: yes",
+            "\nTrusted: maybe",
+            "\nEnabled: maybe",
+            "\nCheck-Valid-Until: no",
+            "\nSigned-By: /tmp/duplicate.gpg",
+            "\nArchitectures: amd64 amd64",
+        ] {
+            assert!(parse_stanza(&format!("{base}{extra}")).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn conflicting_source_duplicates_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sources.list.d")).unwrap();
+        std::fs::write(dir.path().join("sources.list.d/01.sources"),
+            "Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: main\nSigned-By: /tmp/key-one.gpg\n").unwrap();
+        std::fs::write(dir.path().join("sources.list.d/02.sources"),
+            "Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: universe\nSigned-By: /tmp/key-two.gpg\n").unwrap();
+        assert!(parse_sources(dir.path()).is_err());
+    }
+
+    #[test]
     fn checks_release_checksum_metadata() {
         let text = format!("-----BEGIN PGP SIGNED MESSAGE-----\\nHash: SHA256\\n\\nOrigin: Ubuntu\\nSHA256:\\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-{}/Packages.xz\\n-----BEGIN PGP SIGNATURE-----", native_architecture().unwrap()).replace("\\n","\n");
         let hashes = release_hashes(&text).unwrap();
-        let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into() };
+        let repo = Repo { uri: "https://example.org".into(), suite: "noble".into(), components: vec!["main".into()], keyring: "/tmp/none".into(), architectures: None };
         assert_eq!(indexes(&repo, &hashes, false, &[]).unwrap().len(), 1);
     }
     #[test]
@@ -660,6 +818,7 @@ mod tests {
         let repo = Repo {
             uri: "https://example.org".into(), suite: "test".into(),
             components: vec!["main".into()], keyring: "/tmp/none".into(),
+            architectures: None,
         };
         let extra = [other.to_owned()];
         let selected = indexes(&repo, &hashes, false, &extra).unwrap();

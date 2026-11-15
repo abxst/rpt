@@ -87,6 +87,10 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   preview-by-default `artifact-cache-clean --apply`, with cooperative
   downloader lock, bounded symlink/hardlink validation and host APT
   directories excluded; see [M18 cache lifecycle](docs/m18-managed-artifact-cache.md).
+- **M19 signed source configuration subset**: `sources-validate`
+  for strict legacy/Deb822 Signed-By, Trusted, architecture filters,
+  index scoping and conflicting/symlinked source refusal. See
+  [M19 source validation](docs/m19-apt-sources-validation.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
