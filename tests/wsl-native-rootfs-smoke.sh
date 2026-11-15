@@ -112,6 +112,7 @@ python3 - "$work/checkpoint-verified.json" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1]))
 assert x['id']=='wsl-pre-remove'
+assert x['schema_version']==2
 assert len(x['tree_sha256'])==64 and len(x['status_sha256'])==64
 PY
 
