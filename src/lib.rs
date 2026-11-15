@@ -19,6 +19,7 @@ pub mod apt_phasing;
 pub mod update;
 pub mod package_provenance;
 pub mod artifact_store;
+pub mod artifact_cache;
 pub mod sandbox_execution;
 pub mod sandbox_session;
 pub mod native_rootfs;
