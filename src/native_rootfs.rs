@@ -807,6 +807,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(rootfs(dir.path()).is_err());
     }
+    fn synthetic_guest(path: &Path) -> PathBuf {
+        let guest = path.join("guest");
+        for dir in ["var/lib/dpkg", "usr/bin", "bin"] {
+            fs::create_dir_all(guest.join(dir)).unwrap();
+        }
+        fs::write(guest.join(".rpt-disposable-rootfs"), MARKER).unwrap();
+        fs::write(guest.join("var/lib/dpkg/status"), b"").unwrap();
+        fs::write(guest.join("usr/bin/dpkg"), b"mock guest dpkg").unwrap();
+        std::os::unix::fs::symlink("../usr/bin/dpkg", guest.join("bin/sh")).unwrap();
+        guest
+    }
+
+    #[test]
+    fn m14_allows_internal_usrmerge_alias_and_internal_state_hardlinks() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        fs::write(guest.join("var/lib/dpkg/one"), "same inode").unwrap();
+        fs::hard_link(guest.join("var/lib/dpkg/one"),
+            guest.join("var/lib/dpkg/two")).unwrap();
+        assert!(rootfs(&guest).is_ok());
+        assert_eq!(status(&guest).unwrap(), b"");
+        assert_eq!(mark_state_digest(&guest).unwrap(), "missing");
+    }
+
+    #[test]
+    fn m14_blocks_guest_status_hardlinked_to_external_host_file() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        let outside = dir.path().join("host-sensitive");
+        fs::write(&outside, b"host original").unwrap();
+        fs::remove_file(guest.join("var/lib/dpkg/status")).unwrap();
+        fs::hard_link(&outside, guest.join("var/lib/dpkg/status")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        assert!(status(&guest).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"host original");
+    }
+
+    #[test]
+    fn m14_blocks_guest_state_symlink_escape_and_unsafe_nested_entries() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        let outside = dir.path().join("host-state");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("status"), b"host original").unwrap();
+        fs::remove_dir_all(guest.join("var/lib/dpkg")).unwrap();
+        std::os::unix::fs::symlink(&outside, guest.join("var/lib/dpkg")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        fs::remove_file(guest.join("var/lib/dpkg")).unwrap();
+        fs::create_dir(guest.join("var/lib/dpkg")).unwrap();
+        fs::write(guest.join("var/lib/dpkg/status"), b"").unwrap();
+        std::os::unix::fs::symlink(&outside, guest.join("var/lib/dpkg/info")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        assert_eq!(fs::read(outside.join("status")).unwrap(), b"host original");
+    }
+
+    #[test]
+    fn m14_blocks_absolute_host_symlink_and_external_apt_mark_hardlink() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let guest = synthetic_guest(dir.path());
+        fs::remove_file(guest.join("bin/sh")).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", guest.join("bin/sh")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        fs::remove_file(guest.join("bin/sh")).unwrap();
+        std::os::unix::fs::symlink("../usr/bin/dpkg", guest.join("bin/sh")).unwrap();
+        fs::create_dir_all(guest.join("var/lib/apt")).unwrap();
+        let outside = dir.path().join("host-apt-states");
+        fs::write(&outside, b"host state").unwrap();
+        fs::hard_link(&outside, guest.join("var/lib/apt/extended_states")).unwrap();
+        assert!(rootfs(&guest).is_err());
+        assert!(mark_state_digest(&guest).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"host state");
+    }
+
     #[test]
     fn native_install_auto_manual_marks_never_demote_preinstalled_dependencies() {
         let requested = vec!["rpt-app".to_owned(), "rpt-already-installed".to_owned()];
