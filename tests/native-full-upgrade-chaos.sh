@@ -108,7 +108,15 @@ PY
         ready=true
         break
       fi
-      if ! kill -0 "$launcher" 2>/dev/null; then break; fi
+      # sudo/setsid may detach even while RPT and its guest dpkg live.
+      # Observe the actual exec PID, never the possibly exited launcher.
+      if [[ -s "$pidfile" ]]; then
+        candidate="$(cat "$pidfile")"
+        if [[ "$candidate" =~ ^[1-9][0-9]*$ ]] &&
+           ! ps -p "$candidate" -o pid= >/dev/null 2>&1; then
+          break
+        fi
+      fi
       sleep 0.1
     done
     if [[ "$ready" != true || ! -s "$pidfile" ]]; then
