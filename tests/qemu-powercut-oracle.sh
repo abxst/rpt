@@ -177,6 +177,9 @@ if [ "$1" = configure ]; then
   mkdir -p /var/lib/rpt-powercut
   printf 'entered-postinst\n' > /var/lib/rpt-powercut/entered
   sync -f /var/lib/rpt-powercut/entered
+  # An ephemeral /run readiness marker is written only after fsync, so the
+  # hypervisor is killed at a deterministic, fully entered postinst point.
+  printf 'postinst-flushed\\n' > /run/rpt-powercut-ready
   sleep 900
 fi
 POSTINST
@@ -211,9 +214,12 @@ create_package 2.0 hung
 cp --reflink=auto "$work/$image" "$work/initial.qcow2"
 qemu-img resize "$work/initial.qcow2" 8G
 start_vm "$work/initial.qcow2" baseline
-scp_guest "$work/rpt-powercut-1.0.deb" /tmp/rpt-powercut-1.0.deb
-scp_guest "$work/rpt-powercut-2.0.deb" /tmp/rpt-powercut-2.0.deb
-ssh_guest 'sudo dpkg --install /tmp/rpt-powercut-1.0.deb && test -z "$(sudo dpkg --audit)"'
+# Cloud images may mount /tmp as tmpfs; an installer copied there can vanish
+# after the first clean shutdown, before the second VM boot. Keep our
+# archives on the persistent guest root filesystem instead.
+scp_guest "$work/rpt-powercut-1.0.deb" /home/ubuntu/rpt-powercut-1.0.deb
+scp_guest "$work/rpt-powercut-2.0.deb" /home/ubuntu/rpt-powercut-2.0.deb
+ssh_guest 'sudo dpkg --install /home/ubuntu/rpt-powercut-1.0.deb && test -z "$(sudo dpkg --audit)"'
 ssh_guest 'sudo dpkg-query -s rpt-powercut' >"$evidence/baseline-dpkg.txt"
 grep -Fxq 'Status: install ok installed' "$evidence/baseline-dpkg.txt"
 grep -Fxq 'Version: 1.0' "$evidence/baseline-dpkg.txt"
@@ -222,18 +228,29 @@ cp --reflink=auto "$work/initial.qcow2" "$work/baseline.qcow2"
 baseline_sha="$(sha256sum "$work/baseline.qcow2" | awk '{print $1}')"
 qemu-img create -f qcow2 -F qcow2 -b "$work/baseline.qcow2" "$work/crashed.qcow2" >/dev/null
 start_vm "$work/crashed.qcow2" crash
-ssh_guest 'sudo systemd-run --unit=rpt-powercut-upgrade --collect /usr/bin/dpkg --install /tmp/rpt-powercut-2.0.deb' \
+ssh_guest 'test -s /home/ubuntu/rpt-powercut-2.0.deb && sudo dpkg-deb -f /home/ubuntu/rpt-powercut-2.0.deb Version | grep -Fxq 2.0'
+ssh_guest 'sudo systemd-run --unit=rpt-powercut-upgrade --collect /usr/bin/dpkg --install /home/ubuntu/rpt-powercut-2.0.deb' \
   >"$evidence/started-upgrade.txt"
 entered=false
-for attempt in $(seq 1 120); do
-  if ssh_guest 'sudo test -f /var/lib/rpt-powercut/entered' >/dev/null 2>&1; then
+for attempt in $(seq 1 35); do
+  if ssh_guest 'sudo test -f /run/rpt-powercut-ready' >/dev/null 2>&1; then
     entered=true
     break
   fi
   guard_pid || { echo 'QEMU exited before postinst marker' >&2; exit 1; }
+  if ssh_guest 'sudo systemctl is-failed --quiet rpt-powercut-upgrade.service' >/dev/null 2>&1; then
+    break
+  fi
   sleep 1
 done
-[[ "$entered" == true ]] || { echo 'Guest dpkg never entered postinst; no power cut was tested' >&2; exit 1; }
+if [[ "$entered" != true ]]; then
+  ssh_guest 'sudo systemctl status rpt-powercut-upgrade.service --no-pager -l || true' \
+    >"$evidence/failed-upgrade-service.txt" 2>&1 || :
+  ssh_guest 'sudo journalctl -u rpt-powercut-upgrade.service --no-pager -n 100 || true' \
+    >"$evidence/failed-upgrade-journal.txt" 2>&1 || :
+  echo 'Guest dpkg did not pass postinst fsync; no power cut was tested; inspect service journal artifact' >&2
+  exit 1
+fi
 ssh_guest 'sudo cat /var/lib/rpt-powercut/entered' | grep -Fxq entered-postinst
 powercut_vm
 # This was a forced process death, not ACPI shutdown or SIGTERM to dpkg.
