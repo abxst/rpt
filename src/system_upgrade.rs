@@ -158,6 +158,9 @@ pub fn preview(
     if max_packages == 0 || max_packages > 5000 {
         bail!("max_packages must be 1..=5000");
     }
+    // Installed catalogs intentionally omit half-configured packages; reject
+    // them before discovering roots rather than silently presenting a safe plan.
+    crate::dpkg_health::require_clean_file(status)?;
     let discovery = discover_signed_upgrades(
         cache, status, apt_root, architecture, max_roots,
     )?;

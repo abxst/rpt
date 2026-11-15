@@ -43,6 +43,9 @@ pub fn preview(
     if original.len() > 64 * 1024 * 1024 {
         bail!("dpkg status exceeds 64 MiB");
     }
+    // Explicit removals may not erase evidence of a broken original dpkg
+    // database before the survivor-state dependency audit.
+    crate::dpkg_health::require_clean_snapshot(&original)?;
     let original_sha256 = hex::encode(Sha256::digest(&original));
     let original_installed = cache_query::installed_catalog_from_bytes(&original)?;
     let (projected, removed_keys) =

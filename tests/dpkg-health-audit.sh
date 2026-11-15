@@ -64,5 +64,18 @@ ln -s "$work/clean-status" "$work/status-link"
 if "$rpt" dpkg-audit --status "$work/status-link" >/dev/null 2>&1; then
     echo 'M20 audit accepted symlinked dpkg status' >&2; exit 1
 fi
+for operation in plan-system-upgrade-policy plan-auto-full-upgrade; do
+    if "$rpt" "$operation" --status "$work/broken-status" \
+        --cache "$work/missing-signed-cache" >/dev/null 2>"$work/refusal.txt"; then
+        echo "M21 $operation accepted broken original dpkg state" >&2; exit 1
+    fi
+    grep -q 'dpkg health' "$work/refusal.txt"
+done
+if "$rpt" plan-full-upgrade-scenario --status "$work/broken-status" \
+    --cache "$work/missing-signed-cache" --remove installed \
+    >/dev/null 2>"$work/refusal.txt"; then
+    echo 'M21 explicit removals masked broken original dpkg state' >&2; exit 1
+fi
+grep -q 'dpkg health' "$work/refusal.txt"
 test "$(sha256sum "$work/broken-status" | cut -d' ' -f1)" = "$before"
-echo 'PASS M20 read-only dpkg health audit, incomplete state refusal, duplicate and symlink checks'
+echo 'PASS M20/M21 read-only dpkg audit, fail-closed simulated and direct signed upgrade planners'
