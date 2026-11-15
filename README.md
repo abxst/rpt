@@ -66,6 +66,14 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   This is **not** VM isolation, race-free pathname safety, power-loss
   recovery, or production host authorization. See
   [M14 boundary acceptance](docs/m14-native-guest-boundary.md).
+- **M15 QEMU hard-power-cut infrastructure (experimental)**: boots a real
+  Ubuntu guest kernel from GPG-verified Canonical cloud image, kills the
+  QEMU process during a deliberately blocked dpkg postinst, reboots the
+  damaged disk and validates offline restore to a new clean v1 QCOW2
+  overlay. The evidence explicitly states that **RPT itself was not
+  executing this guest transaction**; this is not end-to-end RPT
+  power-loss safety or stable APT replacement. See
+  [M15 VM power-cut oracle](docs/m15-qemu-powercut-acceptance.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
