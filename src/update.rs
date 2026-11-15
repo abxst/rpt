@@ -166,11 +166,11 @@ fn parse_stanza(stanza: &str) -> Result<Vec<Repo>> {
         }
     }
     let types = words(fields.get("Types").context("missing Types")?);
+    if types.is_empty() || types.iter().any(|t| t != "deb" && t != "deb-src") {
+        bail!("unsupported source type");
+    }
     if !types.iter().any(|t| t == "deb") {
         return Ok(Vec::new());
-    }
-    if types.iter().any(|t| t != "deb" && t != "deb-src") {
-        bail!("unsupported source type");
     }
     if let Some(trusted) = fields.get("Trusted") {
         if !trusted.eq_ignore_ascii_case("no") {
@@ -255,7 +255,7 @@ fn parse_legacy_deb(source: &str) -> Result<Vec<Repo>> {
             };
             let (name, value) = value.split_once('=')
                 .context("legacy source option must be key=value")?;
-            if value.is_empty() || value.contains(['[', ']']) {
+            if value.is_empty() || (value.contains('[') || value.contains(']')) {
                 bail!("invalid legacy source option value");
             }
             match name {
