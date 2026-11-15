@@ -1,5 +1,5 @@
 //! Read-only transaction recovery inspection. Never clears recovery gates.
-use crate::transaction_journal::{JournalRecord, Phase};
+use crate::transaction_journal::{validate_record, JournalRecord, Phase};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{fs, path::Path};
@@ -46,19 +46,10 @@ pub fn inspect(dir: &Path) -> Result<RecoveryReport> {
                 .with_context(|| format!("parsing journal {}", path.display())));
         match record {
             Ok(record) => {
-                let valid_id = !record.id.is_empty()
-                    && record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-                if !valid_id {
-                    report.warnings.push(format!("invalid transaction identifier: {name}"));
-                    report.requires_manual_recovery = true;
-                }
-                let valid_diagnostic = match record.phase {
-                    Phase::Failed | Phase::Interrupted =>
-                        record.error.as_deref().is_some_and(|message| !message.is_empty()),
-                    _ => record.error.is_none(),
-                };
-                if !valid_diagnostic {
-                    report.warnings.push(format!("invalid phase diagnostic: {name}"));
+                // Share the writer's strict semantic validation; a fake
+                // terminal record must never appear clean to recovery tools.
+                if let Err(error) = validate_record(&record) {
+                    report.warnings.push(format!("invalid journal semantics {name}: {error:#}"));
                     report.requires_manual_recovery = true;
                 }
                 if path.file_stem().and_then(|stem| stem.to_str()) != Some(record.id.as_str()) {
