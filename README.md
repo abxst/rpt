@@ -101,6 +101,7 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
 - **M27 unsigned index injection guard**: signature/provenance validation rejects extra `index-*` files not declared by the signed cache receipt and duplicate local filenames. This closes a discrepancy with legacy index-directory scanners; see [M27](docs/m27-index-inventory-guard.md).
 - **M28 direct install dpkg health preflight**: both native and foreign signed candidate-policy entry points reject incomplete dpkg state before any repository or solver read. This extends the M20/M21 health guard beyond simulations and system upgrades; see [M28](docs/m28-install-dpkg-health.md).
 - **M29 cooperative signed-cache read leases**: native, foreign and upgrade policy planners, plus exact manifest extraction, hold a shared lock against concurrent `rpt update` index publication, preventing half-updated cache reads by cooperative processes; see [M29](docs/m29-cooperative-cache-lease.md).
+- **M30 dpkg status snapshot binding**: signed native/foreign planners and whole-system upgrade preview compare the entire clean dpkg-status SHA256 before and after candidate solving, refusing concurrent package-state drift; see [M30](docs/m30-status-snapshot-plan.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

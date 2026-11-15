@@ -167,7 +167,7 @@ pub fn preview(
     }
     // Installed catalogs intentionally omit half-configured packages; reject
     // them before discovering roots rather than silently presenting a safe plan.
-    crate::dpkg_health::require_clean_file(status)?;
+    let dpkg_status_digest = crate::dpkg_health::clean_status_digest(status)?;
     let discovery = discover_signed_upgrades(
         cache, status, apt_root, architecture, max_roots,
     )?;
@@ -229,6 +229,7 @@ pub fn preview(
     let post_state = removal_planner::audit_upgrade_transition(
         &fs::read(status)?, architecture, &steps, &signed_steps,
     ).context("whole installed-state upgrade preflight")?;
+    crate::dpkg_health::verify_unchanged_clean_file(status, &dpkg_status_digest)?;
     Ok(SystemUpgradeAudit {
         scanned_installed: scanned,
         unchanged_or_policy_kept: unchanged,
