@@ -79,6 +79,10 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   reverse-dependency blockers, unchanged input-state SHA-256 and no host
   execution permissions. This is partial compatibility only. See
   [M16 operation simulations](docs/m16-apt-operation-simulations.md).
+- **M19 validated APT source architecture filters**: `sources-validate`
+  CLI, strict Signed-By + trust flags in legacy/Deb822 sources, architecture-
+  scoped index selection and conflicts/symlink refusal; no network or host
+  package changes in inspection. See [M19 sources](docs/m19-apt-sources-validation.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
