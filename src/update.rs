@@ -731,6 +731,72 @@ mod tests {
         assert!(parse_stanza("Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: main\nSigned-By: /tmp/key.gpg\nTrusted: yes").is_err());
     }
     #[test]
+    fn legacy_source_options_are_order_independent_and_architecture_scoped() {
+        let native = native_architecture().unwrap();
+        for options in [
+            format!("arch={native} signed-by=/tmp/rpt-key.gpg trusted=no"),
+            format!("trusted=no signed-by=/tmp/rpt-key.gpg arch={native}"),
+        ] {
+            let repos = parse_legacy_deb(&format!(
+                "deb [{options}] https://example.org/ubuntu noble main universe",
+            )).unwrap();
+            assert_eq!(repos.len(), 1);
+            assert_eq!(repos[0].architectures, Some(vec![native.to_owned()]));
+            assert_eq!(repos[0].components, ["main", "universe"]);
+            let mut indexes_hashes = BTreeMap::new();
+            let foreign = if native == "amd64" { "i386" } else { "amd64" };
+            indexes_hashes.insert(format!("main/binary-{native}/Packages"),
+                (10, "a".repeat(64)));
+            indexes_hashes.insert(format!("main/binary-{foreign}/Packages"),
+                (10, "b".repeat(64)));
+            indexes_hashes.insert(format!("universe/binary-{native}/Packages"),
+                (10, "c".repeat(64)));
+            indexes_hashes.insert(format!("universe/binary-{foreign}/Packages"),
+                (10, "d".repeat(64)));
+            let selected = indexes(&repos[0], &indexes_hashes, false, &[foreign.into()]).unwrap();
+            assert_eq!(selected.len(), 2);
+            assert!(selected.iter().all(|entry| entry.path.contains(&format!("binary-{native}/"))));
+        }
+    }
+
+    #[test]
+    fn source_options_fail_closed_on_unknown_or_trust_bypass() {
+        for raw in [
+            "deb [signed-by=/tmp/key.gpg trusted=yes] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg arch+=amd64] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg check-valid-until=no] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg signed-by=/tmp/other] https://example.org noble main",
+            "deb [arch=amd64] https://example.org noble main",
+            "deb [signed-by=/tmp/key.gpg https://example.org noble main",
+            "deb https://example.org noble main",
+        ] {
+            assert!(parse_legacy_deb(raw).is_err(), "unsafe legacy source accepted: {raw}");
+        }
+        let base = "Types: deb\\nURIs: https://example.org\\nSuites: noble\\nComponents: main\\nSigned-By: /tmp/key.gpg";
+        for extra in [
+            "\\nTrusted: yes",
+            "\\nTrusted: maybe",
+            "\\nEnabled: maybe",
+            "\\nCheck-Valid-Until: no",
+            "\\nSigned-By: /tmp/duplicate.gpg",
+            "\\nArchitectures: amd64 amd64",
+        ] {
+            assert!(parse_stanza(&format!("{base}{extra}")).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn conflicting_source_duplicates_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sources.list.d")).unwrap();
+        std::fs::write(dir.path().join("sources.list.d/01.sources"),
+            "Types: deb\\nURIs: https://example.org\\nSuites: noble\\nComponents: main\\nSigned-By: /tmp/key-one.gpg\\n").unwrap();
+        std::fs::write(dir.path().join("sources.list.d/02.sources"),
+            "Types: deb\\nURIs: https://example.org\\nSuites: noble\\nComponents: universe\\nSigned-By: /tmp/key-two.gpg\\n").unwrap();
+        assert!(parse_sources(dir.path()).is_err());
+    }
+
+    #[test]
     fn checks_release_checksum_metadata() {
         let text = format!("-----BEGIN PGP SIGNED MESSAGE-----\\nHash: SHA256\\n\\nOrigin: Ubuntu\\nSHA256:\\n abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd 123 main/binary-{}/Packages.xz\\n-----BEGIN PGP SIGNATURE-----", native_architecture().unwrap()).replace("\\n","\n");
         let hashes = release_hashes(&text).unwrap();
