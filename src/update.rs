@@ -743,7 +743,7 @@ mod tests {
             )).unwrap();
             assert_eq!(repos.len(), 1);
             assert_eq!(repos[0].architectures, Some(vec![native.to_owned()]));
-            assert_eq!(repos[0].components, ["main", "universe"]);
+            assert_eq!(repos[0].components, vec!["main".to_owned(), "universe".to_owned()]);
             let mut indexes_hashes = BTreeMap::new();
             let foreign = if native == "amd64" { "i386" } else { "amd64" };
             indexes_hashes.insert(format!("main/binary-{native}/Packages"),
