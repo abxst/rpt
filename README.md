@@ -91,6 +91,7 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   for strict legacy/Deb822 Signed-By, Trusted, architecture filters,
   index scoping and conflicting/symlinked source refusal. See
   [M19 source validation](docs/m19-apt-sources-validation.md).
+- **M20 read-only dpkg health audit**: `dpkg-audit` reports interrupted/inconsistent dpkg states and optionally fails an automation gate with `--require-clean`; read-only upgrade simulations refuse broken dpkg state. It does not repair packages or authorize host transactions; see [M20 diagnostics](docs/m20-dpkg-health-audit.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

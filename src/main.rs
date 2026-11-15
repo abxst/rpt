@@ -318,6 +318,12 @@ enum Command {
         #[arg(long, default_value = "/var/lib/apt/extended_states")] extended_states: PathBuf,
         #[arg(long, default_value = "amd64")] architecture: String,
     },
+    /// Read-only dpkg package-state health audit; never runs dpkg or repairs host state.
+    DpkgAudit {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        /// Fail with a nonzero exit code after emitting JSON if any state is incomplete.
+        #[arg(long, default_value_t = false)] require_clean: bool,
+    },
     /// Signed, no-removal, whole-installed-set upgrade simulation (NOT APT parity).
     AptSimulateUpgrade {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
@@ -1137,6 +1143,14 @@ async fn execute(cli: Cli) -> Result<()> {
                     extended_states: &extended_states,
                 }).context(ErrorCategory::System)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::DpkgAudit { status, require_clean } => {
+            let report = rpt::dpkg_health::inspect(&status)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if require_clean && !report.healthy {
+                anyhow::bail!("dpkg health audit reports {} incomplete or inconsistent package(s)", report.issues.len());
+            }
         }
         Command::AptSimulateUpgrade { cache, status, apt_root, architecture, max_roots, max_packages } => {
             let report = rpt::apt_simulation::simulate(&status, &architecture,
