@@ -101,6 +101,12 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Parse an exact, bounded subset of flat and nested apt.conf settings.
+    /// Unknown semantics, includes and path indirection are rejected.
+    AptConfigInspect {
+        #[arg(long, default_value = "/etc/apt")]
+        apt_root: PathBuf,
+    },
     /// Inspect APT preferences records (read-only; DOES NOT evaluate pin policy).
     PreferencesInspect {
         #[arg(long, default_value = "/etc/apt")]
@@ -284,6 +290,46 @@ enum Command {
         /// Machine-readable selected package/version set for differential testing.
         #[arg(long, default_value_t = false)] json: bool,
         #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Inspect an APT-like removal plan with dependency blockers; read-only.
+    /// Cascading dependents is opt-in, never chosen silently.
+    AptSimulateRemove {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Read-only purge preview including residual "config-files" dpkg state.
+    AptSimulatePurge {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = false)] cascade: bool,
+        #[arg(required = true)] packages: Vec<String>,
+    },
+    /// Read-only orphan auto-package proposal; missing marks means all manual.
+    AptSimulateAutoremove {
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/var/lib/apt/extended_states")] extended_states: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+    },
+    /// Signed, no-removal, whole-installed-set upgrade simulation (NOT APT parity).
+    AptSimulateUpgrade {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+    },
+    /// Bounded signed full-upgrade simulation; ambiguous removals fail closed.
+    AptSimulateFullUpgrade {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 128)] max_roots: usize,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = 3)] max_removals: usize,
     },
     /// Joint candidate-policy-verified plan for multiple roots; never executes dpkg.
     PlanInstallBatchPolicy {
@@ -776,6 +822,18 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Read-only package query: {}", if kind == DriverKind::Deb { "partial" } else { "not implemented" });
             println!("Package transactions: NOT IMPLEMENTED");
         }
+        Command::AptConfigInspect { apt_root } => {
+            let release = rpt::policy::read_default_release(&apt_root)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "default_release": release,
+                "supported_configuration_subset": true,
+                "apt_parity_verified": false,
+                "host_execution_allowed": false,
+                "warning": "Strict subset parser: unsupported settings/includes are rejected, not ignored.",
+            }))?);
+        }
         Command::VerifiedOrigins { cache, package, architecture } => {
             for entry in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {
                 println!("{} {} {} {} {} {} {} {} {} {}",
@@ -1052,6 +1110,41 @@ async fn execute(cli: Cli) -> Result<()> {
                 }
                 println!("Simulation complete: {} package(s); NO CHANGES MADE", steps.len());
             }
+        }
+        Command::AptSimulateRemove { status, architecture, cascade, packages } => {
+            let report = rpt::apt_simulation::simulate(&status, &architecture,
+                rpt::apt_simulation::Operation::Remove {
+                    packages: &packages, cascade,
+                }).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::AptSimulatePurge { status, architecture, cascade, packages } => {
+            let report = rpt::apt_simulation::simulate(&status, &architecture,
+                rpt::apt_simulation::Operation::Purge {
+                    packages: &packages, cascade,
+                }).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::AptSimulateAutoremove { status, extended_states, architecture } => {
+            let report = rpt::apt_simulation::simulate(&status, &architecture,
+                rpt::apt_simulation::Operation::Autoremove {
+                    extended_states: &extended_states,
+                }).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::AptSimulateUpgrade { cache, status, apt_root, architecture, max_roots, max_packages } => {
+            let report = rpt::apt_simulation::simulate(&status, &architecture,
+                rpt::apt_simulation::Operation::Upgrade {
+                    cache: &cache, apt_root: &apt_root, max_roots, max_packages,
+                }).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::AptSimulateFullUpgrade { cache, status, apt_root, architecture, max_roots, max_packages, max_removals } => {
+            let report = rpt::apt_simulation::simulate(&status, &architecture,
+                rpt::apt_simulation::Operation::FullUpgrade {
+                    cache: &cache, apt_root: &apt_root, max_roots, max_packages, max_removals,
+                }).context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, include_recommends, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy_options(
