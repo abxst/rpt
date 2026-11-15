@@ -262,6 +262,14 @@ jobs:
         run: cargo build --release --locked
       - name: Experimental Debian package (inspect and unpack only)
         run: bash tests/deb-packaging.sh ./target/release/rpt
+      - name: Build downloadable experimental amd64 package
+        run: bash scripts/build-deb.sh ./target/release/rpt "$RUNNER_TEMP/rpt-deb-amd64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpt-experimental-deb-amd64
+          path: ${{ runner.temp }}/rpt-deb-amd64/*.deb
+          retention-days: 7
+          if-no-files-found: error
   arm64-native:
     name: Native ARM64 Ubuntu package differential
     runs-on: ubuntu-24.04-arm
@@ -286,3 +294,11 @@ jobs:
           cargo build --locked
       - name: Experimental native ARM64 .deb (inspect only)
         run: bash tests/deb-packaging.sh ./target/debug/rpt
+      - name: Build downloadable experimental arm64 package
+        run: bash scripts/build-deb.sh ./target/debug/rpt "$RUNNER_TEMP/rpt-deb-arm64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpt-experimental-deb-arm64
+          path: ${{ runner.temp }}/rpt-deb-arm64/*.deb
+          retention-days: 7
+          if-no-files-found: error
