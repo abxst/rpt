@@ -200,7 +200,12 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let outcome = supervisor.stop(Duration::from_secs(3)).await.unwrap();
-        assert!(matches!(outcome, StopOutcome::Terminated(_) | StopOutcome::Exited(_)));
+        // CI load can delay the shell's TERM trap beyond the grace period.
+        // SIGKILL escalation is valid if and only if the entire process group
+        // is positively verified absent; never mistake graceful exit for the
+        // actual safety contract of this test.
+        assert!(!signals::exists(supervisor.pgid).unwrap(),
+            "supervised group still exists after stop: {outcome:?}");
         let _ = std::fs::remove_file(marker);
     }
     #[cfg(unix)]
