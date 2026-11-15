@@ -465,6 +465,26 @@ opts=(
 )
 apt-get "${opts[@]}" update >"$root/apt-update.log"
 ./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache" --no-progress >"$root/rpt-update.log"
+./target/debug/rpt cache-audit --cache "$root/rpt-cache" >"$root/m23-cache-audit.json"
+python3 - "$root/m23-cache-audit.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["schema_version"] == 1
+assert r["verified_repositories"] >= 1
+assert r["verified_indexes"] >= 1
+assert r["offline"] is True and r["read_only"] is True
+assert r["host_execution_allowed"] is False
+assert len(r["repositories"]) == r["verified_repositories"]
+assert all(len(x["inrelease_sha256"]) == 64 for x in r["repositories"])
+PY
+cp -a "$root/rpt-cache" "$root/rpt-cache-tampered"
+tampered_index="$(find "$root/rpt-cache-tampered" -type f -name 'index-*' -print -quit)"
+test -n "$tampered_index"
+printf 'tampered\n' >>"$tampered_index"
+if ./target/debug/rpt cache-audit --cache "$root/rpt-cache-tampered" >/dev/null 2>&1; then
+  echo 'M23 offline audit accepted tampered signed Packages bytes' >&2; exit 1
+fi
+echo 'PASS M23 offline GPG-signed cache inventory, freshness and SHA256 tamper rejection'
 # Verify the policy-selected dependency closure maps to exact signed bytes.
 ./target/debug/rpt prepare-download-plan \
   --cache "$root/rpt-cache" --status "$root/apt/status" --apt-root "$root/rpt-apt" \

@@ -742,6 +742,10 @@ enum Command {
         #[arg(long, default_value = "./rpt-artifacts")] root: PathBuf,
         #[arg(long, default_value_t = false)] apply: bool,
     },
+    /// Offline GPG/SHA256 audit of every RPT signed repository cache (no host execution).
+    CacheAudit {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -964,6 +968,11 @@ async fn execute(cli: Cli) -> Result<()> {
                     &root, &output, settings, &additional_architectures,
                 ).await?;
             }
+        }
+        Command::CacheAudit { cache } => {
+            let report = rpt::package_provenance::audit_cache(&cache)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::CacheVersions { driver, cache, package, architecture } => {
             let kind = resolve_driver(&driver)?;
