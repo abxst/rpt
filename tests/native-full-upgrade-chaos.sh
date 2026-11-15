@@ -143,11 +143,17 @@ PY
       expected_phase=running
     fi
     wait "$launcher" || :
+    # A killed dpkg may briefly remain as an already-dead zombie. Only
+    # executable/non-zombie descendants could mutate the guest after kill.
+    session_has_live_process() {
+      ps -e -o sid=,stat= | awk -v sid="$target" \
+        '$1 == sid && $2 !~ /^Z/ { found=1 } END { exit !found }'
+    }
     for ((n=0; n<100; n++)); do
-      if ! sudo pgrep -s "$target" >/dev/null; then break; fi
+      if ! session_has_live_process; then break; fi
       sleep 0.1
     done
-    if sudo pgrep -s "$target" >/dev/null; then
+    if session_has_live_process; then
       echo "M8 postinst descendants remain alive; unsafe to inspect/restore" >&2
       exit 1
     fi
