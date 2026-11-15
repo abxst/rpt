@@ -30,22 +30,49 @@ pub struct CacheLifecycleReport {
     pub warning: &'static str,
 }
 
-fn safe_root(path: &Path) -> Result<PathBuf> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        bail!("artifact cache root cannot be a symlink");
-    }
-    let root = fs::canonicalize(path)?;
+fn protected_cache_path(root: &Path) -> bool {
     let protected = [
         "/", "/etc", "/usr", "/var/lib", "/var/cache/apt",
         "/var/cache/apt/archives", "/bin", "/sbin", "/boot",
         "/dev", "/proc", "/sys", "/run", "/lib", "/lib64",
         "/var/tmp/apt", "/tmp/apt",
     ];
-    if root.components().count() < 3
-        || protected.iter().any(|value| {
-            let protected = Path::new(value);
-            root == protected || (protected != Path::new("/") && root.starts_with(protected))
-        }) {
+    root.components().count() < 3 || protected.iter().any(|value| {
+        let protected = Path::new(value);
+        root == protected || (protected != Path::new("/") && root.starts_with(protected))
+    })
+}
+
+fn validate_new_root_parent(path: &Path) -> Result<()> {
+    // Do not create a directory before checking its *existing* ancestors:
+    // an intermediate symlink such as /tmp/alias-to-etc/new-cache could
+    // otherwise cause a mutation outside the requested RPT workspace.
+    let parent = path.parent().filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut ancestor = Some(parent);
+    while let Some(item) = ancestor {
+        let meta = fs::symlink_metadata(item)
+            .with_context(|| format!("inspecting candidate cache ancestor {}", item.display()))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            bail!("unsafe symlink or non-directory cache ancestor: {}", item.display());
+        }
+        ancestor = item.parent().filter(|value| !value.as_os_str().is_empty());
+    }
+    let canonical_parent = fs::canonicalize(parent)?;
+    let filename = path.file_name().context("RPT cache root must have a directory name")?;
+    let proposed = canonical_parent.join(filename);
+    if protected_cache_path(&proposed) {
+        bail!("refusing to initialize protected cache path: {}", proposed.display());
+    }
+    Ok(())
+}
+
+fn safe_root(path: &Path) -> Result<PathBuf> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        bail!("artifact cache root cannot be a symlink");
+    }
+    let root = fs::canonicalize(path)?;
+    if protected_cache_path(&root) {
         bail!("refusing system or high-level artifact cache directory: {}", root.display());
     }
     if !root.is_dir() {
@@ -105,8 +132,11 @@ pub fn download_lease(path: &Path) -> Result<Option<File>> {
 /// an existing populated directory or the system's real APT cache.
 pub fn initialize(path: &Path) -> Result<CacheLifecycleReport> {
     match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => fs::create_dir(path)
-            .context("create RPT cache root only when its parent already exists")?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            validate_new_root_parent(path)?;
+            fs::create_dir(path)
+                .context("create RPT cache root only after validating every ancestor")?;
+        },
         Err(error) => return Err(error).context("inspecting cache root"),
         Ok(meta) if !meta.file_type().is_dir() => bail!("RPT cache root must be a real directory"),
         Ok(_) => {}
@@ -261,6 +291,18 @@ mod tests {
         assert!(clean(&root, true).is_err());
         assert!(root.join("first.deb").exists());
         assert_eq!(fs::read(&external).unwrap(), b"host");
+    }
+
+    #[test]
+    fn cache_init_refuses_symlinked_parent_without_creating_target() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        fs::create_dir(&external).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&external, &alias).unwrap();
+        let target = alias.join("new-cache");
+        assert!(initialize(&target).is_err());
+        assert!(!external.join("new-cache").exists());
     }
 
     #[test]
