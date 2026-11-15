@@ -272,6 +272,19 @@ enum Command {
         #[arg(long, default_value_t = 200)] max_packages: usize,
         package: String,
     },
+    /// APT-like read-only install simulation from signed RPT cache; NOT full
+    /// apt-get -s parity. This command never acquires dpkg locks or mutates hosts.
+    AptSimulateInstall {
+        #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
+        #[arg(long, default_value = "/var/lib/dpkg/status")] status: PathBuf,
+        #[arg(long, default_value = "/")] apt_root: PathBuf,
+        #[arg(long, default_value = "amd64")] architecture: String,
+        #[arg(long, default_value_t = 200)] max_packages: usize,
+        #[arg(long, default_value_t = false)] include_recommends: bool,
+        /// Machine-readable selected package/version set for differential testing.
+        #[arg(long, default_value_t = false)] json: bool,
+        #[arg(required = true)] packages: Vec<String>,
+    },
     /// Joint candidate-policy-verified plan for multiple roots; never executes dpkg.
     PlanInstallBatchPolicy {
         #[arg(long, default_value = "./rpt-lists")] cache: PathBuf,
@@ -991,6 +1004,33 @@ async fn execute(cli: Cli) -> Result<()> {
                     step.version, step.installed.as_deref().unwrap_or("none"));
             }
             println!("Foreign plan preview: {} package(s); NO CHANGES MADE", steps.len());
+        }
+        Command::AptSimulateInstall { cache, status, apt_root, architecture, max_packages, include_recommends, json, packages } => {
+            let steps = rpt::install_plan::preview_many_with_policy_options(
+                &cache, &status, &apt_root, &packages, &architecture,
+                max_packages, include_recommends,
+            ).context(ErrorCategory::System)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "install",
+                    "simulation_only": true,
+                    "apt_parity_verified": false,
+                    "host_execution_allowed": false,
+                    "selected": steps,
+                }))?);
+            } else {
+                println!("RPT READ-ONLY INSTALL SIMULATION — NOT APT PARITY");
+                for step in &steps {
+                    match &step.installed {
+                        Some(old) => println!("Inst {}:{} [{}] ({})", step.package,
+                            step.architecture, old, step.version),
+                        None => println!("Inst {}:{} ({})", step.package,
+                            step.architecture, step.version),
+                    }
+                }
+                println!("Simulation complete: {} package(s); NO CHANGES MADE", steps.len());
+            }
         }
         Command::PlanInstallBatchPolicy { cache, status, apt_root, architecture, max_packages, include_recommends, packages } => {
             let steps = rpt::install_plan::preview_many_with_policy_options(

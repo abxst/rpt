@@ -244,7 +244,10 @@ pub fn verify(path: &Path) -> Result<NativeSnapshotReceipt> {
         || receipt.tree_sha256.len() != 64
         || !receipt.tree_sha256.bytes().all(|c| c.is_ascii_hexdigit())
         || receipt.status_sha256.len() != 64
-        || !receipt.status_sha256.bytes().all(|c| c.is_ascii_hexdigit()) {
+        || !receipt.status_sha256.bytes().all(|c| c.is_ascii_hexdigit())
+        || !(receipt.apt_marks_sha256 == "missing"
+            || (receipt.apt_marks_sha256.len() == 64
+                && receipt.apt_marks_sha256.bytes().all(|c| c.is_ascii_hexdigit()))) {
         bail!("invalid or unsupported native snapshot receipt");
     }
     let parent = fs::canonicalize(path.parent().context("receipt has no parent")?)?;
@@ -254,6 +257,18 @@ pub fn verify(path: &Path) -> Result<NativeSnapshotReceipt> {
         bail!("snapshot receipt path is not bound to the recorded journal");
     }
     let snapshot = native_rootfs::rootfs(Path::new(&receipt.snapshot_rootfs))?;
+    // The receipt cannot claim that its checkpoint lives below the original
+    // mutable guest or inside the journal itself. Restore must never traverse
+    // an overlapping source/snapshot directory hierarchy.
+    let source = Path::new(&receipt.source_rootfs);
+    if source == Path::new("/") || source.as_os_str().is_empty()
+        || !source.is_absolute()
+        || !(source.starts_with("/tmp/") || source.starts_with("/var/tmp/"))
+        || source.starts_with(&snapshot) || snapshot.starts_with(source)
+        || snapshot.starts_with(&journal) || journal.starts_with(&snapshot)
+        || source.starts_with(&journal) || journal.starts_with(source) {
+        bail!("snapshot receipt contains overlapping or unsafe rootfs paths");
+    }
     eprintln!("RPT native snapshot: verifying snapshot tree {}", snapshot.display());
     if snapshot.to_string_lossy() != receipt.snapshot_rootfs {
         bail!("snapshot path identity changed");
@@ -310,6 +325,25 @@ mod tests {
         fs::remove_file(dir.path().join("link")).unwrap();
         std::os::unix::fs::symlink("../outside", dir.path().join("link")).unwrap();
         assert_ne!(second, tree_hash(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn receipt_invalid_apt_mark_digest_is_refused_before_restore() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let file = dir.path().join("fake.json");
+        let receipt = NativeSnapshotReceipt {
+            schema_version: 1, id: "fake".into(),
+            source_rootfs: "/tmp/example-source".into(),
+            snapshot_rootfs: "/tmp/example-snapshot".into(),
+            journal_dir: "/tmp/example-journal".into(),
+            status_sha256: "a".repeat(64),
+            apt_marks_sha256: "untrusted".into(),
+            tree_sha256: "b".repeat(64),
+            created_utc: "2026-01-01T00:00:00Z".into(),
+        };
+        fs::write(&file, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        let error = verify(&file).unwrap_err();
+        assert!(format!("{error:#}").contains("invalid or unsupported"));
     }
 
     #[test]
