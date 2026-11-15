@@ -75,6 +75,40 @@ fn signed_hashes(signed: &str) -> Result<BTreeMap<String,(String,u64)>> {
     if entries.is_empty() { bail!("signed Release missing SHA256 hashes"); }
     Ok(entries)
 }
+/// Reject untracked local index files. Some legacy read-only catalog queries
+/// enumerate by the "index-*" prefix, so an attacker must not be able to
+/// plant an extra unsigned index beside an otherwise valid signed cache.
+fn verify_index_inventory(dir: &Path, declared: &[IndexProvenance]) -> Result<()> {
+    let mut expected = BTreeSet::new();
+    for entry in declared {
+        let Some((ordinal, compression)) = entry.local_file
+            .strip_prefix("index-").and_then(|s| s.rsplit_once('.'))
+        else {
+            bail!("noncanonical signed cache index filename");
+        };
+        if ordinal.is_empty() || !ordinal.bytes().all(|b| b.is_ascii_digit())
+            || !matches!(compression, "xz" | "gz" | "raw") {
+            bail!("noncanonical signed cache index filename");
+        }
+        if !expected.insert(entry.local_file.as_str()) {
+            bail!("duplicate local signed index filename");
+        }
+    }
+    for file in fs::read_dir(dir)? {
+        let file = file?;
+        let name = file.file_name();
+        let name = name.to_str().context("non-UTF-8 repository cache filename")?;
+        if !name.starts_with("index-") { continue; }
+        if !expected.contains(name) {
+            bail!("untracked unsigned Packages index in signed cache: {name}");
+        }
+        if !file.file_type()?.is_file() {
+            bail!("signed cache index must be an ordinary file: {name}");
+        }
+    }
+    Ok(())
+}
+
 fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
     let uri = reqwest::Url::parse(&meta.uri)?;
     if !matches!(uri.scheme(),"http"|"https") || uri.host_str().is_none()
@@ -93,6 +127,9 @@ fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
     crate::update::check_release_freshness(&signed, chrono::Utc::now())?;
     let checksums = signed_hashes(&signed)?;
     if meta.indexes.is_empty() { bail!("repository provenance has no indexes"); }
+    // Signed hashes alone do not authorize files outside provenance: a
+    // catalog reader scanning index-* could otherwise ingest forged data.
+    verify_index_inventory(dir, &meta.indexes)?;
     let mut seen = BTreeSet::new();
     for idx in &meta.indexes {
         if idx.release_path.starts_with('/') || idx.release_path.split('/').any(|part| part.is_empty() || part == ".." || part == ".") || !safe_path(&idx.local_file)
@@ -690,6 +727,28 @@ pub fn prepare_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_index_inventory_rejects_rogue_files_symlinks_and_duplicate_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let listed = temp.path().join("index-0.raw");
+        fs::write(&listed, b"Package: signed\n").unwrap();
+        let entry = IndexProvenance {
+            release_path: "main/binary-amd64/Packages".into(),
+            local_file: "index-0.raw".into(),
+            sha256: "0".repeat(64),
+            size: 16,
+        };
+        assert!(verify_index_inventory(temp.path(), std::slice::from_ref(&entry)).is_ok());
+        assert!(verify_index_inventory(temp.path(), &[entry.clone(), entry.clone()]).is_err());
+        fs::write(temp.path().join("index-99.raw"), b"Package: unsigned\n").unwrap();
+        assert!(verify_index_inventory(temp.path(), std::slice::from_ref(&entry)).is_err());
+        fs::remove_file(temp.path().join("index-99.raw")).unwrap();
+        std::os::unix::fs::symlink(&listed, temp.path().join("index-link.raw")).unwrap();
+        assert!(verify_index_inventory(temp.path(), std::slice::from_ref(&entry)).is_err());
+        fs::remove_file(temp.path().join("index-link.raw")).unwrap();
+        assert!(verify_index_inventory(temp.path(), &[entry]).is_ok());
+    }
     #[test]
     fn exact_manifest_validates_architecture_identity_and_duplicate_roots() {
         let mk = |arch: &str| crate::install_plan::PlanStep {

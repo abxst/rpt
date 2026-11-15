@@ -520,6 +520,32 @@ if ./target/debug/rpt cache-audit --cache "$root/rpt-cache-tampered" >/dev/null 
   echo 'M23 offline audit accepted tampered signed Packages bytes' >&2; exit 1
 fi
 echo 'PASS M23 offline GPG-signed cache inventory, freshness and SHA256 tamper rejection'
+# M27: even if every declared Packages index passes SHA256 and InRelease
+# verification, an extra untracked index must never be accepted as trusted.
+cp -a "$root/rpt-cache" "$root/m27-extra-index-cache"
+valid_repo="$(find "$root/m27-extra-index-cache" -mindepth 1 -maxdepth 1 -type d -name '????????????????????????' -print -quit)"
+test -n "$valid_repo"
+cat >"$valid_repo/index-999.raw" <<'EOF'
+Package: unsigned-poison
+Version: 99
+Architecture: all
+Filename: pool/unsigned-poison_99_all.deb
+SHA256: 0000000000000000000000000000000000000000000000000000000000000000
+Size: 1
+
+EOF
+if ./target/debug/rpt cache-audit --cache "$root/m27-extra-index-cache" \
+    --apt-root "$root/rpt-apt" >"$root/m27-unsafe.json" 2>"$root/m27-error.txt"; then
+  echo 'M27 audit accepted unsigned extra index despite valid signed provenance' >&2; exit 1
+fi
+grep -q 'untracked unsigned Packages index' "$root/m27-error.txt"
+if ./target/debug/rpt apt-simulate-install --cache "$root/m27-extra-index-cache" \
+    --status "$root/apt/status" --apt-root "$root/rpt-apt" --json rpt-app \
+    >"$root/m27-unsafe-plan.json" 2>"$root/m27-plan-error.txt"; then
+  echo 'M27 signed candidate planner consumed cache with unsigned extra index' >&2; exit 1
+fi
+grep -q 'untracked unsigned Packages index' "$root/m27-plan-error.txt"
+echo 'PASS M27 reject extra unsigned Packages files in otherwise signed repository cache'
 # Verify the policy-selected dependency closure maps to exact signed bytes.
 ./target/debug/rpt prepare-download-plan \
   --cache "$root/rpt-cache" --status "$root/apt/status" --apt-root "$root/rpt-apt" \
