@@ -467,6 +467,28 @@ apt-get "${opts[@]}" update >"$root/apt-update.log"
 ./target/debug/rpt update --root "$root/rpt-apt" --output "$root/rpt-cache" --no-progress >"$root/rpt-update.log"
 ./target/debug/rpt cache-audit --cache "$root/rpt-cache" >"$root/m23-cache-audit.json"
 ./target/debug/rpt cache-audit --cache "$root/rpt-cache" --apt-root "$root/rpt-apt" >"$root/m24-source-bound.json"
+# M26: planning APIs must reject an old signed cache if its source has been
+# removed, rather than depending on an optional cache-audit CLI invocation.
+mkdir -p "$root/m26-disabled-apt" "$root/m26-wrong-key-apt"
+printf 'deb [signed-by=%s] %s fixture main\n' "$root/m26-wrong-keyring.gpg" "$uri" >"$root/m26-wrong-key-apt/sources.list"
+if ./target/debug/rpt apt-simulate-install --json --cache "$root/rpt-cache" \
+    --status "$root/apt/status" --apt-root "$root/m26-disabled-apt" \
+    --architecture "$arch" rpt-app >"$root/m26-unsafe.json" 2>"$root/m26-error.txt"; then
+  echo 'M26 install accepted cached metadata for a removed source' >&2; exit 1
+fi
+grep -Eq 'signed source-set preflight|no enabled signed APT sources' "$root/m26-error.txt"
+if ./target/debug/rpt plan-install-batch-policy --cache "$root/rpt-cache" \
+    --status "$root/apt/status" --apt-root "$root/m26-wrong-key-apt" \
+    --architecture "$arch" rpt-app >"$root/m26-unsafe.txt" 2>&1; then
+  echo 'M26 install accepted changed Signed-By policy' >&2; exit 1
+fi
+if ./target/debug/rpt plan-system-upgrade-policy --cache "$root/rpt-cache" \
+    --status "$root/apt/status" --apt-root "$root/m26-disabled-apt" \
+    --architecture "$arch" >"$root/m26-unsafe.txt" 2>&1; then
+  echo 'M26 system upgrade accepted cached metadata for a removed source' >&2; exit 1
+fi
+grep -Eq 'signed source-set preflight|no enabled signed APT sources' "$root/m26-unsafe.txt"
+echo 'PASS M26 signed candidate planner source-set binding and stale-cache rejection'
 python3 - "$root/m24-source-bound.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
