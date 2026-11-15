@@ -232,28 +232,74 @@ fn safe_component(value: &str) -> bool {
         && value != "." && value != ".."
 }
 
-/// Parses a restricted safe subset of APT sources. Unsupported forms fail closed.
+/// Parse only a small unambiguous legacy [key=value] option grammar.
+fn parse_legacy_deb(source: &str) -> Result<Vec<Repo>> {
+    let pieces = source.split_whitespace().collect::<Vec<_>>();
+    if pieces.first() != Some(&"deb") { bail!("unsupported legacy binary source"); }
+    let mut index = 1usize;
+    let mut keyring = None;
+    let mut architectures = None;
+    let mut trusted = None;
+    if pieces.get(index).is_some_and(|x| x.starts_with('[')) {
+        let mut closed = false;
+        let begin = index;
+        for _ in 0..8 {
+            let raw = *pieces.get(index).context("unterminated legacy source option list")?;
+            let value = if index == begin {
+                raw.strip_prefix('[').context("invalid source options")?
+            } else { raw };
+            let value = match value.strip_suffix(']') {
+                Some(last) => { closed = true; last }
+                None => value,
+            };
+            let (name, value) = value.split_once('=')
+                .context("legacy source option must be key=value")?;
+            if value.is_empty() || value.contains(['[', ']']) {
+                bail!("invalid legacy source option value");
+            }
+            match name {
+                "signed-by" if keyring.is_none() => keyring = Some(value.to_owned()),
+                "arch" if architectures.is_none() => {
+                    if value.split(',').any(str::is_empty) {
+                        bail!("invalid legacy source architecture filter");
+                    }
+                    architectures = Some(value.replace(',', " "));
+                }
+                "trusted" if trusted.is_none() => trusted = Some(value.to_owned()),
+                _ => bail!("unsupported or duplicate legacy source option {name}"),
+            }
+            index += 1;
+            if closed { break; }
+        }
+        if !closed { bail!("unterminated legacy source options"); }
+    }
+    let keyring = keyring.context("legacy repository requires signed-by= keyring")?;
+    let uri = pieces.get(index).context("missing source URI")?;
+    let suite = pieces.get(index + 1).context("missing source suite")?;
+    let components = &pieces[index+2..];
+    if components.is_empty() { bail!("legacy binary source has no components"); }
+    let mut stanza = format!(
+        "Types: deb\nURIs: {uri}\nSuites: {suite}\nComponents: {}\nSigned-By: {keyring}",
+        components.join(" "),
+    );
+    if let Some(arch) = architectures {
+        stanza.push_str(&format!("\nArchitectures: {arch}"));
+    }
+    if let Some(trust) = trusted {
+        stanza.push_str(&format!("\nTrusted: {trust}"));
+    }
+    parse_stanza(&stanza)
+}
+
+/// Parse and de-duplicate an authenticated-source subset. Reject conflicting
+/// declarations for one URI/suite instead of silently selecting one keyring,
+/// component set or architecture filter.
 pub fn parse_sources(root: &Path) -> Result<Vec<Repo>> {
     let sources = crate::sources::list_sources(root)?;
     let mut result = Vec::new();
     for item in sources {
         if item.starts_with("deb ") || item.starts_with("deb\t") {
-            // Legacy .list entries with [signed-by=...] are accepted; other
-            // option combinations need explicit implementation rather than guessing.
-            let mut pieces = item.split_whitespace();
-            let _deb = pieces.next();
-            let first = pieces.next().context("missing repository URI")?;
-            let (key, uri) = if first == "[signed-by=" {
-                bail!("invalid legacy options");
-            } else if first.starts_with("[signed-by=") && first.ends_with(']') {
-                (first.trim_start_matches("[signed-by=").trim_end_matches(']'), pieces.next().context("missing URI")?)
-            } else {
-                bail!("legacy sources must specify [signed-by=/absolute/keyring.gpg]");
-            };
-            let suite = pieces.next().context("missing suite")?;
-            let components = pieces.map(str::to_owned).collect::<Vec<_>>();
-            let fields = format!("Types: deb\nURIs: {uri}\nSuites: {suite}\nComponents: {}\nSigned-By: {key}", components.join(" "));
-            result.extend(parse_stanza(&fields)?);
+            result.extend(parse_legacy_deb(&item)?);
         } else if item.starts_with("deb-src ") || item.starts_with("deb-src\t") {
             continue;
         } else if item.contains("Types:") {
@@ -263,9 +309,18 @@ pub fn parse_sources(root: &Path) -> Result<Vec<Repo>> {
         }
     }
     if result.is_empty() { bail!("no supported signed binary repositories"); }
-    let mut dedup = BTreeSet::new();
-    result.retain(|r| dedup.insert((r.uri.clone(), r.suite.clone(), r.keyring.clone())));
-    Ok(result)
+    let mut seen = BTreeMap::<(String, String), Repo>::new();
+    for repo in result {
+        let identity = (repo.uri.clone(), repo.suite.clone());
+        if let Some(existing) = seen.get(&identity) {
+            if existing != &repo {
+                bail!("conflicting source declarations for {} {}", repo.uri, repo.suite);
+            }
+        } else {
+            seen.insert(identity, repo);
+        }
+    }
+    Ok(seen.into_values().collect())
 }
 
 #[derive(Debug, Clone)]
