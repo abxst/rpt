@@ -773,14 +773,14 @@ mod tests {
         ] {
             assert!(parse_legacy_deb(raw).is_err(), "unsafe legacy source accepted: {raw}");
         }
-        let base = "Types: deb\\nURIs: https://example.org\\nSuites: noble\\nComponents: main\\nSigned-By: /tmp/key.gpg";
+        let base = "Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: main\nSigned-By: /tmp/key.gpg";
         for extra in [
-            "\\nTrusted: yes",
-            "\\nTrusted: maybe",
-            "\\nEnabled: maybe",
-            "\\nCheck-Valid-Until: no",
-            "\\nSigned-By: /tmp/duplicate.gpg",
-            "\\nArchitectures: amd64 amd64",
+            "\nTrusted: yes",
+            "\nTrusted: maybe",
+            "\nEnabled: maybe",
+            "\nCheck-Valid-Until: no",
+            "\nSigned-By: /tmp/duplicate.gpg",
+            "\nArchitectures: amd64 amd64",
         ] {
             assert!(parse_stanza(&format!("{base}{extra}")).is_err(), "{extra}");
         }
@@ -791,9 +791,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sources.list.d")).unwrap();
         std::fs::write(dir.path().join("sources.list.d/01.sources"),
-            "Types: deb\\nURIs: https://example.org\\nSuites: noble\\nComponents: main\\nSigned-By: /tmp/key-one.gpg\\n").unwrap();
+            "Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: main\nSigned-By: /tmp/key-one.gpg\n").unwrap();
         std::fs::write(dir.path().join("sources.list.d/02.sources"),
-            "Types: deb\\nURIs: https://example.org\\nSuites: noble\\nComponents: universe\\nSigned-By: /tmp/key-two.gpg\\n").unwrap();
+            "Types: deb\nURIs: https://example.org\nSuites: noble\nComponents: universe\nSigned-By: /tmp/key-two.gpg\n").unwrap();
         assert!(parse_sources(dir.path()).is_err());
     }
 
