@@ -51,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG=v0.1.0-alpha.24
+          TAG=v0.1.0-alpha.25
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release already exists, skipping."
             exit 0
@@ -68,4 +68,4 @@ jobs:
           gh release create "$TAG" dist/rpt-linux-amd64.tar.gz dist/SHA256SUMS \
             dist/PRODUCTION-QUALIFICATION.json \
             --title "RPT $TAG — experimental package engine (guest only)" --prerelease \
-            --notes "Experimental signed metadata, read-only APT-like simulation and disposable guest transactions. M13/M14 guest metadata and host-alias checks; M15 experimental QEMU SIGKILL dpkg-only guest oracle with independent disk recovery (NOT RPT transaction power-loss certification). Live host dpkg and APT replacement remain BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."
+            --notes "Experimental signed metadata, read-only APT-like simulation and disposable guest transactions. M15 QEMU power-cut oracle plus M16 read-only APT-like remove/purge/autoremove/upgrade/full-upgrade simulation CLI. This does NOT establish complete APT compatibility or RPT guest power-loss recovery. Live host dpkg and APT replacement remain BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."
