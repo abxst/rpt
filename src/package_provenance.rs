@@ -144,7 +144,7 @@ fn audit_regular_file(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     if !meta.file_type().is_file() || meta.len() > maximum {
         bail!("cache metadata must be non-symlink regular file with bounded size: {}", path.display());
     }
-    let mut f = fs::File::open(path)?;
+    let f = fs::File::open(path)?;
     let mut bytes = Vec::new();
     f.take(maximum + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > maximum {
