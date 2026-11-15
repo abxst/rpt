@@ -59,6 +59,10 @@ impl Downloader {
     }
 
     pub async fn download_all(&self, packages: Vec<Package>, dest: &Path) -> Result<()> {
+        // A managed RPT cache takes a shared lease for the complete network
+        // download batch. This cannot race with a cooperative clean --apply.
+        // Unmarked artifact destinations keep previous behavior.
+        let _managed_cache_lease = crate::artifact_cache::download_lease(dest)?;
         let started = Instant::now();
         let runner = Self {
             client: self.client.clone(),
