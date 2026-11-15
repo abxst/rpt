@@ -802,6 +802,7 @@ python3 - "$root/native-checkpoint-create.json" "$root/native-checkpoint-verify.
 import json,sys
 a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]))
 assert a==b
+assert a['schema_version']==2
 assert len(a['tree_sha256'])==64 and len(a['status_sha256'])==64
 PY
 receipt_before="$(sudo sha256sum "$snapshot_receipt" | cut -d' ' -f1)"
