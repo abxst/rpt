@@ -53,6 +53,12 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   **These milestones are not fully complete**, production qualification is
   BLOCKED and live-host dpkg remains disabled. See
   [M9–M12 qualification contract](docs/m9-m12-qualification.md).
+- **M13 disposable guest checkpoint metadata fidelity**: v2 tree receipts
+  additionally bind Linux xattrs (including ACL/capability metadata),
+  mtimes and hardlink topology, with signed VM negative tamper tests;
+  v1 receipts fail closed. No live-host snapshotting, power-loss atomicity
+  or production rollback is implied. See
+  [M13 checkpoint oracle](docs/native-full-upgrade-chaos.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.
