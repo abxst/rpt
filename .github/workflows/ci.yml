@@ -33,6 +33,7 @@ jobs:
           bash -n tests/apt-config-syntax.sh
           bash -n tests/artifact-cache-lifecycle.sh
           bash -n tests/dpkg-health-audit.sh
+          bash -n tests/cache-audit-negative.sh
           bash -n tests/apt-sources-validation.sh
           bash -n tests/qemu-powercut-oracle.sh
           python3 -m py_compile scripts/validate-powercut-evidence.py
@@ -50,6 +51,7 @@ jobs:
           bash tests/apt-config-syntax.sh ./target/debug/rpt
           bash tests/artifact-cache-lifecycle.sh ./target/debug/rpt
           bash tests/dpkg-health-audit.sh ./target/debug/rpt
+          bash tests/cache-audit-negative.sh ./target/debug/rpt
           bash tests/apt-sources-validation.sh ./target/debug/rpt
           ./target/debug/rpt driver-info --driver deb | grep -q 'Version comparison: implemented'
           ./target/debug/rpt driver-info --driver rpm | grep -q 'Package transactions: NOT IMPLEMENTED'

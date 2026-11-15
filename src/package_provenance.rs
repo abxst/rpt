@@ -111,6 +111,108 @@ fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
     }
     Ok(())
 }
+/// A bounded, offline, signature-verified inventory of one RPT-owned cache.
+/// This audits immutable-looking inputs at *the instant of reading* only;
+/// no execution permission follows and untrusted concurrent writers can race it.
+#[derive(Debug, Serialize)]
+pub struct CacheAuditRepository {
+    pub uri: String,
+    pub suite: String,
+    pub signed_indexes: usize,
+    pub inrelease_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheAudit {
+    pub schema_version: u32,
+    pub verified_repositories: usize,
+    pub verified_indexes: usize,
+    pub repositories: Vec<CacheAuditRepository>,
+    pub offline: bool,
+    pub read_only: bool,
+    pub host_execution_allowed: bool,
+    pub warning: &'static str,
+}
+
+const MAX_AUDIT_REPOSITORIES: usize = 64;
+const MAX_PROVENANCE_BYTES: u64 = 1024 * 1024;
+const MAX_INRELEASE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn audit_regular_file(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    let meta = fs::symlink_metadata(path)
+        .with_context(|| format!("missing cache file {}", path.display()))?;
+    if !meta.file_type().is_file() || meta.len() > maximum {
+        bail!("cache metadata must be non-symlink regular file with bounded size: {}", path.display());
+    }
+    let f = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    f.take(maximum + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum {
+        bail!("cache metadata grew beyond {} bytes: {}", maximum, path.display());
+    }
+    Ok(bytes)
+}
+
+/// Require each hexadecimal repository directory to be verified against its
+/// Signed-By keyring and Release-anchored index digests. Bypass neither
+/// GPG signature verification nor Release expiry checks; never use network.
+pub fn audit_cache(root: &Path) -> Result<CacheAudit> {
+    if !fs::symlink_metadata(root)?.file_type().is_dir() {
+        bail!("signed cache must be a real non-symlink directory");
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let id = name.to_str().context("non-UTF-8 cache entry name")?;
+        if id.len() != 24 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        if !entry.file_type()?.is_dir() {
+            bail!("repository cache entry is not a real directory: {id}");
+        }
+        dirs.push(entry.path());
+        if dirs.len() > MAX_AUDIT_REPOSITORIES {
+            bail!("too many repository cache directories");
+        }
+    }
+    dirs.sort();
+    if dirs.is_empty() {
+        bail!("no signed repository cache found; run rpt update first");
+    }
+    let mut reports = Vec::with_capacity(dirs.len());
+    let mut total_indexes = 0usize;
+    let mut seen_sources = BTreeSet::new();
+    for dir in &dirs {
+        let raw_meta = audit_regular_file(&dir.join("provenance.json"), MAX_PROVENANCE_BYTES)?;
+        let meta: RepositoryProvenance = serde_json::from_slice(&raw_meta)
+            .context("malformed repository provenance")?;
+        if !seen_sources.insert((meta.uri.clone(), meta.suite.clone())) {
+            bail!("duplicate signed repository identity: {} {}", meta.uri, meta.suite);
+        }
+        let inrelease = audit_regular_file(&dir.join("InRelease"), MAX_INRELEASE_BYTES)?;
+        validate_repo(dir, &meta)?;
+        total_indexes = total_indexes.checked_add(meta.indexes.len())
+            .context("signed index count overflow")?;
+        reports.push(CacheAuditRepository {
+            uri: meta.uri,
+            suite: meta.suite,
+            signed_indexes: meta.indexes.len(),
+            inrelease_sha256: hex::encode(Sha256::digest(&inrelease)),
+        });
+    }
+    Ok(CacheAudit {
+        schema_version: 1,
+        verified_repositories: reports.len(),
+        verified_indexes: total_indexes,
+        repositories: reports,
+        offline: true,
+        read_only: true,
+        host_execution_allowed: false,
+        warning: "Signature and cache-byte validation are point-in-time only; no host execution or APT parity is authorized.",
+    })
+}
+
 fn scan(
     reader: impl Read, mut visitor: impl FnMut(&Fields)->Result<()>,
 ) -> Result<()> {
