@@ -1561,6 +1561,11 @@ pub fn preview_explicit_architecture_with_policy(
             bail!("invalid concrete preview architecture: {arch}");
         }
     }
+    // An old, cryptographically valid cache cannot authorize a repository
+    // removed from the *current* signed APT source configuration.
+    // This check also protects guest intent replays that call this planner.
+    crate::package_provenance::audit_configured_cache(cache, apt_root)
+        .context("signed source-set preflight failed for foreign policy")?;
     let target_release = crate::policy::read_default_release(apt_root)?;
     let preferences = crate::apt_preferences::load(apt_root)?;
     // Resolve the explicitly requested root against its policy-selected
@@ -2040,6 +2045,11 @@ pub fn preview_many_with_policy_options(
     if max_packages == 0 || max_packages > 5000 {
         bail!("max_packages must be 1..=5000");
     }
+    // Fail closed on stale/disabled/changed repositories before reading any
+    // candidate, independently of where this policy planner was invoked.
+    // Native guest apply also re-runs this planner after status checks.
+    crate::package_provenance::audit_configured_cache(cache, apt_root)
+        .context("signed source-set preflight failed for install policy")?;
     let target_release = crate::policy::read_default_release(apt_root)?;
     let preferences = crate::apt_preferences::load(apt_root)?;
     for package in packages {

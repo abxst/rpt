@@ -54,6 +54,10 @@ pub(crate) fn discover_signed_upgrades(
     if max_roots == 0 || max_roots > 128 {
         bail!("system upgrade discovery supports max_roots 1..=128");
     }
+    // Upgrade discovery can run independently of the normal install planner;
+    // it must reject stale signed caches even for no-change/held-only plans.
+    crate::package_provenance::audit_configured_cache(cache, apt_root)
+        .context("signed source-set preflight failed for system-upgrade discovery")?;
     let installed = cache_query::installed_catalog_by_arch(status)?;
     let catalog = metadata_query::catalog_by_arch(cache, architecture, 1_000_000)?;
     let preferences = apt_preferences::load(apt_root)?;

@@ -432,6 +432,17 @@ apt-get "${opts[@]}" -o "Dir::State::status=$root/empty-status" update >"$root/a
   --additional-architecture i386 --no-progress >"$root/rpt-update.log"
 "$rpt" cache-versions --cache "$root/cache" --architecture i386 \
   --package rpt-foreign-app | grep -Fxq '1.0'
+# M26 foreign-policy planner independently refuses signed but now-disabled
+# repository sources. The metadata cache itself is deliberately untouched.
+mkdir -p "$root/m26-disabled"
+if "$rpt" plan-install-foreign-policy --cache "$root/cache" \
+    --status "$root/empty-status" --apt-root "$root/m26-disabled" \
+    --native-architecture amd64 --foreign-architecture i386 \
+    rpt-foreign-app:i386 >/dev/null 2>"$root/m26-error.txt"; then
+  echo 'M26 foreign policy planned from disabled signed sources' >&2; exit 1
+fi
+grep -Eq 'signed source-set preflight|no enabled signed APT sources' "$root/m26-error.txt"
+echo 'PASS M26 foreign signed planner refuses disabled cache repository'
 
 compare_plan() {
   local label="$1" status="$2" package="$3"

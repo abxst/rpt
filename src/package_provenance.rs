@@ -219,10 +219,10 @@ pub fn audit_cache(root: &Path) -> Result<CacheAudit> {
     })
 }
 
-/// Optional strict current-source binding. A signed cached repository that was
-/// removed or disabled in current apt sources must not pass this read-only
-/// qualification check. This does not yet automatically filter other callers'
-/// candidate selection; it is an operator/audit gate, not production safety.
+/// Strict current-source binding. A signed cached repository that was removed
+/// or disabled in current apt sources cannot be used in signed candidate-policy
+/// planning. This is a point-in-time check; all callers must recheck before
+/// guest transaction execution. Not production authorization.
 pub fn audit_configured_cache(cache: &Path, apt_root: &Path) -> Result<CacheAudit> {
     let mut audit = audit_cache(cache)?;
     let configured = crate::update::parse_sources(apt_root)?;
