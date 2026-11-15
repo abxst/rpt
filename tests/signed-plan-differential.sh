@@ -489,6 +489,28 @@ if ./target/debug/rpt plan-system-upgrade-policy --cache "$root/rpt-cache" \
 fi
 grep -Eq 'signed source-set preflight|no enabled signed APT sources' "$root/m26-unsafe.txt"
 echo 'PASS M26 signed candidate planner source-set binding and stale-cache rejection'
+# M29: an independent process holds the RPT updater's exclusive lease.
+# All signed candidate planners must fail immediately rather than read a
+# partially published index while that update is in progress.
+python3 - "$root/rpt-cache/.rpt-update.lock" "$root/rpt-cache" \
+  "$root/apt/status" "$root/rpt-apt" "$arch" <<'PY'
+import fcntl, subprocess, sys
+lock_path, cache, status, apt_root, arch = sys.argv[1:]
+with open(lock_path, "r+") as owner:
+    fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    commands = (
+        ["apt-simulate-install", "--json", "--cache", cache, "--status", status,
+         "--apt-root", apt_root, "--architecture", arch, "rpt-app"],
+        ["plan-system-upgrade-policy", "--cache", cache, "--status", status,
+         "--apt-root", apt_root, "--architecture", arch],
+    )
+    for command in commands:
+        result = subprocess.run(["./target/debug/rpt", *command],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0, f"M29 accepted plan with update lease: {command}"
+        assert "signed cache is busy" in result.stderr, result.stderr
+print("PASS M29 bounded planner lease versus exclusive concurrent cache update")
+PY
 python3 - "$root/m24-source-bound.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))

@@ -2,12 +2,14 @@
 //! Read-only planning; package changes and dependency solving remain unsupported.
 use crate::{version, Manifest, Package};
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering, collections::{BTreeMap, BTreeSet}, fs,
     io::{BufRead, BufReader, Read},
+    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf}, process::Command,
 };
 use xz2::read::XzDecoder;
@@ -107,6 +109,36 @@ fn verify_index_inventory(dir: &Path, declared: &[IndexProvenance]) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Shared advisory lease held throughout signed planner reads, pairing with
+/// rpt update's existing exclusive ".rpt-update.lock". NOT a hostile-writer
+/// security boundary or permission to execute packages on a live host.
+#[derive(Debug)]
+pub struct CacheReadLease {
+    _file: fs::File,
+}
+
+pub fn acquire_cache_read_lease(cache: &Path) -> Result<CacheReadLease> {
+    let directory = fs::symlink_metadata(cache)?;
+    if !directory.file_type().is_dir() {
+        bail!("signed cache root must be an actual non-symlink directory");
+    }
+    let lock_path = cache.join(".rpt-update.lock");
+    let before = fs::symlink_metadata(&lock_path)
+        .context("signed cache update lock missing; run rpt update first")?;
+    if !before.file_type().is_file() {
+        bail!("signed cache lock must be an ordinary non-symlink file");
+    }
+    let file = fs::File::open(&lock_path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || before.dev() != opened.dev()
+        || before.ino() != opened.ino() {
+        bail!("signed cache update lock was replaced during opening");
+    }
+    FileExt::try_lock_shared(&file)
+        .context("signed cache is busy: another RPT update holds the exclusive lock")?;
+    Ok(CacheReadLease { _file: file })
 }
 
 fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
@@ -531,6 +563,7 @@ pub fn verified_version_origins(
 
 /// Only the requested artifacts are selected; this is not an install plan or Candidate.
 pub fn prepare(cache:&Path, names:&[String],arch:&str)->Result<Manifest> {
+    let _cache_lease = acquire_cache_read_lease(cache)?;
     if names.is_empty() || names.len()>100 { bail!("must request 1..=100 packages"); }
     if arch.is_empty() || !arch.bytes().all(|b|b.is_ascii_alphanumeric()){bail!("unsafe architecture");}
     let names: BTreeSet<String>=names.iter().cloned().collect();
@@ -617,6 +650,7 @@ pub struct ExactManifest {
 pub fn prepare_exact(
     cache: &Path, steps: &[crate::install_plan::PlanStep], native_arch: &str,
 ) -> Result<ExactManifest> {
+    let _cache_lease = acquire_cache_read_lease(cache)?;
     if steps.len() > 5000 { bail!("plan exceeds 5000 packages"); }
     if native_arch.is_empty() || !native_arch.bytes().all(|b| b.is_ascii_alphanumeric()) {
         bail!("invalid native architecture");
@@ -727,6 +761,33 @@ pub fn prepare_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cooperative_read_leases_exclude_writer_until_last_reader_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(".rpt-update.lock");
+        fs::write(&lock_path, b"").unwrap();
+        let a = acquire_cache_read_lease(dir.path()).unwrap();
+        let b = acquire_cache_read_lease(dir.path()).unwrap();
+        let writer = fs::OpenOptions::new().read(true).write(true)
+            .open(&lock_path).unwrap();
+        assert!(FileExt::try_lock_exclusive(&writer).is_err());
+        drop(a);
+        assert!(FileExt::try_lock_exclusive(&writer).is_err());
+        drop(b);
+        FileExt::try_lock_exclusive(&writer).unwrap();
+        FileExt::unlock(&writer).unwrap();
+    }
+
+    #[test]
+    fn cooperative_cache_lease_rejects_missing_and_symlinked_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(acquire_cache_read_lease(dir.path()).is_err());
+        let destination = dir.path().join("destination");
+        fs::write(&destination, b"").unwrap();
+        std::os::unix::fs::symlink(&destination, dir.path().join(".rpt-update.lock")).unwrap();
+        assert!(acquire_cache_read_lease(dir.path()).is_err());
+    }
 
     #[test]
     fn signed_index_inventory_rejects_rogue_files_symlinks_and_duplicate_names() {

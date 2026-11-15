@@ -1566,6 +1566,8 @@ pub fn preview_explicit_architecture_with_policy(
     // cannot be a guessed recovery operation on a half-configured database.
     crate::dpkg_health::require_clean_file(status)
         .context("dpkg health preflight failed for foreign policy")?;
+    // Index publication is excluded until the entire signed policy solve ends.
+    let _cache_lease = crate::package_provenance::acquire_cache_read_lease(cache)?;
     // An old, cryptographically valid cache cannot authorize a repository
     // removed from the *current* signed APT source configuration.
     // This check also protects guest intent replays that call this planner.
@@ -2055,6 +2057,8 @@ pub fn preview_many_with_policy_options(
     // Guest execution later repeats the preflight on the guest status.
     crate::dpkg_health::require_clean_file(status)
         .context("dpkg health preflight failed for install policy")?;
+    // Hold the read lock through all candidate and dependency closure rounds.
+    let _cache_lease = crate::package_provenance::acquire_cache_read_lease(cache)?;
     // Fail closed on stale/disabled/changed repositories before reading any
     // candidate, independently of where this policy planner was invoked.
     // Native guest apply also re-runs this planner after status checks.
