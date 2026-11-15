@@ -22,6 +22,40 @@ pub struct JournalRecord {
     pub error: Option<String>,
 }
 
+/// Every on-disk record must have a well-formed identity and phase diagnostic.
+/// A forged "succeeded" record with an error, or a "failed" record without one,
+/// is not sufficient evidence to reopen the transaction queue.
+pub fn validate_record(record: &JournalRecord) -> Result<()> {
+    if record.id.is_empty() || record.id.len() > 128
+        || !record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        bail!("invalid transaction identifier");
+    }
+    match record.phase {
+        Phase::Failed | Phase::Interrupted => {
+            let Some(error) = record.error.as_deref() else {
+                bail!("failed or interrupted journal record requires diagnostic");
+            };
+            if error.trim().is_empty() || error.len() > 16 * 1024 {
+                bail!("invalid journal failure diagnostic");
+            }
+        }
+        Phase::Prepared | Phase::Running | Phase::Succeeded => {
+            if record.error.is_some() {
+                bail!("non-failed journal record cannot have diagnostic");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_directory(dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if !meta.file_type().is_dir() => bail!("journal must be a real directory"),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
 /// One cross-process writer at a time. Keep the lock file inode stable:
 /// deleting a locked file can permit a second process to lock a new inode.
 pub struct Journal {
@@ -31,6 +65,7 @@ pub struct Journal {
 
 impl Journal {
     pub fn open(dir: &Path) -> Result<Self> {
+        check_directory(dir)?;
         fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
         let lock = Self::open_lock(dir)?;
         lock.try_lock_exclusive().context("another RPT transaction owns the journal lock")?;
@@ -41,6 +76,7 @@ impl Journal {
     /// Advisory OS locks provide mutual exclusion, NOT strict FIFO fairness.
     /// Call from a blocking thread; use `wait_async` in Tokio applications.
     pub fn wait(dir: &Path) -> Result<Self> {
+        check_directory(dir)?;
         fs::create_dir_all(dir).with_context(|| format!("creating journal directory {}", dir.display()))?;
         let lock = Self::open_lock(dir)?;
         lock.lock_exclusive().context("waiting for RPT transaction lock")?;
@@ -84,8 +120,13 @@ impl Journal {
                     bail!("journal record is not a regular file {}; manual inspection required", path.display());
                 }
                 let bytes = fs::read(&path)?;
+                if bytes.len() > 64 * 1024 {
+                    bail!("journal record too large: {}", path.display());
+                }
                 let record: JournalRecord = serde_json::from_slice(&bytes)
                     .with_context(|| format!("invalid journal record {}", path.display()))?;
+                validate_record(&record)
+                    .with_context(|| format!("invalid journal semantics {}", path.display()))?;
                 if path.file_stem().and_then(|name| name.to_str()) != Some(record.id.as_str()) {
                     bail!("journal filename/identifier mismatch {}; manual inspection required", path.display());
                 }
@@ -101,17 +142,7 @@ impl Journal {
     /// The caller must hold this Journal's exclusive cross-process lock.
     /// A failed or interrupted transaction is terminal until operator recovery.
     pub fn advance(&self, record: &JournalRecord) -> Result<()> {
-        if record.id.is_empty()
-            || !record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            bail!("invalid transaction identifier");
-        }
-        if matches!(record.phase, Phase::Failed | Phase::Interrupted) && record.error.as_deref().is_none_or(str::is_empty) {
-            bail!("failed or interrupted transaction requires a diagnostic error");
-        }
-        if !matches!(record.phase, Phase::Failed | Phase::Interrupted) && record.error.is_some() {
-            bail!("only failed or interrupted transactions may contain an error");
-        }
+        validate_record(record)?;
         let path = self.dir.join(format!("{}.json", record.id));
         if let Ok(meta) = fs::symlink_metadata(&path) {
             if !meta.file_type().is_file() {
@@ -144,9 +175,7 @@ impl Journal {
     }
 
     pub fn write(&self, record: &JournalRecord) -> Result<()> {
-        if record.id.is_empty() || !record.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
-            bail!("invalid transaction identifier");
-        }
+        validate_record(record)?;
         let target = self.dir.join(format!("{}.json", record.id));
         if let Ok(meta) = fs::symlink_metadata(&target) {
             if !meta.file_type().is_file() {
@@ -371,6 +400,31 @@ mod tests {
         assert_eq!(fs::read_to_string(&outside).unwrap(), "untouched");
         fs::remove_dir_all(dir).unwrap();
         fs::remove_file(outside).unwrap();
+    }
+
+    #[test]
+    fn rejects_semantically_invalid_terminal_records_and_symlinked_journal_dir() {
+        for (name, body) in [
+            ("no-diagnostic", r#"{"id":"tx","phase":"failed","error":null}"#),
+            ("succeeded-with-error", r#"{"id":"tx","phase":"succeeded","error":"wrong"}"#),
+            ("blank-diagnostic", r#"{"id":"tx","phase":"interrupted","error":" "}"#),
+            ("invalid-id", r#"{"id":"../escape","phase":"succeeded","error":null}"#),
+        ] {
+            let dir = temp_dir();
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("tx.json"), body).unwrap();
+            assert!(Journal::open(&dir).is_err(), "unsafe terminal record {name}");
+            assert!(Journal::wait(&dir).is_err(), "unsafe terminal record {name}");
+            fs::remove_dir_all(dir).unwrap();
+        }
+        let real = temp_dir();
+        let link = temp_dir();
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(Journal::open(&link).is_err());
+        assert!(Journal::wait(&link).is_err());
+        fs::remove_file(link).unwrap();
+        fs::remove_dir_all(real).unwrap();
     }
 
     #[cfg(unix)]
