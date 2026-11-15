@@ -77,5 +77,20 @@ if "$rpt" plan-full-upgrade-scenario --status "$work/broken-status" \
     echo 'M21 explicit removals masked broken original dpkg state' >&2; exit 1
 fi
 grep -q 'dpkg health' "$work/refusal.txt"
+# M28: direct install policy is not an escape hatch around the same broken
+# dpkg status checked by apt-simulate and full-upgrade.
+if "$rpt" plan-install-batch-policy --status "$work/broken-status" \
+    --cache "$work/missing-signed-cache" --architecture amd64 installed \
+    >/dev/null 2>"$work/refusal.txt"; then
+    echo 'M28 signed native install accepted broken dpkg state' >&2; exit 1
+fi
+grep -q 'dpkg health' "$work/refusal.txt"
+if "$rpt" plan-install-foreign-policy --status "$work/broken-status" \
+    --cache "$work/missing-signed-cache" \
+    --native-architecture amd64 --foreign-architecture i386 installed:i386 \
+    >/dev/null 2>"$work/refusal.txt"; then
+    echo 'M28 signed foreign install accepted broken dpkg state' >&2; exit 1
+fi
+grep -q 'dpkg health' "$work/refusal.txt"
 test "$(sha256sum "$work/broken-status" | cut -d' ' -f1)" = "$before"
-echo 'PASS M20/M21 read-only dpkg audit, fail-closed simulated and direct signed upgrade planners'
+echo 'PASS M20/M21/M28 read-only dpkg audit and all direct signed install/upgrade preflights'

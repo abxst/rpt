@@ -1561,6 +1561,11 @@ pub fn preview_explicit_architecture_with_policy(
             bail!("invalid concrete preview architecture: {arch}");
         }
     }
+    // Installed package catalogs intentionally omit incomplete dpkg records.
+    // Reject them before foreign candidate discovery; package installation
+    // cannot be a guessed recovery operation on a half-configured database.
+    crate::dpkg_health::require_clean_file(status)
+        .context("dpkg health preflight failed for foreign policy")?;
     // An old, cryptographically valid cache cannot authorize a repository
     // removed from the *current* signed APT source configuration.
     // This check also protects guest intent replays that call this planner.
@@ -2045,6 +2050,11 @@ pub fn preview_many_with_policy_options(
     if max_packages == 0 || max_packages > 5000 {
         bail!("max_packages must be 1..=5000");
     }
+    // A direct signed install policy plan must not silently overlook half-
+    // installed, unpacked, trigger-pending or reinstreq dpkg records.
+    // Guest execution later repeats the preflight on the guest status.
+    crate::dpkg_health::require_clean_file(status)
+        .context("dpkg health preflight failed for install policy")?;
     // Fail closed on stale/disabled/changed repositories before reading any
     // candidate, independently of where this policy planner was invoked.
     // Native guest apply also re-runs this planner after status checks.
