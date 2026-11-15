@@ -25,10 +25,14 @@ jobs:
         run: cargo test --all-targets --locked
       - name: Validate optional Docker-free WSL smoke script syntax
         run: bash -n tests/wsl-native-rootfs-smoke.sh
-      - name: Validate M8 signed native-rootfs fault oracle syntax
+      - name: Validate M8-M12 oracle syntax and production qualification contract
         run: |
           bash -n tests/native-full-upgrade-chaos.sh
           bash -n tests/signed-plan-differential.sh
+          bash -n tests/version-corpus-differential.sh
+          bash -n tests/production-gate-contract.sh
+          python3 -m py_compile scripts/production-gate.py
+          bash tests/production-gate-contract.sh scripts/production-gate.py
       - name: Package driver discovery and fail-closed API tests
         run: |
           set -euo pipefail
@@ -55,6 +59,8 @@ jobs:
           EOF
           ./target/debug/rpt driver-info --os-release "$RUNNER_TEMP/rpt-fedora-os-release" | grep -q 'Driver: rpm'
           echo 'PASS package driver contracts and distro family discovery'
+      - name: M10 expanded Debian version ordering differential
+        run: bash tests/version-corpus-differential.sh ./target/debug/rpt
       - name: Debian version ordering differential against dpkg
         run: |
           set -euo pipefail
@@ -192,7 +198,7 @@ jobs:
           )
           mkdir -p "$root/etc/empty-sources"
           apt-get "${apt_opts[@]}" update
-          for priority in 999 1000 1001; do
+          for priority in 1 50 99 100 101 500 999 1000 1001 2000; do
             printf 'Package: rpt-fixture\nPin: version 1.0\nPin-Priority: %s\n' "$priority" > "$root/etc/preferences"
             apt-cache "${apt_opts[@]}" policy rpt-fixture > "$root/policy-$priority.txt"
             grep -Fxq '  Installed: 2.0' "$root/policy-$priority.txt"
