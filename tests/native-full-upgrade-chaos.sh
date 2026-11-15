@@ -64,6 +64,16 @@ for mode in prerm-failure sigterm-postinst sigkill-postinst; do
     sudo touch "$guest/etc/rpt-ci-hold-postinst"
   fi
   test ! -e "$guest/tmp/rpt-upgrade-postinst-running"
+  # M13: include two hardlinked guest files and a user xattr in every signed
+  # checkpoint. The v2 tree witness must preserve both during copy/restore.
+  sudo sh -c 'printf "M13 metadata identity\\n" > "$1"' sh \
+    "$guest/etc/rpt-ci-checkpoint-metadata-a"
+  sudo ln "$guest/etc/rpt-ci-checkpoint-metadata-a" \
+    "$guest/etc/rpt-ci-checkpoint-metadata-b"
+  sudo python3 - "$guest/etc/rpt-ci-checkpoint-metadata-a" <<'PY'
+import os, sys
+os.setxattr(sys.argv[1], "user.rpt.checkpoint", b"original")
+PY
 
   "$rpt" native-rootfs-prepare-full-upgrade \
     --rootfs "$guest" --cache "$cache" --apt-root "$apt_root" \
@@ -200,10 +210,63 @@ PY
   test "$(sudo dpkg-query --admindir="$restored/var/lib/dpkg" \
     -W '-f=${Status}|${Version}' rpt-sandbox-obsolete)" = 'install ok installed|1.0'
   test "$(sudo sha256sum "$guest/var/lib/dpkg/status" | cut -d' ' -f1)" = "$guest_after_fault"
+  sudo python3 - "$restored/etc/rpt-ci-checkpoint-metadata-a" \
+    "$restored/etc/rpt-ci-checkpoint-metadata-b" <<'PY'
+import os, sys
+a, b = sys.argv[1:]
+assert os.stat(a).st_ino == os.stat(b).st_ino
+assert os.stat(a).st_nlink == 2
+assert os.getxattr(a, "user.rpt.checkpoint") == b"original"
+assert open(a, "rb").read() == open(b, "rb").read()
+PY
   check_host
+  echo "PASS M13 $mode: metadata-preserving v2 checkpoint/restore and host unchanged"
   echo "PASS M8 $mode: $expected_phase journal, recovery review, sealed checkpoint, new clean guest, host unchanged"
 
-  if [[ "$mode" == sigkill-postinst ]]; then
+  if [[ "$mode" == prerm-failure ]]; then
+    # Change only the xattr, not the guest file bytes. Verification and a
+    # fresh restore must refuse the modified checkpoint before mutation.
+    sudo python3 - "$checkpoint/etc/rpt-ci-checkpoint-metadata-a" <<'PY'
+import os, sys
+os.setxattr(sys.argv[1], "user.rpt.checkpoint", b"tampered")
+PY
+    if sudo "$rpt" native-rootfs-snapshot-verify --receipt "$receipt" \
+        >"$work/native-chaos-xattr-verify.log" 2>&1; then
+      echo "M13 accepted xattr-tampered checkpoint" >&2; exit 1
+    fi
+    if sudo "$rpt" native-rootfs-snapshot-restore \
+        --receipt "$receipt" --new-rootfs "$work/native-chaos-xattr-new" \
+        >"$work/native-chaos-xattr-restore.log" 2>&1; then
+      echo "M13 restored xattr-tampered checkpoint" >&2; exit 1
+    fi
+    test ! -e "$work/native-chaos-xattr-new"
+    sudo python3 - "$checkpoint/etc/rpt-ci-checkpoint-metadata-a" <<'PY'
+import os, sys
+os.setxattr(sys.argv[1], "user.rpt.checkpoint", b"original")
+PY
+    sudo "$rpt" native-rootfs-snapshot-verify --receipt "$receipt" >/dev/null
+    echo 'PASS M13 metadata-only xattr tamper rejected; intact checkpoint reverified'
+  elif [[ "$mode" == sigterm-postinst ]]; then
+    # Break a hardlink without modifying either file's bytes; the other
+    # source inode loses one link while the new copy becomes independent.
+    sudo cp -a "$checkpoint/etc/rpt-ci-checkpoint-metadata-a" \
+      "$checkpoint/etc/rpt-ci-checkpoint-metadata-detached"
+    sudo mv -f "$checkpoint/etc/rpt-ci-checkpoint-metadata-detached" \
+      "$checkpoint/etc/rpt-ci-checkpoint-metadata-b"
+    sudo cmp -s "$checkpoint/etc/rpt-ci-checkpoint-metadata-a" \
+      "$checkpoint/etc/rpt-ci-checkpoint-metadata-b"
+    if sudo "$rpt" native-rootfs-snapshot-verify --receipt "$receipt" \
+        >"$work/native-chaos-link-verify.log" 2>&1; then
+      echo "M13 accepted a broken hardlink group" >&2; exit 1
+    fi
+    if sudo "$rpt" native-rootfs-snapshot-restore \
+        --receipt "$receipt" --new-rootfs "$work/native-chaos-link-new" \
+        >"$work/native-chaos-link-restore.log" 2>&1; then
+      echo "M13 restored a broken hardlink group" >&2; exit 1
+    fi
+    test ! -e "$work/native-chaos-link-new"
+    echo 'PASS M13 hardlink-topology tamper rejected without new guest'
+  elif [[ "$mode" == sigkill-postinst ]]; then
     # A mutable snapshot is NOT trustworthy: refuse both verification and
     # restore after a single-byte change. Never heal the evidence in place.
     sudo sh -c 'printf "\nM8-corruption\n" >> "$1"' \
