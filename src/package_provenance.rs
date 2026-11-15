@@ -118,7 +118,9 @@ fn validate_repo(dir: &Path, meta: &RepositoryProvenance) -> Result<()> {
 pub struct CacheAuditRepository {
     pub uri: String,
     pub suite: String,
+    pub keyring: String,
     pub signed_indexes: usize,
+    pub signed_index_paths: Vec<String>,
     pub inrelease_sha256: String,
 }
 
@@ -128,6 +130,7 @@ pub struct CacheAudit {
     pub verified_repositories: usize,
     pub verified_indexes: usize,
     pub repositories: Vec<CacheAuditRepository>,
+    pub source_set_bound: bool,
     pub offline: bool,
     pub read_only: bool,
     pub host_execution_allowed: bool,
@@ -197,7 +200,9 @@ pub fn audit_cache(root: &Path) -> Result<CacheAudit> {
         reports.push(CacheAuditRepository {
             uri: meta.uri,
             suite: meta.suite,
+            keyring: meta.keyring,
             signed_indexes: meta.indexes.len(),
+            signed_index_paths: meta.indexes.iter().map(|x| x.release_path.clone()).collect(),
             inrelease_sha256: hex::encode(Sha256::digest(&inrelease)),
         });
     }
@@ -206,11 +211,62 @@ pub fn audit_cache(root: &Path) -> Result<CacheAudit> {
         verified_repositories: reports.len(),
         verified_indexes: total_indexes,
         repositories: reports,
+        source_set_bound: false,
         offline: true,
         read_only: true,
         host_execution_allowed: false,
         warning: "Signature and cache-byte validation are point-in-time only; no host execution or APT parity is authorized.",
     })
+}
+
+/// Optional strict current-source binding. A signed cached repository that was
+/// removed or disabled in current apt sources must not pass this read-only
+/// qualification check. This does not yet automatically filter other callers'
+/// candidate selection; it is an operator/audit gate, not production safety.
+pub fn audit_configured_cache(cache: &Path, apt_root: &Path) -> Result<CacheAudit> {
+    let mut audit = audit_cache(cache)?;
+    let configured = crate::update::parse_sources(apt_root)?;
+    if configured.is_empty() {
+        bail!("no enabled signed APT sources; cached indexes cannot be trusted as the current source set");
+    }
+    if configured.len() > MAX_AUDIT_REPOSITORIES {
+        bail!("configured source count exceeds audit limit");
+    }
+    let mut sources = BTreeMap::new();
+    for repo in configured {
+        let key = (repo.uri.clone(), repo.suite.clone());
+        if sources.insert(key, repo).is_some() {
+            bail!("duplicate configured repository identity");
+        }
+    }
+    if audit.repositories.len() != sources.len() {
+        bail!("cached repository set differs from currently enabled signed sources");
+    }
+    for repo in &audit.repositories {
+        let source = sources.get(&(repo.uri.clone(), repo.suite.clone()))
+            .with_context(|| format!("cached repository is no longer configured: {} {}",
+                repo.uri, repo.suite))?;
+        if source.keyring.to_string_lossy() != repo.keyring {
+            bail!("cache Signed-By keyring differs from currently configured source");
+        }
+        for path in &repo.signed_index_paths {
+            let parts = path.split('/').collect::<Vec<_>>();
+            if parts.len() != 3 || !source.components.iter().any(|s| s == parts[0])
+                || !matches!(parts[2], "Packages" | "Packages.gz" | "Packages.xz")
+            {
+                bail!("cached index is not within a configured source component");
+            }
+            let architecture = parts[1].strip_prefix("binary-")
+                .context("malformed signed Packages index architecture")?;
+            if let Some(allowed) = &source.architectures {
+                if !allowed.iter().any(|s| s == architecture) {
+                    bail!("cached index architecture excluded by current signed source");
+                }
+            }
+        }
+    }
+    audit.source_set_bound = true;
+    Ok(audit)
 }
 
 fn scan(
