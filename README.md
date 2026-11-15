@@ -79,10 +79,18 @@ with Debian/Ubuntu APT; the engine itself does not depend on libapt-pkg.
   reverse-dependency blockers, unchanged input-state SHA-256 and no host
   execution permissions. This is partial compatibility only. See
   [M16 operation simulations](docs/m16-apt-operation-simulations.md).
-- **M19 validated APT source architecture filters**: `sources-validate`
-  CLI, strict Signed-By + trust flags in legacy/Deb822 sources, architecture-
-  scoped index selection and conflicts/symlink refusal; no network or host
-  package changes in inspection. See [M19 sources](docs/m19-apt-sources-validation.md).
+- **M17 bounded apt.conf syntax**: flat and nested APT::Default-Release
+  scopes with comments, strict fail-closed unsupported policy, and
+  `apt-config-inspect` JSON; see
+  [M17 apt.conf parser](docs/m17-apt-conf-parser.md).
+- **M18 explicitly owned RPT artifact cache**: `artifact-cache-init` and
+  preview-by-default `artifact-cache-clean --apply`, with cooperative
+  downloader lock, bounded symlink/hardlink validation and host APT
+  directories excluded; see [M18 cache lifecycle](docs/m18-managed-artifact-cache.md).
+- **M19 signed source configuration subset**: `sources-validate`
+  for strict legacy/Deb822 Signed-By, Trusted, architecture filters,
+  index scoping and conflicting/symlinked source refusal. See
+  [M19 source validation](docs/m19-apt-sources-validation.md).
 - Read-only dependency plans: native, joint roots, policy-bound candidates,
   ordered alternatives, virtual-provider subsets, removals/autoremove
   previews, and a **partial foreign Multi-Arch planner**.

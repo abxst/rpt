@@ -107,6 +107,12 @@ enum Command {
         #[arg(long, default_value = "amd64")]
         architecture: String,
     },
+    /// Parse an exact, bounded subset of flat and nested apt.conf settings.
+    /// Unknown semantics, includes and path indirection are rejected.
+    AptConfigInspect {
+        #[arg(long, default_value = "/etc/apt")]
+        apt_root: PathBuf,
+    },
     /// Inspect APT preferences records (read-only; DOES NOT evaluate pin policy).
     PreferencesInspect {
         #[arg(long, default_value = "/etc/apt")]
@@ -717,6 +723,17 @@ enum Command {
         #[arg(long)] reason: String,
         #[arg(long)] evidence: String,
     },
+    /// Initialize an empty, explicitly owned RPT package archive cache.
+    /// Never adopts an existing populated directory or host APT archives.
+    ArtifactCacheInit {
+        #[arg(long, default_value = "./rpt-artifacts")] root: PathBuf,
+    },
+    /// Read-only preview by default; explicit --apply removes ONLY
+    /// managed .deb archives and leftover partial downloads.
+    ArtifactCacheClean {
+        #[arg(long, default_value = "./rpt-artifacts")] root: PathBuf,
+        #[arg(long, default_value_t = false)] apply: bool,
+    },
     /// Concurrently download a verified JSON package manifest.
     Fetch {
         #[arg(long)]
@@ -788,6 +805,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 })),
             }
         }
+        Command::ArtifactCacheInit { root } => {
+            let report = rpt::artifact_cache::initialize(&root)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::ArtifactCacheClean { root, apply } => {
+            let report = rpt::artifact_cache::clean(&root, apply)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::DriverInfo { driver, os_release } => {
             let kind = match driver {
                 Some(value) => DriverKind::from_str(&value)?,
@@ -800,6 +827,18 @@ async fn execute(cli: Cli) -> Result<()> {
             println!("Version comparison: {}", if kind == DriverKind::Deb { "implemented" } else { "not implemented" });
             println!("Read-only package query: {}", if kind == DriverKind::Deb { "partial" } else { "not implemented" });
             println!("Package transactions: NOT IMPLEMENTED");
+        }
+        Command::AptConfigInspect { apt_root } => {
+            let release = rpt::policy::read_default_release(&apt_root)
+                .context(ErrorCategory::System)?;
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "default_release": release,
+                "supported_configuration_subset": true,
+                "apt_parity_verified": false,
+                "host_execution_allowed": false,
+                "warning": "Strict subset parser: unsupported settings/includes are rejected, not ignored.",
+            }))?);
         }
         Command::VerifiedOrigins { cache, package, architecture } => {
             for entry in rpt::package_provenance::verified_version_origins(&cache, &package, &architecture)? {

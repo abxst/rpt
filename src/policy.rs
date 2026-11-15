@@ -39,28 +39,15 @@ pub fn ensure_no_custom_policy(apt_root: &Path) -> Result<()> {
 /// Reject config indirection and target-release options while allowing the
 /// separate read-only preference parser to inspect pin records.
 pub fn ensure_supported_apt_configuration(apt_root: &Path) -> Result<()> {
-    if std::env::var_os("APT_CONFIG").is_some() {
-        bail!("APT_CONFIG override detected; pin inspection is unsupported");
-    }
-    let conf = apt_root.join("apt.conf");
-    if conf.is_file() && declares_unsupported_policy_config(&conf)? {
-        bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", conf.display());
-    }
-    let conf_dir = apt_root.join("apt.conf.d");
-    if conf_dir.exists() {
-        for ent in fs::read_dir(&conf_dir).with_context(|| format!("reading {}", conf_dir.display()))? {
-            let path = ent?.path();
-            if path.is_file() && declares_unsupported_policy_config(&path)? {
-                bail!("APT policy configuration unsupported in {}; candidate preview is unsupported", path.display());
-            }
-        }
+    if read_default_release(apt_root)?.is_some() {
+        bail!("APT target release is custom; default candidate preview does not support it");
     }
     Ok(())
 }
 
-/// Inspect an intentionally narrow APT configuration subset for read-only
-/// candidate diagnostics. Unknown active statements fail closed: they can
-/// change policy semantics, including hidden config/includes.
+/// Parse APT's flat and nested Default-Release forms from ordered config
+/// fragments. Reject unknown settings/includes and duplicate declarations
+/// instead of silently selecting candidates under different policy inputs.
 pub fn read_default_release(apt_root: &Path) -> Result<Option<String>> {
     if std::env::var_os("APT_CONFIG").is_some() {
         bail!("APT_CONFIG override detected; target release inspection unsupported");
@@ -73,32 +60,20 @@ pub fn read_default_release(apt_root: &Path) -> Result<Option<String>> {
         entries.sort();
         paths.extend(entries);
     }
-    let mut target: Option<String> = None;
+    let mut target = None;
     for path in paths {
-        if !path.exists() { continue; }
-        if !path.is_file() { bail!("unsupported APT configuration entry: {}", path.display()); }
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+            Ok(meta) if !meta.file_type().is_file() || meta.len() > 1024 * 1024 =>
+                bail!("APT config must be real regular file <=1 MiB: {}", path.display()),
+            Ok(_) => {}
+        }
         let data = fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        for line in data.lines() {
-            let line = line.trim();
-            if line.to_ascii_lowercase().starts_with("#include") {
-                bail!("APT configuration includes are unsupported: {}", path.display());
-            }
-            if line.is_empty() || line.starts_with("//") || line.starts_with('#') { continue; }
-            let value = line.strip_prefix("APT::Default-Release ")
-                .and_then(|v| v.strip_suffix(';'))
-                .map(str::trim)
-                .and_then(|v| v.strip_prefix('"'))
-                .and_then(|v| v.strip_suffix('"'))
-                .filter(|v| !v.is_empty() && v.len() <= 128
-                    && v.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b)));
-            let Some(value) = value else {
-                bail!("unsupported APT policy config statement in {}: {}", path.display(), line);
-            };
-            if target.is_some() {
-                bail!("multiple APT::Default-Release declarations are unsupported");
-            }
-            target = Some(value.to_owned());
+        if let Some(value) = crate::apt_config_subset::target_release(&data)? {
+            if target.is_some() { bail!("multiple APT::Default-Release declarations are unsupported"); }
+            target = Some(value);
         }
     }
     Ok(target)
@@ -111,56 +86,6 @@ fn active_lines(path: &Path) -> Result<bool> {
             let trim = line.trim();
             !trim.is_empty() && !trim.starts_with('#')
         }))
-}
-
-/// Fail closed for APT settings that can change the default candidate or hide
-/// policy inputs elsewhere. Full apt.conf parsing and include resolution are
-/// intentionally outside the current read-only policy preview.
-fn declares_unsupported_policy_config(path: &Path) -> Result<bool> {
-    let config = fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let mut in_block_comment = false;
-    for raw_line in config.lines() {
-        let mut body = String::new();
-        let mut remaining = raw_line;
-        loop {
-            if in_block_comment {
-                if let Some(end) = remaining.find("*/") {
-                    remaining = &remaining[end + 2..];
-                    in_block_comment = false;
-                } else {
-                    break;
-                }
-            } else {
-                let block = remaining.find("/*");
-                let line_comment = remaining.find("//");
-                match (block, line_comment) {
-                    (_, Some(line)) if block.is_none_or(|start| line < start) => {
-                        body.push_str(&remaining[..line]);
-                        break;
-                    }
-                    (Some(start), _) => {
-                        body.push_str(&remaining[..start]);
-                        remaining = &remaining[start + 2..];
-                        in_block_comment = true;
-                    }
-                    (None, _) => {
-                        body.push_str(remaining);
-                        break;
-                    }
-                }
-            }
-        }
-        let body = body.trim().to_ascii_lowercase();
-        if body.starts_with("#include")
-            || body.contains("default-release")
-            || body.contains("target-release")
-            || body.contains("dir::etc")
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Default-priority preview; installed versions newer than repository versions

@@ -68,4 +68,4 @@ jobs:
           gh release create "$TAG" dist/rpt-linux-amd64.tar.gz dist/SHA256SUMS \
             dist/PRODUCTION-QUALIFICATION.json \
             --title "RPT $TAG — experimental package engine (guest only)" --prerelease \
-            --notes "Experimental signed metadata, read-only APT-like simulation and disposable guest transactions. M16 operation simulations, M17 apt.conf parser, M18 own-cache cleanup, M19 verified source syntax and architecture-filtered index download. APT parity and RPT guest power-loss recovery remain unverified. Live host dpkg and APT replacement remain BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."
+            --notes "Experimental signed metadata, read-only APT-like simulation and disposable guest transactions. M16 read-only operation simulations, M17 apt.conf parser, M18 own-cache lifecycle and M19 signed source syntax with architecture-scoped verified indexes. Not complete APT resolver/lifecycle parity or production host authorization. Live host dpkg and APT replacement remain BLOCKED; see attached PRODUCTION-QUALIFICATION.json. No stable or production claims."
