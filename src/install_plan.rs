@@ -1564,7 +1564,7 @@ pub fn preview_explicit_architecture_with_policy(
     // Installed package catalogs intentionally omit incomplete dpkg records.
     // Reject them before foreign candidate discovery; package installation
     // cannot be a guessed recovery operation on a half-configured database.
-    crate::dpkg_health::require_clean_file(status)
+    let dpkg_status_digest = crate::dpkg_health::clean_status_digest(status)
         .context("dpkg health preflight failed for foreign policy")?;
     // Index publication is excluded until the entire signed policy solve ends.
     let _cache_lease = crate::package_provenance::acquire_cache_read_lease(cache)?;
@@ -1796,6 +1796,7 @@ pub fn preview_explicit_architecture_with_policy(
                 bail!("foreign dependency was not policy-validated");
             }
         }
+        crate::dpkg_health::verify_unchanged_clean_file(status, &dpkg_status_digest)?;
         return Ok(plan);
     }
     bail!("foreign policy dependency closure did not converge in 16 rounds")
@@ -2055,7 +2056,7 @@ pub fn preview_many_with_policy_options(
     // A direct signed install policy plan must not silently overlook half-
     // installed, unpacked, trigger-pending or reinstreq dpkg records.
     // Guest execution later repeats the preflight on the guest status.
-    crate::dpkg_health::require_clean_file(status)
+    let dpkg_status_digest = crate::dpkg_health::clean_status_digest(status)
         .context("dpkg health preflight failed for install policy")?;
     // Hold the read lock through all candidate and dependency closure rounds.
     let _cache_lease = crate::package_provenance::acquire_cache_read_lease(cache)?;
@@ -2267,6 +2268,7 @@ pub fn preview_many_with_policy_options(
             })?;
             // Foreign identity compatibility is checked with installed dpkg Multi-Arch metadata below.
             reject_foreign_negative_relations(&catalog, &complete_relations, &plan, architecture)?;
+            crate::dpkg_health::verify_unchanged_clean_file(status, &dpkg_status_digest)?;
             return Ok(plan);
         }
     }

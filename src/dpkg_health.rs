@@ -183,13 +183,29 @@ pub fn require_clean_snapshot(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn require_clean_file(path: &Path) -> Result<()> {
+/// Hash a healthy, bounded, regular dpkg status snapshot without changing it.
+pub fn clean_status_digest(path: &Path) -> Result<String> {
     let report = inspect(path)?;
     if !report.healthy {
         bail!("dpkg health audit reports {} incomplete or inconsistent package(s); recover the guest first",
             report.issues.len());
     }
+    Ok(report.status_sha256)
+}
+
+/// Final TOCTOU preflight for read-only policy planners that might otherwise
+/// return a candidate derived from a different dpkg inventory after a
+/// concurrent writer changes /var/lib/dpkg/status during resolution.
+pub fn verify_unchanged_clean_file(path: &Path, expected_digest: &str) -> Result<()> {
+    let actual = clean_status_digest(path)?;
+    if actual != expected_digest {
+        bail!("dpkg status changed while building signed package plan; discard stale candidate");
+    }
     Ok(())
+}
+
+pub fn require_clean_file(path: &Path) -> Result<()> {
+    clean_status_digest(path).map(|_| ())
 }
 
 #[cfg(test)]
@@ -223,6 +239,21 @@ mod tests {
         assert!(inspect_snapshot(b"Package: a\nVersion: 1\nArchitecture: amd64\nStatus: install ok mystery\n\n").is_err());
         assert!(inspect_snapshot(b"Package: a\nVersion: 1\nStatus: install ok installed\n\n").is_err());
     }
+    #[test]
+    fn rejects_concurrently_changed_status_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status");
+        let clean_v1 = b"Package: testpkg\nVersion: 1\nArchitecture: amd64\nStatus: install ok installed\n\n";
+        let clean_v2 = b"Package: testpkg\nVersion: 2\nArchitecture: amd64\nStatus: install ok installed\n\n";
+        fs::write(&path, clean_v1).unwrap();
+        let original_digest = clean_status_digest(&path).unwrap();
+        verify_unchanged_clean_file(&path, &original_digest).unwrap();
+        fs::write(&path, clean_v2).unwrap();
+        assert!(verify_unchanged_clean_file(&path, &original_digest).is_err());
+        fs::write(&path, b"Package: testpkg\nVersion: 2\nArchitecture: amd64\nStatus: install ok half-configured\n\n").unwrap();
+        assert!(verify_unchanged_clean_file(&path, &original_digest).is_err());
+    }
+
     #[test]
     fn rejects_symlink_without_mutating_target() {
         let temp = tempfile::tempdir().unwrap();
